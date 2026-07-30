@@ -90,9 +90,11 @@ def parse_uart_telemetry_frame(frame: bytes):
     if frame_num == 3:
         # A-board UART8 IMU. Angular velocity is
         # centi-degrees/s; acceleration is milli-g.  values[6] is a validity
-        # flag, so stale UART8 values are not presented as fresh sensor data.
+        # flag. values[7] is reserved for the source sample counter so the ROS
+        # bridge can reject a periodically retransmitted sample.
         return {
             "uart8_imu_valid": bool(values[6]),
+            "uart8_imu_sample_id": int(values[7]) & 0xFFFF,
             "gyro_x_dps": values[0] / 100.0,
             "gyro_y_dps": values[1] / 100.0,
             "gyro_z_dps": values[2] / 100.0,

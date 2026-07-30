@@ -15,6 +15,7 @@ import rclpy
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
+from sensor_msgs.msg import Imu
 from std_msgs.msg import Float32
 
 from eup_interfaces.msg import BodyState
@@ -54,6 +55,8 @@ class SensorFusionNode(Node):
         self.declare_parameter("fused_odometry_topic", "/localization/fused_odom")
         self.declare_parameter("zed_odometry_topic", "/localization/zed_odom")
         self.declare_parameter("zed_odometry_max_age_s", 0.35)
+        self.declare_parameter("external_imu_topic", "/sensors/external_imu")
+        self.declare_parameter("external_imu_max_age_s", 0.20)
         # This is an operator-status comparison. The alignment node owns the
         # authoritative correction gate.
         self.declare_parameter("tag_vio_disagreement_m", 0.50)
@@ -63,6 +66,7 @@ class SensorFusionNode(Node):
         self.localization_pose: PoseWithCovarianceStamped | None = None
         self.localization_arrival_ns = 0
         self.zed_odometry_arrival_ns = 0
+        self.external_imu_arrival_ns = 0
         self.last_status_warning = ""
 
         self.body_state_topic = str(self.get_parameter("body_state_topic").value)
@@ -90,6 +94,9 @@ class SensorFusionNode(Node):
         self.create_subscription(Odometry, self.fused_odometry_topic, self.on_fused_odometry, 20)
         if self.zed_odometry_topic:
             self.create_subscription(Odometry, self.zed_odometry_topic, self.on_zed_odometry, 20)
+        external_imu_topic = str(self.get_parameter("external_imu_topic").value)
+        if external_imu_topic:
+            self.create_subscription(Imu, external_imu_topic, self.on_external_imu, 50)
 
         depth_topic = str(self.get_parameter("depth_input_topic").value)
         if depth_topic:
@@ -126,6 +133,15 @@ class SensorFusionNode(Node):
         if all(finite(value) for value in values):
             self.zed_odometry_arrival_ns = self.get_clock().now().nanoseconds
 
+    def on_external_imu(self, msg: Imu):
+        values = (
+            msg.angular_velocity.x,
+            msg.angular_velocity.y,
+            msg.angular_velocity.z,
+        )
+        if all(finite(value) for value in values):
+            self.external_imu_arrival_ns = self.get_clock().now().nanoseconds
+
     def on_fused_odometry(self, odometry: Odometry):
         """Publish the map-aligned VIO estimate without raw Tag replacement."""
 
@@ -133,6 +149,12 @@ class SensorFusionNode(Node):
             return
 
         body = self.make_body_state_from_fused_odometry(odometry)
+        # robot_localization can continue predicting at 60 Hz after an input
+        # stops. Keep the output cadence, but never label predicted/stale VIO
+        # velocity as a fresh measured velocity.
+        body.linear_velocity_valid = (
+            body.linear_velocity_valid and self.zed_odometry_is_fresh()
+        )
         tag = self.fresh_localization_pose()
         tag_consistent = tag is not None and self.tag_matches_ekf(body, tag)
         tag_rejected = tag is not None and not tag_consistent
@@ -207,11 +229,27 @@ class SensorFusionNode(Node):
 
     def localization_source(self, *, tag_accepted: bool, tag_rejected: bool) -> str:
         vio_available = self.zed_odometry_is_fresh()
+        imu_available = self.external_imu_is_fresh()
+        suffix = "+External IMU" if imu_available else ""
         if tag_accepted:
-            return "Tag+ZED VIO" if vio_available else "Tag"
+            return f"Tag+ZED VIO{suffix}" if vio_available else f"Tag{suffix}"
         if vio_available:
-            return "ZED VIO (Tag rejected)" if tag_rejected else "ZED VIO"
-        return "ZED VIO (Tag rejected)" if tag_rejected else "ZED VIO"
+            source = f"ZED VIO{suffix}"
+            return f"{source} (Tag rejected)" if tag_rejected else source
+        source = "External IMU" if imu_available else "localization unavailable"
+        return f"{source} (Tag rejected)" if tag_rejected else source
+
+    def external_imu_is_fresh(self) -> bool:
+        if self.external_imu_arrival_ns <= 0:
+            return False
+        maximum_age_ns = int(
+            max(0.0, float(self.get_parameter("external_imu_max_age_s").value)) * 1e9
+        )
+        return (
+            maximum_age_ns <= 0
+            or self.get_clock().now().nanoseconds - self.external_imu_arrival_ns
+            <= maximum_age_ns
+        )
 
     def fresh_localization_pose(self) -> PoseWithCovarianceStamped | None:
         if self.localization_pose is None:

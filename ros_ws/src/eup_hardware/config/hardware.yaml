@@ -10,4 +10,5 @@ aboard:
   pwm_neutral_us: 1500
   pwm_span_us: 100
   heartbeat_timeout_ms: 250
+  command_timeout_ms: 150
   packet_magic: 0x45555031

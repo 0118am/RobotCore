@@ -8,6 +8,8 @@ sensor_fusion:
   fused_odometry_topic: /localization/fused_odom
   zed_odometry_topic: /localization/zed_odom
   zed_odometry_max_age_s: 0.35
+  external_imu_topic: /sensors/external_imu
+  external_imu_max_age_s: 0.20
   tag_vio_disagreement_m: 0.50
 
 vehicle_frames:
@@ -32,6 +34,8 @@ apriltag_localization:
   minimum_pose_tag_count: 3
   minimum_inlier_corners_per_tag: 3
   degraded_pose_topic: /localization/apriltag_pose_degraded
+  # Used only to validate degraded two-tag observations against the canonical
+  # fixed-rate estimate. Tag/VIO alignment itself publishes aligned_vio_odom.
   aligned_vio_odometry_topic: /localization/fused_odom
   enable_degraded_two_tag_pose: true
   degraded_two_tag_inlier_corners_per_tag: 4

@@ -21,7 +21,7 @@ class TrackingMonitorNode(Node):
     def __init__(self):
         super().__init__("tracking_monitor_node")
         self.declare_parameter("publish_rate_hz", 20.0)
-        self.declare_parameter("max_input_age_s", 2.0)
+        self.declare_parameter("max_input_age_s", 0.15)
 
         self.last_body: BodyState | None = None
         self.last_body_ns: int | None = None
@@ -59,7 +59,16 @@ class TrackingMonitorNode(Node):
 
         now = self.get_clock().now()
         now_ns = now.nanoseconds
-        valid = self.inputs_are_fresh(now_ns) and self.last_body.state_valid and self.last_target.valid
+        localization_valid = self.last_body.state_valid or (
+            self.last_body.position_estimated
+            and str(self.last_body.localization_source).startswith("ZED VIO")
+        )
+        valid = (
+            self.inputs_are_fresh(now_ns)
+            and localization_valid
+            and self.last_body.linear_velocity_valid
+            and self.last_target.valid
+        )
 
         body = self.last_body
         target = self.last_target
@@ -103,6 +112,30 @@ class TrackingMonitorNode(Node):
             ),
         )
         actual_acceleration_body = self.estimate_actual_acceleration(actual_velocity_body, now_ns)
+        position_error_world = tuple(
+            target_pos[index] - actual_pos[index] for index in range(3)
+        )
+        position_error_body = self.quat_apply_wxyz(world_to_body, position_error_world)
+        target_angular_velocity_body = self.quat_apply_wxyz(
+            world_to_body,
+            (
+                float(target.target_twist.angular.x),
+                float(target.target_twist.angular.y),
+                float(target.target_twist.angular.z),
+            ),
+        )
+        actual_angular_velocity_body = (
+            float(body.twist.angular.x),
+            float(body.twist.angular.y),
+            float(body.twist.angular.z),
+        )
+        target_quat_w = (
+            float(target.target_pose.orientation.w),
+            float(target.target_pose.orientation.x),
+            float(target.target_pose.orientation.y),
+            float(target.target_pose.orientation.z),
+        )
+        orientation_error_body = self.quaternion_error_body(root_quat_w, target_quat_w)
 
         status = TrackingStatus()
         status.header.stamp = now.to_msg()
@@ -112,15 +145,26 @@ class TrackingMonitorNode(Node):
         status.time_s = float(target.time_s)
         status.target_position.x, status.target_position.y, status.target_position.z = target_pos
         status.actual_position.x, status.actual_position.y, status.actual_position.z = actual_pos
+        status.target_orientation = target.target_pose.orientation
+        status.actual_orientation = body.pose.orientation
         self.assign_vector(status.target_velocity_body, target_velocity_body)
         self.assign_vector(status.actual_velocity_body, actual_velocity_body)
         self.assign_vector(status.target_acceleration_body, target_acceleration_body)
         self.assign_vector(status.actual_acceleration_body, actual_acceleration_body)
-        status.position_error_m = self.vector_norm(
-            [target_pos[index] - actual_pos[index] for index in range(3)]
-        )
+        self.assign_vector(status.target_angular_velocity_body, target_angular_velocity_body)
+        self.assign_vector(status.actual_angular_velocity_body, actual_angular_velocity_body)
+        self.assign_vector(status.position_error_body, position_error_body)
+        self.assign_vector(status.orientation_error_body, orientation_error_body)
+        status.position_error_m = self.vector_norm(position_error_world)
+        status.orientation_error_rad = self.vector_norm(orientation_error_body)
         status.velocity_error_mps = self.vector_norm(
             [target_velocity_body[index] - actual_velocity_body[index] for index in range(3)]
+        )
+        status.angular_velocity_error_rps = self.vector_norm(
+            [
+                target_angular_velocity_body[index] - actual_angular_velocity_body[index]
+                for index in range(3)
+            ]
         )
         status.speed_mps = self.vector_norm(actual_velocity_body)
         status.acceleration_mps2 = self.vector_norm(actual_acceleration_body)
@@ -189,15 +233,46 @@ class TrackingMonitorNode(Node):
             vz + w * tz + (x * ty - y * tx),
         )
 
+    @classmethod
+    def quaternion_error_body(cls, current, target):
+        """Shortest target orientation error as a body-frame rotation vector."""
+
+        current_conjugate = cls.quat_conjugate_wxyz(current)
+        cw, cx, cy, cz = current_conjugate
+        tw, tx, ty, tz = (float(value) for value in target)
+        relative = (
+            cw * tw - cx * tx - cy * ty - cz * tz,
+            cw * tx + cx * tw + cy * tz - cz * ty,
+            cw * ty - cx * tz + cy * tw + cz * tx,
+            cw * tz + cx * ty - cy * tx + cz * tw,
+        )
+        norm = math.sqrt(sum(value * value for value in relative))
+        if norm <= 1e-9:
+            return (0.0, 0.0, 0.0)
+        relative = tuple(value / norm for value in relative)
+        if relative[0] < 0.0:
+            relative = tuple(-value for value in relative)
+        vector_norm = math.sqrt(sum(value * value for value in relative[1:]))
+        if vector_norm <= 1e-10:
+            return tuple(2.0 * value for value in relative[1:])
+        angle = 2.0 * math.atan2(vector_norm, max(0.0, relative[0]))
+        return tuple(value * angle / vector_norm for value in relative[1:])
+
 
 def main(args=None):
     rclpy.init(args=args)
     node = TrackingMonitorNode()
     try:
         rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    except Exception:
+        if rclpy.ok():
+            raise
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

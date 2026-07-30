@@ -1,0 +1,20 @@
+imu_conditioning:
+  ros__parameters:
+    input_topic: /hardware/aboard_imu_raw
+    output_topic: /sensors/external_imu
+    status_topic: /localization/external_imu_ready
+    auto_start: true
+    calibration_sample_count: 200
+    minimum_sample_interval_s: 0.01
+    maximum_sample_gap_s: 0.20
+    stationary_gyro_limit_rps: 0.04
+    stationary_acceleration_tolerance_mps2: 1.0
+    gyro_noise_floor_rps: 0.01
+
+vehicle_frames:
+  ros__parameters:
+    # Translation came from the earlier tank installation record. Rotation is
+    # intentionally explicit and must be confirmed with a physical FLU axis
+    # test before the external gyro is trusted for closed-loop control.
+    base_to_imu_translation_m: [0.018, 0.0, 0.076]
+    base_to_imu_rpy_rad: [0.0, 0.0, 0.0]

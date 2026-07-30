@@ -24,13 +24,72 @@ RoboMaster Aboard candidate:
 The IMU is wired to the A-board's UART8. Jetson does not access that UART
 directly and must not run a USB/CH340 IMU driver. The A-board samples UART8 and
 forwards its values in the `FF F8` telemetry stream carried over the shared
-A-board UART6/USB link. The bridge can validate its freshness and decode the
-values, but the edge localisation graph does not publish or consume this IMU.
+A-board UART6/USB link. Frame 3 contains three-axis gyro, three-axis
+acceleration, and a validity flag. The bridge publishes only valid samples as
+`/hardware/aboard_imu_raw`; invalid or stale values are not fabricated into a
+60 Hz stream.
 
-UART8 telemetry contains gyro and acceleration, but no attitude estimate. ZED
-VIO is the sole inertial localisation source: its SDK fuses the camera IMU
-internally before publishing visual-inertial odometry. AprilTag supplies the
-map-frame correction; the A-board IMU must not be added as a second EKF input.
+The conditioning node performs a stationary gyro-bias calibration and then
+publishes `/sensors/external_imu`. UART8 telemetry has no attitude estimate.
+Until the physical IMU axes and mounting rotation have been verified, only its
+calibrated angular velocity is fused. Raw acceleration retains gravity and is
+explicitly excluded from position and velocity estimation.
+
+The 60 Hz state chain is:
+
+```text
+AprilTag absolute map pose
+             + ZED VIO pose and linear velocity
+             -> /localization/aligned_vio_odom
+             + calibrated UART8 angular velocity
+             -> 60 Hz /localization/fused_odom
+             -> 60 Hz /robot/body_state
+```
+
+ZED X Mini is configured to grab/VIO at 60 Hz, publish images for AprilTag at
+30 Hz, and publish its internal 200 Hz IMU for diagnostics/HUD. The external
+UART8 gyro is independent of the ZED's internally fused camera IMU.
+
+### 2026-07-30 UART8 baseline
+
+A read-only probe of the connected A-board at 115200 baud observed frame-3
+telemetry at approximately 19.3 Hz with `uart8_imu_valid == false` and all
+eight payload values equal to zero. No process held the serial endpoint and the
+RobotCore service was inactive. Therefore the current firmware/IMU path does
+not yet supply usable external IMU samples.
+
+A separate, clean STM32 project at `/home/nvidia/aCube_1` identifies UART8 as a
+Bewei IMU link. Its current source:
+
+- initializes UART8 as 9600 8N1;
+- selects Bewei automatic float gyro+acceleration output (`0x56 = 0x03`);
+- selects 10 Hz automatic output (`0x0C = 0x02`);
+- parses the six floats in command `0x70`, but ignores the four-byte sample
+  counter;
+- forwards the latest sample in frame 3 on an approximately 20 Hz telemetry
+  cycle, which can repeat one 10 Hz sensor sample with a new host timestamp.
+
+The [official Bewei digital protocol manual](https://www.bwsensing.com.cn/upload/userfile/IMU_VG_AH_MINS_%E6%95%B0%E5%AD%97%E8%BE%93%E5%87%BA%E5%8D%8F%E8%AE%AE%E6%89%8B%E5%86%8C.pdf)
+defines 5, 10, 20, 25, 50, 100, 200, and 500 Hz output selections, although
+the highest supported rate depends on the exact product. A `0x70` sample is 33
+wire bytes, so 9600 baud has a theoretical ceiling below 30 Hz. The appropriate
+robot target is 115200 baud and 100 Hz external-IMU samples; 60 Hz is the
+canonical fused-state output. Going to 200/500 Hz adds load without improving
+the 60 Hz control/state contract.
+
+The STM32 project is outside this RobotCore repository and was not modified or
+flashed during this work. Before hardware acceptance its firmware must:
+
+- confirm the exact external IMU model and UART protocol;
+- confirm its physical +X/+Y/+Z axes relative to ROS `base_link` FLU;
+- transition both the sensor and STM32 UART8 to 115200 baud, select float
+  gyro+acceleration output at 100 Hz, and verify command acknowledgements;
+- forward frame 3 when a new sensor sample arrives rather than periodically
+  repeating the latest sample;
+- carry the Bewei sample counter (or an MCU sample timestamp) in the currently
+  unused eighth `int16` field so duplicate, dropped, and stale samples are
+  measurable. RobotCore deliberately rejects an initial zero/unchanged sample
+  ID instead of assigning repeated values new timestamps.
 
 The normal edge command needs no IMU argument:
 
@@ -41,12 +100,17 @@ ros2 launch eup_bringup eup_edge_system.launch.py \
   manual_thruster_channel_offset:=8
 ```
 
-Validate the ZED VIO inputs after launch:
+Validate all estimator inputs after launch:
 
 ```bash
 ros2 topic info /zedx/zed_node/imu/data -v
 ros2 topic echo /zedx/zed_node/imu/data --once
 ros2 topic hz /zedx/zed_node/odom
+ros2 topic echo /localization/external_imu_ready --once
+ros2 topic hz /hardware/aboard_imu_raw
+ros2 topic hz /sensors/external_imu
+ros2 topic hz /localization/fused_odom
+ros2 topic hz /robot/body_state
 ```
 
 ## Aboard Confirmation Items

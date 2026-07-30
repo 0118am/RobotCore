@@ -1,5 +1,6 @@
 """Package metadata for runtime, safety, task, and logging nodes."""
 
+from glob import glob
 from setuptools import setup
 
 package_name = "eup_runtime"
@@ -11,6 +12,7 @@ setup(
     data_files=[
         ("share/ament_index/resource_index/packages", [f"resource/{package_name}"]),
         (f"share/{package_name}", ["package.xml"]),
+        (f"share/{package_name}/config", glob("config/*.yaml")),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
@@ -28,6 +30,7 @@ setup(
             "task_manager = eup_runtime.task_manager:main",
             "trajectory_command_node = eup_runtime.trajectory_command_node:main",
             "tracking_monitor_node = eup_runtime.tracking_monitor_node:main",
+            "tracking_experiment_node = eup_runtime.tracking_experiment_node:main",
             "zed_camera_launcher = eup_runtime.zed_camera_launcher:main",
         ],
     },

@@ -1,0 +1,17 @@
+# SAFETY: automatic control cannot arm while measured is false.
+# Replace every geometry and curve point with measurements from the physical
+# vehicle, then set measured: true after channel/sign tests have passed.
+measured: false
+damping: 0.0001
+axis_weights: [1.0, 1.0, 1.0, 0.5, 0.5, 0.5]
+
+# Placeholder full-rank geometry only; it is not a claim about the real robot.
+thrusters:
+  - {channel: 0, name: right_front_vertical, position_m: [0.25, -0.18, 0.0], direction: [0.0, 0.0, 1.0], command_sign: 1.0, curve: [[-1.0, -40.0], [0.0, 0.0], [1.0, 50.0]]}
+  - {channel: 1, name: right_rear_vertical,  position_m: [-0.25, -0.18, 0.0], direction: [0.0, 0.0, 1.0], command_sign: 1.0, curve: [[-1.0, -40.0], [0.0, 0.0], [1.0, 50.0]]}
+  - {channel: 2, name: left_front_vertical,  position_m: [0.25, 0.18, 0.0], direction: [0.0, 0.0, 1.0], command_sign: 1.0, curve: [[-1.0, -40.0], [0.0, 0.0], [1.0, 50.0]]}
+  - {channel: 3, name: left_rear_vertical,   position_m: [-0.25, 0.18, 0.0], direction: [0.0, 0.0, 1.0], command_sign: 1.0, curve: [[-1.0, -40.0], [0.0, 0.0], [1.0, 50.0]]}
+  - {channel: 4, name: left_rear_horizontal, position_m: [-0.25, 0.18, 0.0], direction: [0.70710678, -0.70710678, 0.0], command_sign: 1.0, curve: [[-1.0, -40.0], [0.0, 0.0], [1.0, 50.0]]}
+  - {channel: 5, name: right_rear_horizontal, position_m: [-0.25, -0.18, 0.0], direction: [0.70710678, 0.70710678, 0.0], command_sign: 1.0, curve: [[-1.0, -40.0], [0.0, 0.0], [1.0, 50.0]]}
+  - {channel: 6, name: left_front_horizontal, position_m: [0.25, 0.18, 0.0], direction: [0.70710678, 0.70710678, 0.0], command_sign: 1.0, curve: [[-1.0, -40.0], [0.0, 0.0], [1.0, 50.0]]}
+  - {channel: 7, name: right_front_horizontal, position_m: [0.25, -0.18, 0.0], direction: [0.70710678, -0.70710678, 0.0], command_sign: 1.0, curve: [[-1.0, -40.0], [0.0, 0.0], [1.0, 50.0]]}

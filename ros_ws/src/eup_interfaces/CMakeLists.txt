@@ -19,8 +19,10 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/ArmCommand.msg"
   "msg/ArmState.msg"
   "msg/BoardStatus.msg"
+  "msg/ControlAuthorityStatus.msg"
   "msg/BodyState.msg"
   "msg/MujocoStatus.msg"
+  "msg/PidStatus.msg"
   "msg/PolicyStatus.msg"
   "msg/SafetyEvent.msg"
   "msg/ThrusterCommand.msg"
@@ -30,6 +32,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/SetPolicy.srv"
   "srv/MujocoCommand.srv"
   "srv/TriggerAbort.srv"
+  "srv/SetControlAuthority.srv"
+  "action/RunTrackingExperiment.action"
   "action/RunTask.action"
   DEPENDENCIES builtin_interfaces geometry_msgs std_msgs
 )

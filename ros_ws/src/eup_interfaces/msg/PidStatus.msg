@@ -1,0 +1,12 @@
+std_msgs/Header header
+bool ready
+bool producing_command
+string[] missing_inputs
+float64 body_state_age_s
+float64 target_age_s
+uint32 allocation_rank
+float64 allocation_condition
+float64 allocation_residual
+float64 saturation_fraction
+string configuration_hash
+string message

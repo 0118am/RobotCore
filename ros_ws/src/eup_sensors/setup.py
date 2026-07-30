@@ -23,6 +23,7 @@ setup(
     entry_points={
         "console_scripts": [
             "sensor_fusion_node = eup_sensors.sensor_fusion_node:main",
+            "imu_conditioning_node = eup_sensors.imu_conditioning_node:main",
             "vehicle_frames_node = eup_sensors.vehicle_frames_node:main",
             "apriltag_localization_node = eup_sensors.apriltag_localization_node:main",
             "zed_odometry_adapter_node = eup_sensors.zed_odometry_adapter_node:main",

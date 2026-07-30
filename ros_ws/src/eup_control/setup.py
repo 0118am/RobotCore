@@ -25,6 +25,9 @@ setup(
     entry_points={
         "console_scripts": [
             "arm_controller = eup_control.arm_controller:main",
+            "command_authority = eup_control.command_authority_node:main",
+            "pid_controller = eup_control.six_dof_pid_node:main",
+            "rl_action_adapter = eup_control.rl_action_adapter:main",
             "thruster_allocator = eup_control.thruster_allocator:main",
         ],
     },

@@ -1,0 +1,13 @@
+# Name of an allow-listed trajectory scenario from the runtime YAML file.
+string scenario
+# Expected active authority source. Initially only "pid" is permitted.
+string controller
+float64 duration_s
+---
+bool success
+string run_dir
+string message
+---
+float32 progress
+string phase
+float64 elapsed_s

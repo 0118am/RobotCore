@@ -1,19 +1,18 @@
 """Safety monitor node.
 
-The monitor owns the system abort latch and continuously publishes a zero
-thruster command while abort is active. That gives every backend the same simple
-contract: listen to /control/thruster_cmd and obey the latest safe command.
+The monitor owns the system abort latch and publishes a heartbeat. The command
+authority consumes that state and remains the only final thruster publisher.
 """
 
 import rclpy
 from rclpy.node import Node
 
-from eup_interfaces.msg import SafetyEvent, ThrusterCommand
+from eup_interfaces.msg import SafetyEvent
 from eup_interfaces.srv import TriggerAbort
 
 
 class SafetyMonitor(Node):
-    """Owns abort state and publishes zero thrusters while abort is active."""
+    """Owns the abort latch and emits a fail-closed heartbeat."""
 
     def __init__(self):
         super().__init__("safety_monitor")
@@ -22,11 +21,6 @@ class SafetyMonitor(Node):
         self.zero_publish_hz = 20.0
 
         self.event_pub = self.create_publisher(SafetyEvent, "/safety/events", 10)
-        # Publish to the normal control topic so MuJoCo and real hardware use the
-        # same safety path.
-        self.thruster_pub = self.create_publisher(
-            ThrusterCommand, "/control/thruster_cmd", 10
-        )
         self.abort_srv = self.create_service(
             TriggerAbort, "/safety/abort", self.handle_abort
         )
@@ -40,7 +34,11 @@ class SafetyMonitor(Node):
 
         code = "ABORT_ACTIVE" if self.abort_active else "ABORT_CLEARED"
         message = self.abort_reason if self.abort_active else "Abort state cleared"
-        self.publish_event(SafetyEvent.LEVEL_ABORT, code, message)
+        self.publish_event(
+            SafetyEvent.LEVEL_ABORT if self.abort_active else SafetyEvent.LEVEL_INFO,
+            code,
+            message,
+        )
 
         response.accepted = True
         response.abort_active = self.abort_active
@@ -48,19 +46,13 @@ class SafetyMonitor(Node):
         return response
 
     def tick(self):
-        if self.abort_active:
-            # Keep publishing while latched so late subscribers and hardware
-            # bridges cannot miss the zero command.
-            self.thruster_pub.publish(self.zero_thruster_command())
-
-    def zero_thruster_command(self):
-        msg = ThrusterCommand()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = "base_link"
-        msg.normalized = [0.0] * 8
-        msg.enable = False
-        msg.source = "safety_monitor"
-        return msg
+        code = "ABORT_ACTIVE" if self.abort_active else "ABORT_CLEAR"
+        message = self.abort_reason if self.abort_active else "Safety monitor healthy"
+        self.publish_event(
+            SafetyEvent.LEVEL_ABORT if self.abort_active else SafetyEvent.LEVEL_INFO,
+            code,
+            message,
+        )
 
     def publish_event(self, level, code, message):
         event = SafetyEvent()
@@ -78,9 +70,15 @@ def main(args=None):
     node = SafetyMonitor()
     try:
         rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    except Exception:
+        if rclpy.ok():
+            raise
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

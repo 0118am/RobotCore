@@ -64,3 +64,5 @@ starts the fixed camera directly; no second camera command or A-board IMU gate
 is required.
 
 Detailed operating contracts are in [docs/PROJECT_GUIDE.md](docs/PROJECT_GUIDE.md).
+The fail-closed real-pool PID workflow is documented in
+[docs/PID_POOL_TRACKING.md](docs/PID_POOL_TRACKING.md).

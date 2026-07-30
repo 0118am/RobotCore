@@ -10,7 +10,9 @@
       serial_number: 0
       camera_id: 1
       grab_resolution: HD1200
-      grab_frame_rate: 30
+      # Run VIO at 60 Hz. Image publication remains capped at 30 Hz below so
+      # AprilTag CPU/DDS load does not double with the state-estimation rate.
+      grab_frame_rate: 60
       # PnP consumes the matching scaled CameraInfo, so publishing 1280x800
       # retains calibrated geometry while cutting detector pixels by 56%.
       # The operator overlay is 960 px wide, so this does not reduce its
@@ -70,6 +72,9 @@
     sensors:
       # ZED VIO uses this IMU internally. Publish it separately for the
       # operator HUD only; no ROS EKF consumes this topic.
+      # ZED X Mini's IMU data rate is 200 Hz; polling at the wrapper's generic
+      # 400 Hz ceiling would not create additional hardware samples.
+      sensors_pub_rate: 200.0
       publish_imu: true
       publish_imu_raw: false
       publish_cam_imu_transf: false

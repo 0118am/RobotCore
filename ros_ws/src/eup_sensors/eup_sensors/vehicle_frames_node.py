@@ -13,14 +13,17 @@ from .localization_math import quaternion_xyzw, rpy_matrix
 
 
 class VehicleFramesNode(Node):
-    """Publish the fixed base_link -> ZED camera frames used by localisation."""
+    """Publish the fixed base_link -> IMU and ZED frames used by localisation."""
 
     def __init__(self):
         super().__init__("vehicle_frames")
         self.declare_parameter("base_frame", "base_link")
+        self.declare_parameter("imu_frame", "aboard_imu_link")
         self.declare_parameter("camera_link_frame", "zedx_camera_link")
         self.declare_parameter("camera_optical_frame", "front_camera_optical_frame")
         # Values are measured from the centre of mass (base_link) in ROS FLU.
+        self.declare_parameter("base_to_imu_translation_m", [0.018, 0.0, 0.076])
+        self.declare_parameter("base_to_imu_rpy_rad", [0.0, 0.0, 0.0])
         self.declare_parameter("base_to_camera_translation_m", [0.236, 0.027, 0.016])
         # camera_optical: +X right, +Y down, +Z forward.
         self.declare_parameter(
@@ -35,6 +38,12 @@ class VehicleFramesNode(Node):
                     str(self.get_parameter("camera_link_frame").value),
                     self.get_parameter("base_to_camera_translation_m").value,
                     [0.0, 0.0, 0.0],
+                ),
+                self.make_transform(
+                    str(self.get_parameter("base_frame").value),
+                    str(self.get_parameter("imu_frame").value),
+                    self.get_parameter("base_to_imu_translation_m").value,
+                    self.get_parameter("base_to_imu_rpy_rad").value,
                 ),
                 self.make_transform(
                     str(self.get_parameter("base_frame").value),

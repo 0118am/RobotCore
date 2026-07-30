@@ -8,6 +8,8 @@ float64 time_s
 # right-handed FLU convention: +X forward, +Y left, +Z up.
 geometry_msgs/Point target_position
 geometry_msgs/Point actual_position
+geometry_msgs/Quaternion target_orientation
+geometry_msgs/Quaternion actual_orientation
 
 # Velocity and acceleration fields are expressed in base_link/body frame so they
 # can be compared directly with BodyState.twist.
@@ -15,8 +17,14 @@ geometry_msgs/Vector3 target_velocity_body
 geometry_msgs/Vector3 actual_velocity_body
 geometry_msgs/Vector3 target_acceleration_body
 geometry_msgs/Vector3 actual_acceleration_body
+geometry_msgs/Vector3 target_angular_velocity_body
+geometry_msgs/Vector3 actual_angular_velocity_body
+geometry_msgs/Vector3 position_error_body
+geometry_msgs/Vector3 orientation_error_body
 
 float64 position_error_m
+float64 orientation_error_rad
 float64 velocity_error_mps
+float64 angular_velocity_error_rps
 float64 speed_mps
 float64 acceleration_mps2

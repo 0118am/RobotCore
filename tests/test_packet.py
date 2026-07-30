@@ -67,7 +67,7 @@ def test_uart_telemetry_frame_two_parses_acceleration_mps2():
 
 
 def test_uart_telemetry_frame_three_parses_aboard_uart8_imu():
-    values = [125, -250, 50, 100, -200, 981, 1, 0]
+    values = [125, -250, 50, 100, -200, 981, 1, 123]
     frame = bytearray([0xFF, 0xF8, 3])
     for value in values:
         frame.extend(int(value).to_bytes(2, "little", signed=True))
@@ -76,6 +76,7 @@ def test_uart_telemetry_frame_three_parses_aboard_uart8_imu():
     telemetry = parse_uart_telemetry_frame(bytes(frame))
 
     assert telemetry["uart8_imu_valid"] is True
+    assert telemetry["uart8_imu_sample_id"] == 123
     assert telemetry["gyro_x_dps"] == 1.25
     assert telemetry["gyro_y_dps"] == -2.5
     assert math.isclose(telemetry["accel_z_mps2"], 981 * 9.80665 / 1000.0)
@@ -107,4 +108,3 @@ def test_normalized_to_direct_pwm_offsets_can_start_at_channel_eight():
     assert offsets[:8] == [0] * 8
     assert offsets[8:11] == [200, -100, 0]
     assert len(offsets) == 16
-

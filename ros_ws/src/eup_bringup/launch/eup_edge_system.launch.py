@@ -25,6 +25,9 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument("baud", default_value="115200"),
             DeclareLaunchArgument("zed_imu_topic", default_value="/zedx/zed_node/imu/data"),
+            DeclareLaunchArgument("imu_raw_topic", default_value="/hardware/aboard_imu_raw"),
+            DeclareLaunchArgument("external_imu_topic", default_value="/sensors/external_imu"),
+            DeclareLaunchArgument("enable_external_imu", default_value="true"),
             DeclareLaunchArgument("depth_input_topic", default_value="/hardware/aboard_depth_m"),
             DeclareLaunchArgument("altitude_input_topic", default_value=""),
             DeclareLaunchArgument("front_camera_raw_topic", default_value="/zedx/zed_node/rgb/color/rect/image"),
@@ -44,6 +47,7 @@ def generate_launch_description():
             # AprilTag calibrates map->odom. ZED VIO already fuses the camera
             # IMU and continuously propagates odom->base_link between tags.
             DeclareLaunchArgument("enable_tag_vio_alignment", default_value="true"),
+            DeclareLaunchArgument("enable_fixed_rate_state_estimator", default_value="true"),
             DeclareLaunchArgument("enable_zed_visual_odometry", default_value="true"),
             DeclareLaunchArgument("zed_odometry_topic", default_value="/zedx/zed_node/odom"),
             DeclareLaunchArgument("zed_workspace", default_value="/home/nvidia/ros2_ws"),
@@ -55,6 +59,22 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument("zed_serial_number", default_value="50649148"),
             DeclareLaunchArgument("zed_camera_id", default_value="-1"),
+            DeclareLaunchArgument(
+                "external_imu_config",
+                default_value=PathJoinSubstitution(
+                    [FindPackageShare("eup_sensors"), "config", "external_imu.yaml"]
+                ),
+            ),
+            DeclareLaunchArgument(
+                "state_estimator_config",
+                default_value=PathJoinSubstitution(
+                    [
+                        FindPackageShare("eup_sensors"),
+                        "config",
+                        "tag_vio_external_imu_ekf.yaml",
+                    ]
+                ),
+            ),
             # Publish the quality-gated PnP observation directly.  Temporal
             # smoothing adds pose lag while the vehicle is moving; retain it
             # only when a deployment has measured a jitter problem.
@@ -92,7 +112,31 @@ def generate_launch_description():
             # The ESC safety heartbeat is intentionally independent of the
             # 60 Hz RL action rate and remains at 100 Hz.
             DeclareLaunchArgument("thruster_command_write_hz", default_value="100.0"),
-            DeclareLaunchArgument("thruster_command_timeout_ms", default_value="500"),
+            DeclareLaunchArgument("thruster_command_timeout_ms", default_value="150"),
+            DeclareLaunchArgument(
+                "pool_control_config",
+                default_value=PathJoinSubstitution(
+                    [FindPackageShare("eup_control"), "config", "real_pool_safety.yaml"]
+                ),
+            ),
+            DeclareLaunchArgument(
+                "pid_config_path",
+                default_value=PathJoinSubstitution(
+                    [FindPackageShare("eup_control"), "config", "real_pool_pid.yaml"]
+                ),
+            ),
+            DeclareLaunchArgument(
+                "thruster_config_path",
+                default_value=PathJoinSubstitution(
+                    [FindPackageShare("eup_control"), "config", "real_pool_thrusters.yaml"]
+                ),
+            ),
+            DeclareLaunchArgument(
+                "scenario_config_path",
+                default_value=PathJoinSubstitution(
+                    [FindPackageShare("eup_runtime"), "config", "tracking_scenarios.yaml"]
+                ),
+            ),
             SetEnvironmentVariable(name="ROBOTCORE_RUN_ROOT", value=run_root),
             Node(
                 package="eup_sensors",
@@ -115,12 +159,28 @@ def generate_launch_description():
                 name="vehicle_frames",
                 output="screen",
                 parameters=[
+                    LaunchConfiguration("external_imu_config"),
                     {
                         "base_frame": "base_link",
+                        "imu_frame": "aboard_imu_link",
                         "camera_optical_frame": "front_camera_optical_frame",
                         "base_to_camera_translation_m": [0.236, 0.027, 0.016],
                         "camera_link_frame": "zedx_camera_link",
                     }
+                ],
+            ),
+            Node(
+                package="eup_sensors",
+                executable="imu_conditioning_node",
+                name="imu_conditioning",
+                output="screen",
+                condition=IfCondition(LaunchConfiguration("enable_external_imu")),
+                parameters=[
+                    LaunchConfiguration("external_imu_config"),
+                    {
+                        "input_topic": LaunchConfiguration("imu_raw_topic"),
+                        "output_topic": LaunchConfiguration("external_imu_topic"),
+                    },
                 ],
             ),
             Node(
@@ -220,7 +280,7 @@ def generate_launch_description():
                     {
                         "tag_pose_topic": "/localization/apriltag_pose",
                         "vio_odometry_topic": "/localization/zed_odom",
-                        "output_odometry_topic": "/localization/fused_odom",
+                        "output_odometry_topic": "/localization/aligned_vio_odom",
                         "map_frame": "map",
                         "base_frame": "base_link",
                         "alignment_correction_alpha": 0.25,
@@ -232,11 +292,74 @@ def generate_launch_description():
                     }
                 ],
             ),
+            # The alignment output contains the latest absolute Tag correction,
+            # ZED VIO pose, and ZED linear velocity. The independent UART8 gyro
+            # propagates attitude between those visual updates. robot_localization
+            # owns the canonical fixed 60 Hz /localization/fused_odom stream.
+            Node(
+                package="robot_localization",
+                executable="ekf_node",
+                name="localization_ekf",
+                output="screen",
+                condition=IfCondition(
+                    LaunchConfiguration("enable_fixed_rate_state_estimator")
+                ),
+                parameters=[
+                    LaunchConfiguration("state_estimator_config"),
+                    {
+                        "imu0": LaunchConfiguration("external_imu_topic"),
+                    },
+                ],
+                remappings=[("odometry/filtered", "/localization/fused_odom")],
+            ),
+            Node(
+                package="eup_runtime",
+                executable="trajectory_command_node",
+                name="trajectory_command",
+                output="screen",
+                parameters=[LaunchConfiguration("pool_control_config")],
+            ),
+            Node(
+                package="eup_runtime",
+                executable="tracking_monitor_node",
+                name="tracking_monitor",
+                output="screen",
+                parameters=[{"publish_rate_hz": 20.0}],
+            ),
             Node(
                 package="eup_control",
-                executable="thruster_allocator",
-                name="thruster_allocator",
+                executable="pid_controller",
+                name="pid_controller",
                 output="screen",
+                parameters=[
+                    {
+                        "pid_config_path": LaunchConfiguration("pid_config_path"),
+                        "thruster_config_path": LaunchConfiguration(
+                            "thruster_config_path"
+                        ),
+                        "control_rate_hz": 60.0,
+                    }
+                ],
+            ),
+            Node(
+                package="eup_control",
+                executable="command_authority",
+                name="command_authority",
+                output="screen",
+                parameters=[LaunchConfiguration("pool_control_config")],
+            ),
+            Node(
+                package="eup_runtime",
+                executable="tracking_experiment_node",
+                name="tracking_experiment",
+                output="screen",
+                parameters=[
+                    {
+                        "scenario_config_path": LaunchConfiguration(
+                            "scenario_config_path"
+                        )
+                    }
+                ],
             ),
             Node(
                 package="eup_runtime",
@@ -249,6 +372,20 @@ def generate_launch_description():
                 executable="run_logger",
                 name="run_logger",
                 output="screen",
+                parameters=[
+                    {
+                        "pid_config_path": LaunchConfiguration("pid_config_path"),
+                        "thruster_config_path": LaunchConfiguration(
+                            "thruster_config_path"
+                        ),
+                        "scenario_config_path": LaunchConfiguration(
+                            "scenario_config_path"
+                        ),
+                        "safety_config_path": LaunchConfiguration(
+                            "pool_control_config"
+                        ),
+                    }
+                ],
             ),
             Node(
                 package="eup_runtime",
@@ -285,8 +422,12 @@ def generate_launch_description():
                             LaunchConfiguration("thruster_command_timeout_ms"),
                             value_type=int,
                         ),
-                        # ZED VIO owns the localisation IMU integration.
-                        "publish_imu": False,
+                        # UART8 is an independent high-quality IMU. Publish only
+                        # valid frame-3 samples; the conditioning node estimates
+                        # stationary gyro bias before the 60 Hz EKF consumes it.
+                        "publish_imu": True,
+                        "imu_topic": LaunchConfiguration("imu_raw_topic"),
+                        "imu_frame_id": "aboard_imu_link",
                     }
                 ],
             ),
@@ -321,6 +462,7 @@ def generate_launch_description():
                             LaunchConfiguration("manual_thruster_channel_offset"),
                             value_type=int,
                         ),
+                        "manual_thruster_topic": "/control/candidates/manual",
                     }
                 ],
             ),

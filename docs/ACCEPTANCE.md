@@ -11,18 +11,36 @@ This file defines the first-stage system-chain acceptance target.
 
 ## Sensor and Robot State
 
-- [ ] `/zedx/zed_node/imu/data` is published for the operator HUD. The ZED
-      SDK fuses this camera IMU internally for its VIO output; no separate
-      ROS IMU stream is fused by the localisation EKF.
+- [ ] `/zedx/zed_node/imu/data` publishes at approximately 200 Hz for the
+      operator HUD. The ZED SDK also fuses this camera IMU internally for its
+      60 Hz VIO output.
 - [ ] `/zedx/zed_node/rgb/color/rect/image` and its matching CameraInfo publish
-      real-time ZED frames for AprilTag localisation.
+      real-time ZED frames at up to 30 Hz for AprilTag localisation.
+- [ ] A-board UART8 runs at 115200 baud and frame 3 reports unique external-IMU
+      samples with its valid flag set at approximately 100 Hz. The observed
+      invalid/all-zero 19.3 Hz baseline and repeated-sample forwarding are
+      failures, not acceptable fallbacks.
+- [ ] `/hardware/aboard_imu_raw` contains only valid frame-3 samples and
+      `/localization/external_imu_ready` becomes true after a stationary
+      calibration. `/sensors/external_imu` then publishes calibrated angular
+      velocity with strictly increasing timestamps and source sample IDs.
 - [ ] `/localization/apriltag/debug_image/compressed` carries the recognised-tag
       overlay selected by the browser camera panel.
 - [ ] `/localization/apriltag_pose` is a mapped AprilTag measurement and
-      `/localization/fused_odom` is the map-frame pose composed from AprilTag
-      map-to-odom calibration and ZED VIO local odometry.
+      `/localization/aligned_vio_odom` is the event-driven map-frame pose
+      composed from AprilTag map-to-odom calibration and ZED VIO local
+      odometry.
 - [ ] `/localization/zed_odom` contains ZED VIO local `odom -> base_link`
       pose and base-frame twist; it is never relabelled as a map pose.
+- [ ] `/localization/fused_odom` and `/robot/body_state` each sustain
+      57--63 Hz for at least 60 seconds, with strictly increasing source
+      timestamps, no duplicate samples, and no growing DDS queue.
+- [ ] During a measured constant-speed run, body-frame linear velocity agrees
+      with an independent distance/time reference within the test tolerance;
+      it is not obtained by finite-differencing AprilTag detections.
+- [ ] External IMU acceleration remains disabled in the EKF until a physical
+      FLU axis test, mounting-rotation measurement, gravity-removal test, and
+      stationary/noise calibration all pass.
 - [ ] The ZED launch publishes only its internal static camera-frame TF tree;
       it does not publish dynamic `odom` or `map` transforms.
 - [ ] The raw AprilTag node does not broadcast a competing dynamic TF. The

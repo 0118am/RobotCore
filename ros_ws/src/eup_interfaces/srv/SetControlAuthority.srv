@@ -1,0 +1,11 @@
+# Control source changes are accepted only while disarmed.
+string source
+bool arm
+# Clear the command-authority fault latch. This never clears /safety/abort.
+bool clear_fault
+---
+bool accepted
+string selected_source
+bool armed
+bool fault_latched
+string message

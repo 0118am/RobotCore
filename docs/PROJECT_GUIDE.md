@@ -46,7 +46,7 @@ Design rules:
 | `eup_runtime` | task manager, blackboard, safety events, run logging orchestration |
 | `eup_policy` | policy registry, model runners, observation builder, action decoder |
 | `eup_control` | thruster allocation, PWM mapping, arm command routing, safety filtering |
-| `eup_sensors` | IMU/depth/DVL/frame transform/sensor fusion placeholders |
+| `eup_sensors` | AprilTag/ZED/external-IMU localisation, sensor conditioning, and fixed transforms |
 | `eup_hardware` | ros2_control hardware interface, serial/CAN/Aboard packet boundary |
 | `eup_mujoco_env` | MuJoCo model assets, sensor publisher, actuator subscriber |
 | `eup_ui` | browser project in `../ControlInterface`; its ROS-to-web bridge consumes installed interfaces |
@@ -70,10 +70,20 @@ Core topics:
 - `/localization/apriltag_pose`: absolute mapped AprilTag pose measurement.
 - `/localization/zed_odom`: ZED VIO local `odom -> base_link` pose and
   base-frame twist, adapted from the camera-local odometry message.
-- `/localization/fused_odom`: map-frame AprilTag-calibrated ZED VIO pose.
-  A valid Tag updates `map -> odom`; ZED VIO then continuously carries the
-  global estimate during Tag loss.
-- `/robot/body_state`: fused base pose, body-frame velocity, and validity.
+- `/hardware/aboard_imu_raw`: valid external UART8 gyro and acceleration
+  samples forwarded by the A-board. No sample is published for an invalid
+  frame-3 payload.
+- `/sensors/external_imu`: stationary-bias-corrected external gyro. Orientation
+  and acceleration are marked unavailable to the estimator until mounting and
+  gravity handling are validated.
+- `/localization/aligned_vio_odom`: event-driven map-frame pose from AprilTag
+  map-to-odom alignment plus ZED VIO, retaining the ZED base-frame twist.
+- `/localization/fused_odom`: canonical 60 Hz map-frame estimate. It uses the
+  aligned AprilTag/ZED pose and linear velocity plus calibrated UART8 angular
+  velocity.
+- `/robot/body_state`: 60 Hz fused base pose, body-frame velocity, and
+  validity. Velocity is estimated by ZED VIO and the EKF, not by finite
+  differencing AprilTag poses.
 - `/robot/arm_state`: arm joint state and validity.
 - `/robot/thruster_state`: 8-thruster normalized and PWM feedback.
 - `/control/thruster_cmd`: 8 normalized thruster commands.

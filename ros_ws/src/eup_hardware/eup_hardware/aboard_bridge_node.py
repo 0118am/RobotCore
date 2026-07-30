@@ -70,7 +70,7 @@ class AboardBridgeNode(Node):
         # Maintain an explicit neutral PWM heartbeat while Disarmed.  100 Hz
         # leaves margin for ESC watchdogs that are stricter than 50 Hz.
         self.declare_parameter("command_write_hz", 100.0)
-        self.declare_parameter("command_timeout_ms", 500)
+        self.declare_parameter("command_timeout_ms", 150)
         # Read the serial receive queue often enough that the estimator can
         # consume a fresh IMU sample for every 60 Hz policy action.  This does
         # not fabricate samples: the actual IMU publication rate remains
@@ -81,6 +81,10 @@ class AboardBridgeNode(Node):
         self.declare_parameter("publish_imu", False)
         self.declare_parameter("prefer_uart8_imu", True)
         self.declare_parameter("uart8_imu_timeout_ms", 1000)
+        # New A-board firmware must forward the Bewei counter in frame-3 word
+        # 7. Fail closed when old firmware repeats its latest sample with a new
+        # Jetson timestamp, since that corrupts rate and integration metrics.
+        self.declare_parameter("require_uart8_sample_id", True)
         self.declare_parameter("attitude_timeout_ms", 250)
         # Conservative startup noise values for state estimators.  They must
         # be replaced with values measured from a stationary vehicle before
@@ -103,6 +107,7 @@ class AboardBridgeNode(Node):
         self.last_attitude_time = 0.0
         self.last_legacy_acceleration = {}
         self.last_uart8_imu_time = 0.0
+        self.last_uart8_sample_id = None
         self.feedback_frames = 0
         self.bad_feedback_frames = 0
 
@@ -287,6 +292,13 @@ class AboardBridgeNode(Node):
             # a legacy frame with zero-valued acceleration.
             if "uart8_imu_valid" in telemetry:
                 if telemetry["uart8_imu_valid"]:
+                    sample_id = int(telemetry.get("uart8_imu_sample_id", 0))
+                    if bool(self.get_parameter("require_uart8_sample_id").value):
+                        if self.last_uart8_sample_id is None and sample_id == 0:
+                            return True
+                        if sample_id == self.last_uart8_sample_id:
+                            return True
+                    self.last_uart8_sample_id = sample_id
                     self.last_uart8_imu_time = time.monotonic()
                     # UART8 has raw gyro and specific force but no attitude.
                     # Reuse the recent legacy attitude only when it is fresh;

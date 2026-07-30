@@ -1,0 +1,50 @@
+localization_ekf:
+  ros__parameters:
+    frequency: 60.0
+    sensor_timeout: 0.20
+    two_d_mode: false
+    transform_time_offset: 0.0
+    transform_timeout: 0.05
+    print_diagnostics: true
+    publish_tf: false
+    publish_acceleration: false
+
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_link
+    world_frame: map
+
+    # The alignment node time-aligns AprilTag observations with ZED VIO and
+    # emits map-frame base pose plus base-frame linear velocity. This is the
+    # absolute/visual anchor for the fixed-rate filter.
+    odom0: /localization/aligned_vio_odom
+    odom0_config: [true,  true,  true,
+                   true,  true,  true,
+                   true,  true,  true,
+                   false, false, false,
+                   false, false, false]
+    odom0_queue_size: 30
+    odom0_nodelay: true
+    odom0_differential: false
+    odom0_relative: false
+    odom0_pose_rejection_threshold: 5.0
+    odom0_twist_rejection_threshold: 5.0
+
+    # The independent UART8 gyro propagates attitude between visual updates.
+    # Orientation and acceleration are deliberately disabled: frame 3 has no
+    # attitude, and raw specific force has not yet passed gravity/extrinsic
+    # validation.
+    imu0: /sensors/external_imu
+    imu0_config: [false, false, false,
+                  false, false, false,
+                  false, false, false,
+                  true,  true,  true,
+                  false, false, false]
+    imu0_queue_size: 100
+    imu0_nodelay: true
+    imu0_differential: false
+    imu0_relative: false
+    imu0_remove_gravitational_acceleration: false
+    imu0_angular_velocity_rejection_threshold: 5.0
+
+    use_control: false
