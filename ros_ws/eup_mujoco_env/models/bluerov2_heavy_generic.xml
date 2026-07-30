@@ -1,0 +1,71 @@
+<mujoco model="bluerov2_heavy_generic">
+  <compiler angle="degree" coordinate="local"/>
+  <option timestep="0.002" gravity="0 0 -9.81"/>
+
+  <worldbody>
+    <light name="top" pos="0 0 2"/>
+    <geom name="water_plane" type="plane" size="5 5 0.01" pos="0 0 0" rgba="0.05 0.15 0.20 0.25"/>
+    <body name="trajectory_target_marker" mocap="true" pos="0 0 -1.5">
+      <geom name="trajectory_target_marker_geom" type="sphere" size="0.055" rgba="0.10 0.42 1.00 0.85" contype="0" conaffinity="0"/>
+    </body>
+    <body name="trajectory_actual_marker" mocap="true" pos="0 0 -1.5">
+      <geom name="trajectory_actual_marker_geom" type="sphere" size="0.045" rgba="1.00 0.55 0.15 0.85" contype="0" conaffinity="0"/>
+    </body>
+    <!-- ROS-driven mocap dots: blue target trail, orange actual trail. -->
+    <body name="trajectory_target_trail_00" mocap="true" pos="0 0 -1.5"><geom type="sphere" size="0.018" rgba="0.10 0.42 1.00 0.30" contype="0" conaffinity="0"/></body>
+    <body name="trajectory_target_trail_01" mocap="true" pos="0 0 -1.5"><geom type="sphere" size="0.018" rgba="0.10 0.42 1.00 0.30" contype="0" conaffinity="0"/></body>
+    <body name="trajectory_target_trail_02" mocap="true" pos="0 0 -1.5"><geom type="sphere" size="0.018" rgba="0.10 0.42 1.00 0.30" contype="0" conaffinity="0"/></body>
+    <body name="trajectory_target_trail_03" mocap="true" pos="0 0 -1.5"><geom type="sphere" size="0.018" rgba="0.10 0.42 1.00 0.30" contype="0" conaffinity="0"/></body>
+    <body name="trajectory_target_trail_04" mocap="true" pos="0 0 -1.5"><geom type="sphere" size="0.018" rgba="0.10 0.42 1.00 0.30" contype="0" conaffinity="0"/></body>
+    <body name="trajectory_target_trail_05" mocap="true" pos="0 0 -1.5"><geom type="sphere" size="0.018" rgba="0.10 0.42 1.00 0.30" contype="0" conaffinity="0"/></body>
+    <body name="trajectory_target_trail_06" mocap="true" pos="0 0 -1.5"><geom type="sphere" size="0.018" rgba="0.10 0.42 1.00 0.30" contype="0" conaffinity="0"/></body>
+    <body name="trajectory_target_trail_07" mocap="true" pos="0 0 -1.5"><geom type="sphere" size="0.018" rgba="0.10 0.42 1.00 0.30" contype="0" conaffinity="0"/></body>
+    <body name="trajectory_target_trail_08" mocap="true" pos="0 0 -1.5"><geom type="sphere" size="0.018" rgba="0.10 0.42 1.00 0.30" contype="0" conaffinity="0"/></body>
+    <body name="trajectory_target_trail_09" mocap="true" pos="0 0 -1.5"><geom type="sphere" size="0.018" rgba="0.10 0.42 1.00 0.30" contype="0" conaffinity="0"/></body>
+    <body name="trajectory_target_trail_10" mocap="true" pos="0 0 -1.5"><geom type="sphere" size="0.018" rgba="0.10 0.42 1.00 0.30" contype="0" conaffinity="0"/></body>
+    <body name="trajectory_target_trail_11" mocap="true" pos="0 0 -1.5"><geom type="sphere" size="0.018" rgba="0.10 0.42 1.00 0.30" contype="0" conaffinity="0"/></body>
+    <body name="trajectory_actual_trail_00" mocap="true" pos="0 0 -1.5"><geom type="sphere" size="0.018" rgba="1.00 0.55 0.15 0.30" contype="0" conaffinity="0"/></body>
+    <body name="trajectory_actual_trail_01" mocap="true" pos="0 0 -1.5"><geom type="sphere" size="0.018" rgba="1.00 0.55 0.15 0.30" contype="0" conaffinity="0"/></body>
+    <body name="trajectory_actual_trail_02" mocap="true" pos="0 0 -1.5"><geom type="sphere" size="0.018" rgba="1.00 0.55 0.15 0.30" contype="0" conaffinity="0"/></body>
+    <body name="trajectory_actual_trail_03" mocap="true" pos="0 0 -1.5"><geom type="sphere" size="0.018" rgba="1.00 0.55 0.15 0.30" contype="0" conaffinity="0"/></body>
+    <body name="trajectory_actual_trail_04" mocap="true" pos="0 0 -1.5"><geom type="sphere" size="0.018" rgba="1.00 0.55 0.15 0.30" contype="0" conaffinity="0"/></body>
+    <body name="trajectory_actual_trail_05" mocap="true" pos="0 0 -1.5"><geom type="sphere" size="0.018" rgba="1.00 0.55 0.15 0.30" contype="0" conaffinity="0"/></body>
+    <body name="trajectory_actual_trail_06" mocap="true" pos="0 0 -1.5"><geom type="sphere" size="0.018" rgba="1.00 0.55 0.15 0.30" contype="0" conaffinity="0"/></body>
+    <body name="trajectory_actual_trail_07" mocap="true" pos="0 0 -1.5"><geom type="sphere" size="0.018" rgba="1.00 0.55 0.15 0.30" contype="0" conaffinity="0"/></body>
+    <body name="trajectory_actual_trail_08" mocap="true" pos="0 0 -1.5"><geom type="sphere" size="0.018" rgba="1.00 0.55 0.15 0.30" contype="0" conaffinity="0"/></body>
+    <body name="trajectory_actual_trail_09" mocap="true" pos="0 0 -1.5"><geom type="sphere" size="0.018" rgba="1.00 0.55 0.15 0.30" contype="0" conaffinity="0"/></body>
+    <body name="trajectory_actual_trail_10" mocap="true" pos="0 0 -1.5"><geom type="sphere" size="0.018" rgba="1.00 0.55 0.15 0.30" contype="0" conaffinity="0"/></body>
+    <body name="trajectory_actual_trail_11" mocap="true" pos="0 0 -1.5"><geom type="sphere" size="0.018" rgba="1.00 0.55 0.15 0.30" contype="0" conaffinity="0"/></body>
+    <body name="base_link" pos="0 0 -1.5">
+      <freejoint/>
+      <geom name="hull" type="box" size="0.34 0.22 0.12" mass="14" rgba="0.02 0.08 0.12 1"/>
+      <geom name="float_left" type="capsule" fromto="-0.28 0.18 0.08 0.28 0.18 0.08" size="0.045" mass="0.8" rgba="0.92 0.92 0.86 1"/>
+      <geom name="float_right" type="capsule" fromto="-0.28 -0.18 0.08 0.28 -0.18 0.08" size="0.045" mass="0.8" rgba="0.92 0.92 0.86 1"/>
+
+      <site name="thruster_0" pos="0.23 0.16 0.02" zaxis="0 0 1" size="0.025" rgba="0.2 0.6 1 1"/>
+      <site name="thruster_1" pos="0.23 -0.16 0.02" zaxis="0 0 1" size="0.025" rgba="0.2 0.6 1 1"/>
+      <site name="thruster_2" pos="-0.23 0.16 0.02" zaxis="0 0 1" size="0.025" rgba="0.2 0.6 1 1"/>
+      <site name="thruster_3" pos="-0.23 -0.16 0.02" zaxis="0 0 1" size="0.025" rgba="0.2 0.6 1 1"/>
+      <site name="thruster_4" pos="0.22 0.17 -0.04" zaxis="1 0 0" size="0.025" rgba="1 0.4 0.2 1"/>
+      <site name="thruster_5" pos="0.22 -0.17 -0.04" zaxis="1 0 0" size="0.025" rgba="1 0.4 0.2 1"/>
+      <site name="thruster_6" pos="-0.22 0.17 -0.04" zaxis="1 0 0" size="0.025" rgba="1 0.4 0.2 1"/>
+      <site name="thruster_7" pos="-0.22 -0.17 -0.04" zaxis="1 0 0" size="0.025" rgba="1 0.4 0.2 1"/>
+      <camera name="front_camera" pos="0.38 0 -0.02" euler="0 -10 0" fovy="70"/>
+
+      <body name="generic_6dof_arm_mount" pos="0.32 0 -0.02">
+        <geom type="sphere" size="0.035" mass="0.2" rgba="0.3 0.3 0.3 1"/>
+      </body>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <motor name="thruster_0" site="thruster_0" gear="0 0 1 0 0 0" ctrlrange="-160 160"/>
+    <motor name="thruster_1" site="thruster_1" gear="0 0 1 0 0 0" ctrlrange="-160 160"/>
+    <motor name="thruster_2" site="thruster_2" gear="0 0 1 0 0 0" ctrlrange="-160 160"/>
+    <motor name="thruster_3" site="thruster_3" gear="0 0 1 0 0 0" ctrlrange="-160 160"/>
+    <motor name="thruster_4" site="thruster_4" gear="1 0 0 0 0 0" ctrlrange="-160 160"/>
+    <motor name="thruster_5" site="thruster_5" gear="1 0 0 0 0 0" ctrlrange="-160 160"/>
+    <motor name="thruster_6" site="thruster_6" gear="1 0 0 0 0 0" ctrlrange="-160 160"/>
+    <motor name="thruster_7" site="thruster_7" gear="1 0 0 0 0 0" ctrlrange="-160 160"/>
+  </actuator>
+</mujoco>

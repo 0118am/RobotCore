@@ -1,0 +1,37 @@
+[Unit]
+Description=RobotCore ROS 2 robot graph
+After=network-online.target dev-robotcore-aboard.device nvargus-daemon.service
+Wants=network-online.target nvargus-daemon.service
+Requires=dev-robotcore-aboard.device
+
+[Service]
+Type=simple
+User=robotcore
+Group=robotcore
+# ZED/AprilTag image processing needs NVIDIA render devices; USB CDC-ACM
+# devices commonly retain the distro-managed dialout group in addition to the
+# RobotCore udev ownership rule.
+SupplementaryGroups=robotops video render dialout
+EnvironmentFile=/etc/robotcore/edge.env
+WorkingDirectory=/opt/RobotCore/ros_ws
+# Do not let localisation start against the package's sample map when the
+# deployment has selected a managed map.  This check runs as the robot service
+# account, so it also verifies that the selected revision is readable at boot.
+ExecStartPre=/usr/bin/test -r ${ROBOTCORE_APRILTAG_MAP_FILE}
+ExecStart=/usr/bin/bash -lc 'source "${ROBOTCORE_WORKSPACE}/install/setup.bash" && exec ros2 launch eup_bringup eup_edge_system.launch.py enable_web_ui:=false serial_port:="${ROBOTCORE_ABOARD_PORT}" apriltag_tag_map_file:="${ROBOTCORE_APRILTAG_MAP_FILE}"'
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+KillSignal=SIGINT
+NoNewPrivileges=true
+PrivateTmp=true
+# Preserve /tmp isolation while exposing only the NVIDIA Argus and IMU-daemon
+# IPC sockets that the ZED SDK needs to open the CSI camera. Do not bind the
+# whole host /tmp.
+BindReadOnlyPaths=/tmp/argus_socket
+BindReadOnlyPaths=/tmp/imu_daemon.sock
+ProtectHome=read-only
+ReadWritePaths=/var/lib/robotcore/runs
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,14 @@
+warpauv_thrusters:
+  source: /home/jining_yang/isaac-auv-env/thruster_dynamics.py
+  license: BSD-3-Clause
+  command_range: [-1.0, 1.0]
+  pwm_deadband: 0.08
+  rotor_constant: 0.001
+  first_order_tau_s: 0.05
+  ordering:
+    - drive_left
+    - drive_right
+    - rear_left
+    - rear_right
+    - front_left
+    - front_right

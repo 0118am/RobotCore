@@ -1,0 +1,12 @@
+# Long-running task entry point for UI and autonomy code.
+string task_name
+# JSON payload keeps the Phase 1 action generic while task schemas settle.
+string goal_json
+---
+bool success
+string message
+---
+float32 progress
+string state
+# Useful for UI/debugging while a task graph is running.
+string[] active_nodes

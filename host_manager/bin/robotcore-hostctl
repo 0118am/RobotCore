@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""Small local client for the RobotCore host-management Unix socket."""
+
+import argparse
+import json
+import socket
+from pathlib import Path
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Call the RobotCore host-manager local API")
+    parser.add_argument(
+        "action",
+        choices=[
+            "status",
+            "devices",
+            "rosbag-status",
+            "logs",
+            "start",
+            "stop",
+            "restart",
+            "maintenance-status",
+            "apriltag-map",
+            "apriltag-upsert",
+            "apriltag-delete",
+        ],
+    )
+    parser.add_argument("--service", choices=["robot", "web"])
+    parser.add_argument("--tag-id", type=int)
+    parser.add_argument("--replace-tag-id", type=int)
+    parser.add_argument("--size-m", type=float)
+    parser.add_argument("--position-m", type=float, nargs=3, metavar=("X", "Y", "Z"))
+    parser.add_argument("--rpy-deg", type=float, nargs=3, metavar=("ROLL", "PITCH", "YAW"))
+    parser.add_argument("--socket", type=Path, default=Path("/run/robotcore/host-manager.sock"))
+    args = parser.parse_args()
+    request = {"action": args.action}
+    if args.service:
+        request["service"] = args.service
+    if args.action == "apriltag-upsert":
+        if None in {args.tag_id, args.size_m} or args.position_m is None or args.rpy_deg is None:
+            parser.error("apriltag-upsert requires --tag-id, --size-m, --position-m, and --rpy-deg")
+        request["tag"] = {
+            "id": args.tag_id,
+            "size_m": args.size_m,
+            "position_m": args.position_m,
+            "rpy_deg": args.rpy_deg,
+        }
+        if args.replace_tag_id is not None:
+            request["replace_tag_id"] = args.replace_tag_id
+    if args.action == "apriltag-delete":
+        if args.tag_id is None:
+            parser.error("apriltag-delete requires --tag-id")
+        request["tag_id"] = args.tag_id
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.connect(str(args.socket))
+        client.sendall((json.dumps(request) + "\n").encode("utf-8"))
+        response = client.makefile("rb").readline()
+    print(json.dumps(json.loads(response), indent=2, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

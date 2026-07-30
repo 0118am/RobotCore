@@ -1,0 +1,7 @@
+# Engage or clear the safety abort latch.
+bool abort
+string reason
+---
+bool accepted
+bool abort_active
+string message

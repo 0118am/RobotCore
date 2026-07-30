@@ -1,0 +1,10 @@
+name: dummy_body_policy
+role: body
+runner: dummy
+model_path: dummy://body/zero_thrusters
+input_schema:
+  - /robot/body_state
+output_schema:
+  type: normalized_thruster
+  size: 8
+  range: [-1.0, 1.0]

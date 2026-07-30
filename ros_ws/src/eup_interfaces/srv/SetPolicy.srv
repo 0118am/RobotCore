@@ -1,0 +1,9 @@
+# Switch or preload the active policy for body or arm runtime nodes.
+string policy_name
+string policy_path
+# When false, implementations may validate without activating.
+bool activate
+---
+bool accepted
+string active_policy
+string message

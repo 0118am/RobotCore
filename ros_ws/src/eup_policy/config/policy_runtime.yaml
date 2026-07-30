@@ -1,0 +1,13 @@
+body_policy:
+  default_policy: dummy_body_policy
+  default_manifest: models/policies/dummy_body_policy/policy.yaml
+  required_inputs:
+    - /robot/body_state
+  output_topic: /policy/body/action
+
+arm_policy:
+  default_policy: dummy_arm_policy
+  default_manifest: models/policies/dummy_arm_policy/policy.yaml
+  required_inputs:
+    - /robot/arm_state
+  output_topic: /policy/arm/action

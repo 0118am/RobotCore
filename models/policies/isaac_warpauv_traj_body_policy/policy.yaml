@@ -1,0 +1,42 @@
+name: isaac_warpauv_traj_body_policy
+role: body
+runner: onnx
+model_path: models/policies/isaac_warpauv_traj_body_policy/policy.onnx
+
+input_schema:
+  - /robot/body_state
+  - /runtime/trajectory_target
+
+output_schema:
+  type: normalized_thruster
+  source_action_type: isaaclab_warpauv_6_thruster_pwm
+  size: 6
+  mapped_size: 8
+  range: [-1.0, 1.0]
+  mapping_note: "The preferred MuJoCo model has 6 actuators. The ROS command contract still pads to 8 for backend compatibility; MuJoCo consumes the first model.nu channels."
+
+isaac_contract:
+  source: /home/jining_yang/IsaacLab/logs/rsl_rl/warpauv_traj_direct/2026-06-12_14-33-57
+  checkpoint: model_799.pt
+  exported_onnx: exported/policy.onnx
+  task: Isaac-WarpAUV-Traj-Direct-v1
+  observation_dim: 20
+  action_dim: 6
+  # Deployment/validation timing. The IsaacLab training configuration must
+  # use the same 1/180 s physics step and decimation of three before this
+  # policy is used in the water tank.
+  physics_rate_hz: 180
+  control_rate_hz: 60
+  physics_steps_per_action: 3
+  observation_order:
+    - target_quat_w[4]
+    - target_pos_error_b[3]
+    - target_lin_vel_b[3]
+    - root_quat_w[4]
+    - root_lin_vel_b[3]
+    - root_ang_vel_b[3]
+  default_target_quat_w: [1.0, 0.0, 0.0, 0.0]
+  default_target_pos_error_b: [0.0, 0.0, 0.0]
+  default_target_lin_vel_b: [0.0, 0.0, 0.0]
+  providers:
+    - CPUExecutionProvider

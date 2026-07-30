@@ -1,0 +1,29 @@
+fixed_stack:
+  ubuntu: "22.04"
+  ros2: "humble"
+  ros2_control:
+    - ros-humble-ros2-control
+    - ros-humble-ros2-controllers
+  mujoco_python_package: "mujoco==TBD"
+
+topics:
+  imu: /zedx/zed_node/imu/data
+  body_state: /robot/body_state
+  arm_state: /robot/arm_state
+  thruster_state: /robot/thruster_state
+  thruster_cmd: /control/thruster_cmd
+  arm_cmd: /control/arm_cmd
+  body_policy_status: /policy/body/status
+  arm_policy_status: /policy/arm/status
+  safety_events: /safety/events
+  board_status: /hardware/board_status
+
+control:
+  thruster_count: 8
+  normalized_min: -1.0
+  normalized_max: 1.0
+  pwm_neutral_us: 1500
+  pwm_span_us: 100
+
+runtime:
+  run_root: data/robotcore_runs

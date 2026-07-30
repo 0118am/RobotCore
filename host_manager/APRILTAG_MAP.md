@@ -1,0 +1,60 @@
+# Managed AprilTag map
+
+The host manager owns one JSON document at the root-configured
+`apriltag_map.path`. AprilTag localisation accepts JSON map files only; this
+managed document is the single map authority. Each tag is an upsertable map
+definition:
+
+```json
+{
+  "schema_version": 1,
+  "frame": "map",
+  "tags": {
+    "12": {
+      "position_m": [1.2, -0.4, 0.3],
+      "rpy_deg": [90.0, 0.0, -90.0],
+      "size_m": 0.13
+    }
+  }
+}
+```
+
+`position_m` is the **centre of the black outer square** in the `map` frame.
+`rpy_deg` describes the ROS tag frame: printed right is +X, printed top is +Y,
+and the face normal is +Z. `size_m` is the measured black-square edge length,
+not the paper width.
+
+`rpy_deg` always describes the physical printed axes. Do not add a 180-degree
+rotation to compensate for OpenCV's internal `DICT_APRILTAG_*` corner
+convention. The localization detector normalizes that convention before PnP.
+
+The deployed pool geometry is `F=[0, 5.42] m`, `L=[0, 3.73] m`, with the
+floor at `U=0`. Localization validates every complete map revision before
+adopting it: each Tag centre must lie on the floor or one of the four inner
+walls, its face normal must point into the pool, wall-tag printed top must
+point toward `+U`, and its four black-square corners must remain in bounds.
+
+The web panel reads the managed file on load and refreshes it continuously. It
+can add or update one ID when `apriltag_map.web_edit_enabled` is true (the
+robot operator configuration enables this by default). The daemon validates
+ranges, writes a temporary file, fsyncs it, and atomically replaces the
+managed map.
+`apriltag_localization_node` notices the new mtime, loads it only if valid, and
+resets its pose filter before using it.
+
+For a local maintenance entry, use:
+
+```bash
+robotcore-hostctl apriltag-upsert --tag-id 12 --size-m 0.13 \
+  --position-m 1.2 -0.4 0.3 --rpy-deg 90 0 -90
+```
+
+To remove a definition, use the same managed path:
+
+```bash
+robotcore-hostctl apriltag-delete --tag-id 12
+```
+
+Deletion atomically writes the remaining map. An empty, valid map is also
+reloaded, so deleting the final tag removes it from
+localisation rather than retaining a stale layout.

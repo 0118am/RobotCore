@@ -1,0 +1,94 @@
+# Stable ZED X Mini profile for AprilTag localisation with a VIO fallback.
+# Positional tracking needs depth extraction, but depth images and point clouds
+# remain disabled so those outputs cannot add display or detector latency.
+---
+/**:
+  ros__parameters:
+    general:
+      camera_model: zedxm
+      camera_name: zedx
+      serial_number: 0
+      camera_id: 1
+      grab_resolution: HD1200
+      grab_frame_rate: 30
+      # PnP consumes the matching scaled CameraInfo, so publishing 1280x800
+      # retains calibrated geometry while cutting detector pixels by 56%.
+      # The operator overlay is 960 px wide, so this does not reduce its
+      # delivered resolution.
+      pub_resolution: CUSTOM
+      pub_downscale_factor: 1.5
+      # AprilTag localisation consumes the newest available frame.  The
+      # consumer queue is depth-one, so 30 Hz lowers observation age without
+      # accumulating a backlog when detection briefly runs slower.
+      pub_frame_rate: 30.0
+      camera_timeout_sec: 5
+      camera_max_reconnect: 1
+      # This is the latest successful 1920x1200 stereo calibration for the
+      # ZED X Mini with serial 50649148. Install it at this service-readable
+      # path; the ZED SDK then uses it to generate the rectified image and
+      # CameraInfo.P consumed by AprilTag PnP.
+      optional_opencv_calibration_file: /etc/robotcore/zed_calibration_50649148.yml
+      # Do not let the SDK refine/replace the externally supplied intrinsics.
+      self_calib: false
+
+    video:
+      publish_rgb: true
+      # ZED otherwise publishes BGRA. BGR carries the same visible image with
+      # 25% fewer bytes and one less channel for every ROS/DDS copy.
+      enable_24bit_output: true
+      publish_left_right: false
+      publish_raw: false
+      publish_gray: false
+      publish_stereo: false
+
+    depth:
+      # NONE disables positional tracking in the ZED SDK. NEURAL_LIGHT is the
+      # least expensive supported mode that keeps the camera's VIO odometry
+      # available for the Tag-loss / Tag-rejection fallback.
+      depth_mode: NEURAL_LIGHT
+      depth_stabilization: 0
+      publish_depth_map: false
+      publish_depth_info: false
+      publish_point_cloud: false
+      publish_depth_confidence: false
+      publish_disparity: false
+
+    pos_tracking:
+      # Publish local VIO odometry for tag_vio_alignment_node. Dynamic ZED TF
+      # remains disabled: the alignment node is the sole map-pose authority.
+      # The ZED launch supplies its internal static camera-frame tree, while
+      # vehicle_frames supplies the vehicle mounting TF.
+      pos_tracking_enabled: true
+      pos_tracking_mode: AUTO
+      imu_fusion: true
+      publish_tf: false
+      publish_map_tf: false
+      publish_odom_pose: true
+      publish_pose_cov: false
+      publish_cam_path: false
+
+    sensors:
+      # ZED VIO uses this IMU internally. Publish it separately for the
+      # operator HUD only; no ROS EKF consumes this topic.
+      publish_imu: true
+      publish_imu_raw: false
+      publish_cam_imu_transf: false
+      publish_mag: false
+      publish_baro: false
+      publish_temp: false
+      publish_imu_tf: false
+
+    mapping:
+      mapping_enabled: false
+
+    object_detection:
+      od_enabled: false
+
+    body_tracking:
+      bt_enabled: false
+
+    stream_server:
+      stream_enabled: false
+
+    debug:
+      sdk_verbose: 1

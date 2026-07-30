@@ -1,0 +1,4 @@
+# A-board: QinHeng 1a86:55d3 USB CDC-ACM serial device. It enumerates as
+# /dev/ttyACM0 on the target, while the ANO CMSIS-DAP probe is ttyACM1.
+# Use the stable alias rather than relying on ttyACM numbering.
+SUBSYSTEM=="tty", KERNEL=="ttyACM*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d3", SYMLINK+="robotcore/aboard", GROUP="dialout", MODE="0660"

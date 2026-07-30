@@ -1,0 +1,21 @@
+[Unit]
+Description=ControlInterface browser operator UI
+After=network-online.target robotcore-host-manager.service
+Wants=network-online.target robotcore-host-manager.service
+
+[Service]
+Type=simple
+User=robotcore
+Group=robotcore
+SupplementaryGroups=robotops
+EnvironmentFile=/etc/robotcore/edge.env
+WorkingDirectory=/opt/ControlInterface
+ExecStart=/usr/bin/bash -lc 'source "${ROBOTCORE_WORKSPACE}/install/setup.bash" && source "${CONTROL_INTERFACE_WORKSPACE}/install/setup.bash" && exec ros2 launch eup_ui eup_web_operator.launch.py web_host:=${CONTROL_INTERFACE_HOST} web_port:=${CONTROL_INTERFACE_PORT} host_manager_socket:=/run/robotcore/host-manager.sock apriltag_map_file:="${ROBOTCORE_APRILTAG_MAP_FILE}" imu_topic:=/zedx/zed_node/imu/data'
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target

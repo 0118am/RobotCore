@@ -1,0 +1,55 @@
+sensor_fusion:
+  body_state_topic: /robot/body_state
+  depth_input_topic: /hardware/aboard_depth_m
+  altitude_input_topic: ""
+  localization_pose_topic: /localization/apriltag_pose
+  degraded_localization_pose_topic: /localization/apriltag_pose_degraded
+  localization_max_age_s: 0.20
+  fused_odometry_topic: /localization/fused_odom
+  zed_odometry_topic: /localization/zed_odom
+  zed_odometry_max_age_s: 0.35
+  tag_vio_disagreement_m: 0.50
+
+vehicle_frames:
+  base_frame: base_link
+  camera_optical_frame: front_camera_optical_frame
+  base_to_camera_translation_m: [0.236, 0.027, 0.016]
+
+apriltag_localization:
+  image_topic: /zedx/zed_node/rgb/color/rect/image
+  camera_info_topic: /zedx/zed_node/rgb/color/rect/camera_info
+  map_frame: map
+  base_frame: base_link
+  tag_family: tag36h11
+  tag_size_m: 0.130
+  tag_map_position_uncertainty_m: 0.05
+  enforce_cuboid_pool_geometry: true
+  pool_length_m: 5.42
+  pool_width_m: 3.73
+  pool_surface_tolerance_m: 0.02
+  pool_orientation_tolerance_deg: 2.0
+  max_reprojection_rms_px: 3.0
+  minimum_pose_tag_count: 3
+  minimum_inlier_corners_per_tag: 3
+  degraded_pose_topic: /localization/apriltag_pose_degraded
+  aligned_vio_odometry_topic: /localization/fused_odom
+  enable_degraded_two_tag_pose: true
+  degraded_two_tag_inlier_corners_per_tag: 4
+  degraded_two_tag_max_full_rms_px: 3.0
+  degraded_two_tag_vio_max_translation_m: 0.20
+  degraded_two_tag_vio_max_angle_deg: 10.0
+  max_translation_speed_mps: 1.0
+  max_translation_jump_m: 0.05
+  multi_tag_position_stddev_m: 0.05
+  # Runtime and web UI both use the host-managed active map.
+  tag_map_file: /etc/robotcore/apriltag_map.json
+  pose_topic: /localization/apriltag_pose
+  detected_count_topic: /localization/apriltag/detected_count
+
+body_state:
+  topic: /robot/body_state
+  frame_id: map
+
+arm_state:
+  topic: /robot/arm_state
+  frame_id: arm_base

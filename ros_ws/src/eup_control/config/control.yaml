@@ -1,0 +1,24 @@
+thrusters:
+  count: 8
+  normalized_min: -1.0
+  normalized_max: 1.0
+  pwm_neutral_us: 1500
+  pwm_span_us: 100
+  layout:
+    - {id: 0, name: right_front_vertical_down_positive, frame: base_link}
+    - {id: 1, name: right_rear_vertical_down_positive, frame: base_link}
+    - {id: 2, name: left_front_vertical_down_positive, frame: base_link}
+    - {id: 3, name: left_rear_vertical_down_positive, frame: base_link}
+    - {id: 4, name: left_rear_horizontal, frame: base_link}
+    - {id: 5, name: right_rear_horizontal, frame: base_link}
+    - {id: 6, name: left_front_horizontal, frame: base_link}
+    - {id: 7, name: right_front_horizontal, frame: base_link}
+
+arm:
+  default_joint_names:
+    - joint_1
+    - joint_2
+    - joint_3
+    - joint_4
+    - joint_5
+    - joint_6

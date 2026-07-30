@@ -1,0 +1,11 @@
+build/
+install/
+log/
+.pytest_cache/
+__pycache__/
+*.pyc
+*.egg-info/
+data/robotcore_runs/run_*/
+*.bag
+*.db3
+*.mcap

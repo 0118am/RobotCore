@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+"""Start the RobotCore local host-management daemon from an installed checkout."""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from robotcore_host_manager.daemon import main
+
+raise SystemExit(main())

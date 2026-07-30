@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "socket_group": "robotops",
+  "services": {
+    "robot": "robotcore.service",
+    "web": "control-interface.service"
+  },
+  "devices": [
+    {
+      "name": "aboard",
+      "path": "/dev/robotcore/aboard",
+      "required": true
+    },
+    {
+      "name": "zedx",
+      "path": "/dev/video0",
+      "required": false
+    }
+  ],
+  "rosbag": {
+    "run_root": "/var/lib/robotcore/runs",
+    "stale_after_seconds": 15
+  },
+  "apriltag_map": {
+    "path": "/etc/robotcore/apriltag_map.json",
+    "web_edit_enabled": true
+  },
+  "maintenance": {
+    "upgrade_enabled": false,
+    "flash_enabled": false,
+    "note": "Run approved local workflows; these operations are never daemon RPCs."
+  }
+}
