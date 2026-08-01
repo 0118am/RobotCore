@@ -11,9 +11,9 @@ This file defines the first-stage system-chain acceptance target.
 
 ## Sensor and Robot State
 
-- [ ] `/zedx/zed_node/imu/data` publishes at approximately 200 Hz for the
-      operator HUD. The ZED SDK also fuses this camera IMU internally for its
-      60 Hz VIO output.
+- [ ] `/zedx/zed_node/imu/data` publishes at approximately 10 Hz for the
+      operator HUD. The ZED SDK fuses the camera IMU internally independently
+      of this ROS publication rate.
 - [ ] `/zedx/zed_node/rgb/color/rect/image` and its matching CameraInfo publish
       real-time ZED frames at up to 30 Hz for AprilTag localisation.
 - [ ] A-board UART8 runs at 115200 baud and frame 3 reports unique external-IMU
@@ -24,8 +24,11 @@ This file defines the first-stage system-chain acceptance target.
       `/localization/external_imu_ready` becomes true after a stationary
       calibration. `/sensors/external_imu` then publishes calibrated angular
       velocity with strictly increasing timestamps and source sample IDs.
-- [ ] `/localization/apriltag/debug_image/compressed` carries the recognised-tag
-      overlay selected by the browser camera panel.
+- [ ] The browser consumes the ZED compressed image directly; localisation does
+      not copy or JPEG-encode camera frames for display.
+- [ ] `/localization/apriltag/detections` is produced by
+      `isaac_ros_apriltag` with `backends=CUDA`; the old OpenCV detector and
+      custom VPI/PVA detector are not running.
 - [ ] `/localization/apriltag_pose` is a mapped AprilTag measurement and
       `/localization/aligned_vio_odom` is the event-driven map-frame pose
       composed from AprilTag map-to-odom calibration and ZED VIO local
@@ -43,9 +46,10 @@ This file defines the first-stage system-chain acceptance target.
       stationary/noise calibration all pass.
 - [ ] The ZED launch publishes only its internal static camera-frame TF tree;
       it does not publish dynamic `odom` or `map` transforms.
-- [ ] The raw AprilTag node does not broadcast a competing dynamic TF. The
-      Tag/VIO alignment is the sole map-pose authority. Its correction gate
-      rejects an inconsistent tag and continues with ZED VIO estimation.
+- [ ] Isaac's raw single-size Tag TF is remapped to
+      `/localization/apriltag/raw_tf`, never `/tf`. Tag/VIO alignment is the
+      sole map-pose authority. Its correction gate rejects an inconsistent
+      tag and continues with ZED VIO estimation.
 - [ ] `/robot/body_state` publishes body pose, twist, and validity.
 - [ ] `/robot/arm_state` publishes arm joint state after the real arm driver is connected.
 

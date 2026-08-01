@@ -2,6 +2,7 @@ command_authority:
   ros__parameters:
     publish_rate_hz: 100.0
     candidate_timeout_s: 0.10
+    manual_candidate_timeout_s: 0.60
     state_timeout_s: 0.15
     target_timeout_s: 0.15
     safety_heartbeat_timeout_s: 0.25

@@ -10,18 +10,15 @@
       serial_number: 0
       camera_id: 1
       grab_resolution: HD1200
-      # Run VIO at 60 Hz. Image publication remains capped at 30 Hz below so
-      # AprilTag CPU/DDS load does not double with the state-estimation rate.
-      grab_frame_rate: 60
-      # PnP consumes the matching scaled CameraInfo, so publishing 1280x800
-      # retains calibrated geometry while cutting detector pixels by 56%.
-      # The operator overlay is 960 px wide, so this does not reduce its
-      # delivered resolution.
+      # Keep camera acquisition and ROS image publication on one fixed clock.
+      # There is no separate high-rate grab path or downstream frame cap.
+      grab_frame_rate: 30
+      # PnP consumes the matching scaled CameraInfo, so publishing 960x600
+      # preserves calibrated geometry while reducing CUDA detector load.
       pub_resolution: CUSTOM
-      pub_downscale_factor: 1.5
-      # AprilTag localisation consumes the newest available frame.  The
-      # consumer queue is depth-one, so 30 Hz lowers observation age without
-      # accumulating a backlog when detection briefly runs slower.
+      pub_downscale_factor: 2.0
+      # Match acquisition exactly: ZED image, CameraInfo and CUDA AprilTag
+      # input all run from the same 30 Hz frame stream.
       pub_frame_rate: 30.0
       camera_timeout_sec: 5
       camera_max_reconnect: 1
@@ -42,6 +39,21 @@
       publish_raw: false
       publish_gray: false
       publish_stereo: false
+
+    # Keep localisation and operator video on separate quality paths. Isaac
+    # ROS consumes the uncompressed rectified image above at 960x600/30 Hz;
+    # only image_transport's browser-facing JPEG publisher is compressed more
+    # aggressively. The parameter prefix follows the ZED image publisher's
+    # resolved topic under the /zedx namespace.
+    # The leading dot is part of the parameter name declared by the Humble
+    # compressed_image_transport plugin for this fully resolved ZED topic.
+    ".zed_node":
+      rgb:
+        color:
+          rect:
+            image:
+              format: jpeg
+              jpeg_quality: 30
 
     depth:
       # NONE disables positional tracking in the ZED SDK. NEURAL_LIGHT is the
@@ -70,11 +82,9 @@
       publish_cam_path: false
 
     sensors:
-      # ZED VIO uses this IMU internally. Publish it separately for the
-      # operator HUD only; no ROS EKF consumes this topic.
-      # ZED X Mini's IMU data rate is 200 Hz; polling at the wrapper's generic
-      # 400 Hz ceiling would not create additional hardware samples.
-      sensors_pub_rate: 200.0
+      # ZED VIO uses the IMU internally. ROS publishes only the 10 Hz samples
+      # needed by the operator HUD; no estimator consumes this ROS topic.
+      sensors_pub_rate: 10.0
       publish_imu: true
       publish_imu_raw: false
       publish_cam_imu_transf: false

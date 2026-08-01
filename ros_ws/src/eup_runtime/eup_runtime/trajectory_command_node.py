@@ -64,6 +64,7 @@ class TrajectoryCommandNode(Node):
         self.declare_parameter("attitude_max_rpy_deg", [0.0, 0.0, 0.0])
 
         self.started_ns = self.get_clock().now().nanoseconds
+        self.tracking_started = False
         self.initial_position = None
         self.initial_quaternion = None
         self.envelope_checked = False
@@ -72,6 +73,9 @@ class TrajectoryCommandNode(Node):
         self.create_subscription(BodyState, "/robot/body_state", self.on_body_state, 10)
         self.create_service(
             Trigger, "/runtime/trajectory/reset", self.on_reset_scenario
+        )
+        self.create_service(
+            Trigger, "/runtime/trajectory/stop", self.on_stop_scenario
         )
         self.create_service(
             Trigger, "/runtime/trajectory/validate", self.on_validate_scenario
@@ -84,11 +88,11 @@ class TrajectoryCommandNode(Node):
         """Publish the next target using ROS time since node startup."""
 
         now = self.get_clock().now()
-        time_s = (now.nanoseconds - self.started_ns) * 1e-9
+        time_s = self.trajectory_time_s(now.nanoseconds)
         trajectory_type = str(self.get_parameter("trajectory_type").value).lower()
         hold_s = max(0.0, float(self.get_parameter("hold_before_motion_s").value))
         effective_time_s = max(0.0, time_s - hold_s)
-        if time_s < hold_s:
+        if not self.tracking_started or time_s < hold_s:
             sample = self.sample("hold", 0.0)
             orientation = tuple(self.attitude_quaternion("hold", 0.0))
             angular_velocity = (0.0, 0.0, 0.0)
@@ -128,6 +132,13 @@ class TrajectoryCommandNode(Node):
         msg.valid = self.target_is_valid(sample.position)
         self.pub.publish(msg)
 
+    def trajectory_time_s(self, now_ns):
+        """Keep Target time frozen until the explicit Start/reset service."""
+
+        if not self.tracking_started:
+            return 0.0
+        return max(0.0, (int(now_ns) - self.started_ns) * 1e-9)
+
     def on_body_state(self, msg: BodyState):
         """Capture the first trustworthy pose as the relative scenario center."""
 
@@ -155,10 +166,18 @@ class TrajectoryCommandNode(Node):
 
     def on_reset_scenario(self, _request, response):
         self.started_ns = self.get_clock().now().nanoseconds
+        self.tracking_started = True
         self.envelope_checked = False
         self.envelope_valid = False
         response.success = True
-        response.message = "trajectory clock and envelope validation reset"
+        response.message = "trajectory tracking started at 0.00 s"
+        return response
+
+    def on_stop_scenario(self, _request, response):
+        self.tracking_started = False
+        self.started_ns = self.get_clock().now().nanoseconds
+        response.success = True
+        response.message = "trajectory ready; target time held at 0.00 s"
         return response
 
     def on_validate_scenario(self, _request, response):

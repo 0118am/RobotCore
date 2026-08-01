@@ -1,4 +1,4 @@
-"""Static acceptance tests for the edge 60 Hz localisation pipeline."""
+"""Static acceptance tests for the edge localisation pipeline."""
 
 from pathlib import Path
 
@@ -13,12 +13,12 @@ def load_yaml(relative: str):
     return yaml.safe_load((SENSORS / relative).read_text(encoding="utf-8"))
 
 
-def test_zed_vio_and_sensor_rates_keep_apriltag_image_load_bounded():
+def test_zed_camera_uses_one_fixed_30_hz_frame_rate():
     parameters = load_yaml("config/zedx_minimal_open.yaml")["/**"]["ros__parameters"]
 
-    assert parameters["general"]["grab_frame_rate"] == 60
+    assert parameters["general"]["grab_frame_rate"] == 30
     assert parameters["general"]["pub_frame_rate"] == 30.0
-    assert parameters["sensors"]["sensors_pub_rate"] == 200.0
+    assert parameters["sensors"]["sensors_pub_rate"] == 10.0
     assert parameters["pos_tracking"]["imu_fusion"] is True
     assert parameters["pos_tracking"]["publish_odom_pose"] is True
 
@@ -61,6 +61,7 @@ def test_edge_launch_wires_one_canonical_fixed_rate_output():
     ).read_text(encoding="utf-8")
 
     assert 'executable="imu_conditioning_node"' in launch
+    assert '"imu_topic": LaunchConfiguration("zed_imu_topic")' in launch
     assert '"publish_imu": True' in launch
     assert '"output_odometry_topic": "/localization/aligned_vio_odom"' in launch
     assert 'package="robot_localization"' in launch

@@ -34,13 +34,14 @@ adopting it: each Tag centre must lie on the floor or one of the four inner
 walls, its face normal must point into the pool, wall-tag printed top must
 point toward `+U`, and its four black-square corners must remain in bounds.
 
-The web panel reads the managed file on load and refreshes it continuously. It
-can add or update one ID when `apriltag_map.web_edit_enabled` is true (the
-robot operator configuration enables this by default). The daemon validates
-ranges, writes a temporary file, fsyncs it, and atomically replaces the
-managed map.
-`apriltag_localization_node` notices the new mtime, loads it only if valid, and
-resets its pose filter before using it.
+The web panel reads the managed file once on load and after explicit map
+actions. It can add or update one ID when
+`apriltag_map.web_edit_enabled` is true (the robot operator configuration
+enables this by default). The daemon validates ranges, writes a temporary
+file, fsyncs it, and atomically replaces the managed map.
+`apriltag_localization_node` loads the map once at startup. Saved edits take
+effect only after the explicit Relocalize action reloads and validates the
+complete map; a failed reload preserves the last valid map.
 
 For a local maintenance entry, use:
 

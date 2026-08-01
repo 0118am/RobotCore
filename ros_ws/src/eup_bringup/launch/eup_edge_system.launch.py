@@ -6,7 +6,8 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, SetEnvironmentVariable
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
-from launch_ros.actions import Node
+from launch_ros.actions import ComposableNodeContainer, Node
+from launch_ros.descriptions import ComposableNode
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
@@ -32,18 +33,17 @@ def generate_launch_description():
             DeclareLaunchArgument("altitude_input_topic", default_value=""),
             DeclareLaunchArgument("front_camera_raw_topic", default_value="/zedx/zed_node/rgb/color/rect/image"),
             DeclareLaunchArgument(
-                "front_camera_tag_overlay_topic",
-                default_value="/localization/apriltag/debug_image/compressed",
-            ),
-            DeclareLaunchArgument(
                 "front_camera_compressed_topic",
                 default_value="/zedx/zed_node/rgb/color/rect/image/compressed",
             ),
-            DeclareLaunchArgument("camera_source_lock", default_value="true"),
             DeclareLaunchArgument(
                 "front_camera_info_topic", default_value="/zedx/zed_node/rgb/color/rect/camera_info"
             ),
             DeclareLaunchArgument("enable_apriltag_localization", default_value="true"),
+            DeclareLaunchArgument(
+                "apriltag_detections_topic",
+                default_value="/localization/apriltag/detections",
+            ),
             # AprilTag calibrates map->odom. ZED VIO already fuses the camera
             # IMU and continuously propagates odom->base_link between tags.
             DeclareLaunchArgument("enable_tag_vio_alignment", default_value="true"),
@@ -201,6 +201,47 @@ def generate_launch_description():
                     }
                 ],
             ),
+            # Isaac ROS owns only the image-space detector. Its single-size
+            # pose and TF outputs are not authoritative because the managed
+            # map contains both 0.4 m and 0.2 m Tags. The downstream map node
+            # consumes ID/corners and performs one joint, per-Tag-size PnP.
+            ComposableNodeContainer(
+                package="rclcpp_components",
+                executable="component_container_mt",
+                name="apriltag_cuda_container",
+                namespace="",
+                output="screen",
+                condition=IfCondition(LaunchConfiguration("enable_apriltag_localization")),
+                composable_node_descriptions=[
+                    ComposableNode(
+                        package="isaac_ros_apriltag",
+                        plugin="nvidia::isaac_ros::apriltag::AprilTagNode",
+                        name="apriltag_cuda_detector",
+                        parameters=[
+                            {
+                                "backends": "CUDA",
+                                "tag_family": "tag36h11",
+                                # Ignored by map localisation. It is needed by
+                                # Isaac's non-authoritative raw pose output.
+                                "size": 0.4,
+                                "max_tags": 64,
+                                "tile_size": 4,
+                            }
+                        ],
+                        remappings=[
+                            ("image", LaunchConfiguration("front_camera_raw_topic")),
+                            ("camera_info", LaunchConfiguration("front_camera_info_topic")),
+                            (
+                                "tag_detections",
+                                LaunchConfiguration("apriltag_detections_topic"),
+                            ),
+                            # Never let the detector's one-size tag poses join
+                            # the production TF tree.
+                            ("tf", "/localization/apriltag/raw_tf"),
+                        ],
+                    )
+                ],
+            ),
             Node(
                 package="eup_sensors",
                 executable="apriltag_localization_node",
@@ -209,16 +250,11 @@ def generate_launch_description():
                 condition=IfCondition(LaunchConfiguration("enable_apriltag_localization")),
                 parameters=[
                     {
-                        "image_topic": LaunchConfiguration("front_camera_raw_topic"),
                         "camera_info_topic": LaunchConfiguration("front_camera_info_topic"),
-                        "debug_image_topic": LaunchConfiguration("front_camera_tag_overlay_topic"),
+                        "detections_topic": LaunchConfiguration("apriltag_detections_topic"),
                         "tag_map_file": LaunchConfiguration("apriltag_tag_map_file"),
                         "detected_count_topic": LaunchConfiguration("apriltag_detected_count_topic"),
                         "tag_size_m": 0.130,
-                        # Operator video is latest-only and encoded off the
-                        # localisation callback. 15 Hz is responsive without
-                        # spending CPU/network on frames the UI cannot use.
-                        "debug_publish_rate_hz": 15.0,
                         "pose_filter_time_constant_s": ParameterValue(
                             LaunchConfiguration("apriltag_pose_filter_time_constant_s"), value_type=float
                         ),
@@ -369,26 +405,6 @@ def generate_launch_description():
             ),
             Node(
                 package="eup_runtime",
-                executable="run_logger",
-                name="run_logger",
-                output="screen",
-                parameters=[
-                    {
-                        "pid_config_path": LaunchConfiguration("pid_config_path"),
-                        "thruster_config_path": LaunchConfiguration(
-                            "thruster_config_path"
-                        ),
-                        "scenario_config_path": LaunchConfiguration(
-                            "scenario_config_path"
-                        ),
-                        "safety_config_path": LaunchConfiguration(
-                            "pool_control_config"
-                        ),
-                    }
-                ],
-            ),
-            Node(
-                package="eup_runtime",
                 executable="blackboard",
                 name="blackboard",
                 output="screen",
@@ -447,12 +463,7 @@ def generate_launch_description():
                             "apriltag_detected_count_topic"
                         ),
                         "title": "RobotCore Operator",
-                        "front_camera_raw_topic": LaunchConfiguration("front_camera_raw_topic"),
-                        "front_camera_tag_overlay_topic": LaunchConfiguration("front_camera_tag_overlay_topic"),
                         "front_camera_compressed_topic": LaunchConfiguration("front_camera_compressed_topic"),
-                        "camera_source_lock": ParameterValue(
-                            LaunchConfiguration("camera_source_lock"), value_type=bool
-                        ),
                         "imu_topic": LaunchConfiguration("zed_imu_topic"),
                         "manual_thruster_span_us": ParameterValue(
                             LaunchConfiguration("manual_thruster_span_us"),

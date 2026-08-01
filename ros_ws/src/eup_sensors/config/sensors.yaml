@@ -18,8 +18,8 @@ vehicle_frames:
   base_to_camera_translation_m: [0.236, 0.027, 0.016]
 
 apriltag_localization:
-  image_topic: /zedx/zed_node/rgb/color/rect/image
   camera_info_topic: /zedx/zed_node/rgb/color/rect/camera_info
+  detections_topic: /localization/apriltag/detections
   map_frame: map
   base_frame: base_link
   tag_family: tag36h11

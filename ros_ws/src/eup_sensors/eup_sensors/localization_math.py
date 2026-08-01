@@ -12,14 +12,6 @@ from typing import Iterable
 import numpy as np
 
 
-def advance_rate_deadline(now_s: float, deadline_s: float, interval_s: float) -> float:
-    """Advance a sampled rate deadline without quantizing away fractional phase."""
-
-    if not math.isfinite(deadline_s) or now_s - deadline_s > interval_s:
-        return now_s + interval_s
-    return deadline_s + interval_s
-
-
 def largest_tag_quads(corners, ids, valid_ids: Iterable[int]) -> list[tuple[int, np.ndarray]]:
     """Return one best-sampled image quad for each valid decoded tag ID."""
 
@@ -74,6 +66,40 @@ def per_tag_full_corner_rms_px(residuals, seen_ids: list[int]) -> dict[int, floa
     }
 
 
+def filter_tag_correspondences_by_minimum_edge(
+    object_points,
+    image_points,
+    seen_ids: list[int],
+    minimum_edge_px: float,
+) -> tuple[np.ndarray, np.ndarray, list[int], list[int]]:
+    """Remove undersampled Tags without discarding stronger Tags in the frame."""
+
+    objects = np.asarray(object_points, dtype=np.float64)
+    images = np.asarray(image_points, dtype=np.float64)
+    tag_count = len(seen_ids)
+    if objects.shape != (4 * tag_count, 3):
+        raise ValueError("object_points must contain exactly four 3D corners per Tag")
+    if images.shape != (4 * tag_count, 2):
+        raise ValueError("image_points must contain exactly four 2D corners per Tag")
+
+    object_tags = objects.reshape(tag_count, 4, 3)
+    image_tags = images.reshape(tag_count, 4, 2)
+    threshold_px = max(0.0, float(minimum_edge_px))
+    minimum_edges_px = np.min(
+        np.linalg.norm(image_tags - np.roll(image_tags, -1, axis=1), axis=2),
+        axis=1,
+    )
+    keep = minimum_edges_px >= threshold_px
+    accepted_ids = [int(tag_id) for tag_id, accepted in zip(seen_ids, keep) if accepted]
+    rejected_ids = [int(tag_id) for tag_id, accepted in zip(seen_ids, keep) if not accepted]
+    return (
+        object_tags[keep].reshape(-1, 3),
+        image_tags[keep].reshape(-1, 2),
+        accepted_ids,
+        rejected_ids,
+    )
+
+
 def tag36h11_corners_in_map_axis_order(opencv_corners) -> np.ndarray:
     """Convert OpenCV tag36h11 corners to the physical map's tag-axis order.
 
@@ -88,6 +114,22 @@ def tag36h11_corners_in_map_axis_order(opencv_corners) -> np.ndarray:
 
     points = np.asarray(opencv_corners, dtype=np.float64).reshape(4, 2)
     return np.roll(points, -2, axis=0)
+
+
+def isaac_ros_tag36h11_corners_in_map_axis_order(isaac_corners) -> np.ndarray:
+    """Return CUDA detector corners in the physical printed-axis order.
+
+    ``isaac_ros_apriltag`` normalizes its CUDA and VPI implementations to the
+    AprilTag message convention before publishing: top-left, top-right,
+    bottom-right, bottom-left in the decoded tag frame. That is already the
+    order used by :func:`tag_corners_in_map`; unlike OpenCV's predefined
+    dictionary output, no 180-degree rotation is required.
+    """
+
+    points = np.asarray(isaac_corners, dtype=np.float64).reshape(4, 2)
+    if not np.isfinite(points).all():
+        raise ValueError("Isaac ROS AprilTag corners must be finite")
+    return points.copy()
 
 
 def rpy_matrix(roll: float, pitch: float, yaw: float) -> np.ndarray:
@@ -138,8 +180,8 @@ def tag_corners_in_map(
     The configured tag frame is ROS right-handed: +X is the printed tag's
     right, +Y is its top, and +Z is normal out of the printed face into the
     water. Corners are returned as physical top-left, top-right, bottom-right,
-    bottom-left. OpenCV detections must first be normalized with
-    :func:`tag36h11_corners_in_map_axis_order`.
+    bottom-left. Detector output must first be normalized with the helper for
+    its source convention.
     """
 
     size = float(tag_size_m)

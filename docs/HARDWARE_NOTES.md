@@ -46,8 +46,8 @@ AprilTag absolute map pose
              -> 60 Hz /robot/body_state
 ```
 
-ZED X Mini is configured to grab/VIO at 60 Hz, publish images for AprilTag at
-30 Hz, and publish its internal 200 Hz IMU for diagnostics/HUD. The external
+ZED X Mini uses one fixed 30 Hz clock for camera grab/VIO and AprilTag image
+publication, and publishes its internal IMU at 10 Hz for the HUD. The external
 UART8 gyro is independent of the ZED's internally fused camera IMU.
 
 ### 2026-07-30 UART8 baseline

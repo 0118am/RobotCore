@@ -60,14 +60,18 @@ Core topics:
 - `/clock`: simulation time from MuJoCo backend.
 - `/zedx/zed_node/imu/data`: ZED camera IMU for the operator HUD. ZED fuses
   it internally for VIO; it is not a separate localisation input.
-- `/zedx/zed_node/rgb/color/rect/image`: rectified native-resolution ZED RGB
-  stream consumed only by AprilTag localisation.
+- `/zedx/zed_node/rgb/color/rect/image`: rectified ZED RGB stream consumed only
+  by the Isaac ROS CUDA detector.
 - `/zedx/zed_node/rgb/color/rect/camera_info`: matching calibrated projection
   data used by AprilTag PnP.
-- `/localization/apriltag/debug_image/compressed`: rate-limited, downscaled
-  JPEG with detected tag IDs for the browser; this is the operator video
-  source.
+- `/localization/apriltag/detections`: `tag36h11` IDs and ordered image corners
+  from `isaac_ros_apriltag` with `backends=CUDA`. Its single-size pose is not
+  used because `/etc/robotcore/apriltag_map.json` contains mixed Tag sizes.
+- `/zedx/zed_node/rgb/color/rect/image/compressed`: native compressed operator
+  video; localisation does not copy or encode display frames.
 - `/localization/apriltag_pose`: absolute mapped AprilTag pose measurement.
+  The map localizer jointly solves all visible mapped corners using each
+  Tag's `size_m` and surveyed pose from `/etc/robotcore/apriltag_map.json`.
 - `/localization/zed_odom`: ZED VIO local `odom -> base_link` pose and
   base-frame twist, adapted from the camera-local odometry message.
 - `/hardware/aboard_imu_raw`: valid external UART8 gyro and acceleration

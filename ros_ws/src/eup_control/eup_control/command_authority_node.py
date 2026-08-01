@@ -29,6 +29,10 @@ class CommandAuthorityNode(Node):
         super().__init__("command_authority")
         self.declare_parameter("publish_rate_hz", 100.0)
         self.declare_parameter("candidate_timeout_s", 0.10)
+        # The web operator republishes its latched manual candidate at 100 Hz.
+        # Give that ROS timer enough room for camera/CUDA scheduling jitter;
+        # this is an internal ROS producer-health timeout, not a browser expiry.
+        self.declare_parameter("manual_candidate_timeout_s", 0.60)
         self.declare_parameter("state_timeout_s", 0.15)
         self.declare_parameter("target_timeout_s", 0.15)
         self.declare_parameter("safety_heartbeat_timeout_s", 0.25)
@@ -53,6 +57,8 @@ class CommandAuthorityNode(Node):
         self.target_ns = None
         self.safety_ns = None
         self.absolute_localization_seen = False
+        self.active_source = "manual"
+        self.manual_override_was_active = False
         self.last_output = np.zeros(8, dtype=np.float64)
         self.last_tick_ns = self.get_clock().now().nanoseconds
 
@@ -140,6 +146,7 @@ class CommandAuthorityNode(Node):
         return response
 
     def reject(self, response, message):
+        self.message = str(message)
         response.accepted = False
         response.selected_source = self.selected_source
         response.armed = self.armed
@@ -152,6 +159,18 @@ class CommandAuthorityNode(Node):
         return math.inf if timestamp_ns is None else (now_ns - timestamp_ns) * 1e-9
 
     def prearm_failure(self, now_ns):
+        reason = self.common_authority_failure(now_ns)
+        if reason:
+            return reason
+        candidate = self.candidates.get(self.selected_source)
+        reason = self.candidate_failure(self.selected_source, candidate, now_ns)
+        if reason:
+            return reason
+        if self.selected_source in {"pid", "rl"}:
+            return self.automatic_prearm_failure(now_ns)
+        return ""
+
+    def common_authority_failure(self, now_ns):
         if self.abort_active:
             return "safety abort is active"
         if self.fault_latched:
@@ -160,22 +179,31 @@ class CommandAuthorityNode(Node):
             self.get_parameter("safety_heartbeat_timeout_s").value
         ):
             return "safety monitor heartbeat is missing"
-        candidate = self.candidates.get(self.selected_source)
+        return ""
+
+    def candidate_failure(self, source, candidate, now_ns):
+        timeout_parameter = (
+            "manual_candidate_timeout_s" if source == "manual" else "candidate_timeout_s"
+        )
         if candidate is None or self.age_s(
-            self.candidate_ns.get(self.selected_source), now_ns
-        ) > float(self.get_parameter("candidate_timeout_s").value):
-            return f"{self.selected_source} candidate is missing or stale"
-        if candidate.source != self.EXPECTED_PRODUCERS[self.selected_source]:
+            self.candidate_ns.get(source), now_ns
+        ) > float(self.get_parameter(timeout_parameter).value):
+            return f"{source} candidate is missing or stale"
+        if candidate.source != self.EXPECTED_PRODUCERS[source]:
             return f"unexpected candidate producer: {candidate.source}"
         if len(candidate.normalized) != 8 or not all(
             math.isfinite(float(value)) for value in candidate.normalized
         ):
             return "candidate command is not eight finite values"
         if not candidate.enable:
-            return f"{self.selected_source} candidate is not ready"
-        if self.selected_source in {"pid", "rl"}:
-            return self.automatic_prearm_failure(now_ns)
+            return f"{source} candidate is not ready"
         return ""
+
+    def manual_override_active(self, now_ns):
+        """Return true while the web operator's latched LB candidate is enabled."""
+
+        candidate = self.candidates.get("manual")
+        return not self.candidate_failure("manual", candidate, now_ns)
 
     def manual_idle_reason(self, now_ns):
         """Describe a normal manual dead-man gap without treating it as a fault."""
@@ -244,8 +272,24 @@ class CommandAuthorityNode(Node):
         dt = max(0.0, min(0.1, (now_ns - self.last_tick_ns) * 1e-9))
         self.last_tick_ns = now_ns
         manual_idle_reason = ""
-        if self.armed:
-            reason = self.prearm_failure(now_ns)
+        # The browser's latched LB candidate is a direct manual command. It is
+        # intentionally independent of Select + Arm and outranks every
+        # tracking controller, including while authority is otherwise
+        # disarmed.
+        manual_override = self.manual_override_active(now_ns)
+        manual_override_ended = self.manual_override_was_active and not manual_override
+        self.active_source = "manual" if manual_override else self.selected_source
+        output_allowed = self.armed or manual_override
+        if output_allowed:
+            # Manual and automatic candidates keep publishing independently.
+            # A fresh enabled web/manual candidate means LB is held, so only
+            # the common safety gates apply until LB is released. The selected
+            # PID/RL controller remains armed and resumes automatically.
+            reason = (
+                self.common_authority_failure(now_ns)
+                if manual_override
+                else self.prearm_failure(now_ns)
+            )
             if reason:
                 # Releasing the browser/gamepad dead-man switch intentionally
                 # disables the manual candidate.  That is a neutral idle state,
@@ -257,11 +301,16 @@ class CommandAuthorityNode(Node):
                     self.message = f"armed manual; neutral: {manual_idle_reason}"
                 else:
                     self.trip("CONTROL_INPUT_INVALID", reason)
-        if self.armed and not manual_idle_reason:
+                    # manual_override is a snapshot of the candidate state. It
+                    # remains true for this tick after trip() disarms the
+                    # authority, so gate the output explicitly instead of
+                    # re-evaluating ``self.armed or manual_override`` below.
+                    output_allowed = False
+        if output_allowed and not manual_idle_reason:
             candidate = np.asarray(
-                self.candidates[self.selected_source].normalized, dtype=np.float64
+                self.candidates[self.active_source].normalized, dtype=np.float64
             )
-            if self.selected_source in {"pid", "rl"}:
+            if self.active_source in {"pid", "rl"}:
                 limit = abs(float(self.get_parameter("automatic_command_limit").value))
                 candidate = np.clip(candidate, -limit, limit)
                 slew = abs(float(self.get_parameter("automatic_slew_rate_per_s").value))
@@ -270,11 +319,25 @@ class CommandAuthorityNode(Node):
                     candidate, self.last_output - delta, self.last_output + delta
                 )
             self.last_output = np.clip(candidate, -1.0, 1.0)
-            self.message = f"armed {self.selected_source}"
+            self.message = (
+                f"armed {self.selected_source}; manual LB override"
+                if manual_override and self.armed
+                else "manual LB direct control"
+                if manual_override
+                else f"armed {self.selected_source}"
+            )
             self.publish_command(now, self.last_output, True)
         else:
             self.last_output[:] = 0.0
+            if (
+                manual_override_ended
+                and not self.armed
+                and not self.abort_active
+                and not self.fault_latched
+            ):
+                self.message = "disarmed"
             self.publish_command(now, self.last_output, False)
+        self.manual_override_was_active = manual_override
         self.publish_status(now, now_ns)
 
     def publish_command(self, now, values, enable):
@@ -283,7 +346,7 @@ class CommandAuthorityNode(Node):
         message.header.frame_id = "base_link"
         message.normalized = [float(value) for value in values]
         message.enable = bool(enable)
-        message.source = f"command_authority:{self.selected_source}"
+        message.source = f"command_authority:{self.active_source}"
         self.command_pub.publish(message)
 
     def publish_status(self, now, now_ns):

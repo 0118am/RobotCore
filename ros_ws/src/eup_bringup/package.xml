@@ -14,8 +14,10 @@
   <exec_depend>eup_policy</exec_depend>
   <exec_depend>eup_runtime</exec_depend>
   <exec_depend>eup_sensors</exec_depend>
+  <exec_depend>isaac_ros_apriltag</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
+  <exec_depend>rclcpp_components</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>robot_localization</exec_depend>
 

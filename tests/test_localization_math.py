@@ -17,23 +17,6 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(MATH)
 
 
-def test_rate_deadline_preserves_fifteen_hz_phase_with_twenty_hz_input():
-    deadline = float("-inf")
-    published_at = []
-    for frame_index in range(20):
-        now_s = frame_index / 20.0
-        if now_s < deadline:
-            continue
-        published_at.append(now_s)
-        deadline = MATH.advance_rate_deadline(now_s, deadline, 1.0 / 15.0)
-
-    assert len(published_at) == 15
-    assert {round(b - a, 2) for a, b in zip(published_at, published_at[1:])} == {
-        0.05,
-        0.1,
-    }
-
-
 def test_tag_corners_follow_ros_tag_axes_and_size():
     corners = MATH.tag_corners_in_map([1.0, 2.0, 3.0], [0.0, 0.0, 0.0], 0.18)
 
@@ -56,6 +39,18 @@ def test_opencv_apriltag_corners_are_normalized_to_physical_printed_axes():
         normalized,
         [[591.0, 447.0], [758.0, 452.0], [755.0, 619.0], [586.0, 618.0]],
     )
+
+
+def test_isaac_ros_apriltag_corners_already_follow_physical_printed_axes():
+    physical_corners = np.asarray(
+        [[591.0, 447.0], [758.0, 452.0], [755.0, 619.0], [586.0, 618.0]]
+    )
+
+    normalized = MATH.isaac_ros_tag36h11_corners_in_map_axis_order(
+        physical_corners
+    )
+
+    np.testing.assert_allclose(normalized, physical_corners)
 
 
 def test_left_wall_upright_tag_axes_are_forward_up_and_toward_pool_interior():
@@ -202,6 +197,43 @@ def test_full_corner_rms_does_not_hide_a_bad_corner_outside_ransac():
 
     assert rms[52] == pytest.approx(1.0)
     assert rms[66] == pytest.approx(math.sqrt(21.0))
+
+
+def test_small_tag_filter_keeps_strong_correspondences_in_the_same_frame():
+    object_points = np.arange(36, dtype=np.float64).reshape(12, 3)
+    image_points = np.asarray(
+        [
+            [0, 0], [40, 0], [40, 40], [0, 40],
+            [50, 0], [65, 0], [65, 15], [50, 15],
+            [100, 0], [130, 0], [130, 30], [100, 30],
+        ],
+        dtype=np.float64,
+    )
+
+    objects, images, accepted, rejected = (
+        MATH.filter_tag_correspondences_by_minimum_edge(
+            object_points, image_points, [10, 67, 74], 20.0
+        )
+    )
+
+    assert accepted == [10, 74]
+    assert rejected == [67]
+    np.testing.assert_allclose(objects, np.concatenate([object_points[:4], object_points[8:]]))
+    np.testing.assert_allclose(images, np.concatenate([image_points[:4], image_points[8:]]))
+
+
+def test_small_tag_filter_can_return_an_empty_well_shaped_observation():
+    objects, images, accepted, rejected = MATH.filter_tag_correspondences_by_minimum_edge(
+        np.zeros((4, 3)),
+        [[0, 0], [10, 0], [10, 10], [0, 10]],
+        [67],
+        20.0,
+    )
+
+    assert objects.shape == (0, 3)
+    assert images.shape == (0, 2)
+    assert accepted == []
+    assert rejected == [67]
 
 
 def test_tag0_map_rotation_points_the_print_face_normal_toward_positive_x():

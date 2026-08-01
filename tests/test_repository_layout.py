@@ -63,7 +63,7 @@ def test_apriltag_pose_separates_trusted_alignment_from_two_tag_validation():
     assert '"/localization/apriltag_pose_degraded"' in localization
     assert '"/localization/apriltag_pose_degraded"' in fusion
     assert '"/localization/apriltag_pose_degraded"' not in alignment
-    assert "self.publish_pose(image, observed, degraded=True)" in localization
+    assert "self.publish_pose(observation, observed, degraded=True)" in localization
     assert "preferred_single_tag_correspondence" not in localization
     assert '"minimum_pose_tag_count": 3' in edge_launch
     assert '"degraded_two_tag_inlier_corners_per_tag": 4' in edge_launch
@@ -126,17 +126,21 @@ def test_apriltag_image_path_is_bounded_and_debug_encoding_is_not_inline():
         CORE_ROOT / "ros_ws/src/eup_sensors/config/zedx_minimal_open.yaml"
     ).read_text(encoding="utf-8")
 
-    assert "self.queue_debug_image(msg, corners, ids)" in localization
-    assert 'name="apriltag-debug-jpeg"' in localization
-    assert "np.frombuffer(msg.data" in localization
+    assert "queue_matching_debug_image" not in localization
+    assert "debug_image_pub" not in localization
     assert 'self.warn_throttled(' in localization
     assert '"pnp-rejected"' in localization
     assert "largest_tag_quads" in localization
-    assert "tag36h11_corners_in_map_axis_order(detected_corners)" in localization
-    assert '"debug_publish_rate_hz": 15.0' in edge_launch
+    assert "isaac_ros_tag36h11_corners_in_map_axis_order(detected_corners)" in localization
     assert "pub_resolution: CUSTOM" in camera_config
-    assert "pub_downscale_factor: 1.5" in camera_config
+    assert "pub_downscale_factor: 2.0" in camera_config
     assert "enable_24bit_output: true" in camera_config
+    assert 'default_value="/zedx/zed_node/rgb/color/rect/image"' in edge_launch
+    assert 'default_value="/zedx/zed_node/rgb/color/rect/image/compressed"' in edge_launch
+    assert '("image", LaunchConfiguration("front_camera_raw_topic"))' in edge_launch
+    assert '"front_camera_compressed_topic": LaunchConfiguration(' in edge_launch
+    assert '".zed_node":' in camera_config
+    assert "jpeg_quality: 30" in camera_config
 
 
 def test_web_workspace_keeps_only_web_package_and_ros_state_bridge():

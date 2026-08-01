@@ -46,6 +46,16 @@ source install/setup.bash
 
 The authoritative edge workflow is the manual launch from `RobotCore/ros_ws`:
 
+The production AprilTag detector is `isaac_ros_apriltag` release 3.2 with its
+CUDA backend. On JetPack 6.2 / ROS 2 Humble, install the matching NVIDIA binary
+package in the runtime environment before building RobotCore. The checked
+installer verifies NVIDIA's signing-key fingerprint before adding the source:
+
+```bash
+cd /path/to/RobotCore
+bash scripts/install_isaac_ros_apriltag.sh
+```
+
 ```bash
 cd /path/to/RobotCore/ros_ws
 source /opt/ros/humble/setup.bash
