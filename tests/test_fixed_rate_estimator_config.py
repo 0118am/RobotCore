@@ -23,39 +23,45 @@ def test_zed_camera_uses_one_fixed_30_hz_frame_rate():
     assert parameters["pos_tracking"]["publish_odom_pose"] is True
 
 
-def test_fixed_rate_ekf_fuses_visual_state_and_only_external_gyro():
-    parameters = load_yaml("config/tag_vio_external_imu_ekf.yaml")[
-        "localization_ekf"
-    ]["ros__parameters"]
+def test_fixed_lag_eskf_is_native_cpp_and_has_the_planned_state_and_updates():
+    header = (SENSORS / "include/eup_sensors/fixed_lag_eskf.hpp").read_text()
+    source = (SENSORS / "src/fixed_lag_eskf.cpp").read_text()
+    cmake = (SENSORS / "CMakeLists.txt").read_text()
 
-    assert parameters["frequency"] == 30.0
-    assert parameters["world_frame"] == "map"
-    assert parameters["odom0"] == "/localization/aligned_vio_odom"
-    assert parameters["imu0"] == "/sensors/external_imu"
-    assert parameters["publish_tf"] is False
-    assert parameters["publish_acceleration"] is False
-
-    # State order: x/y/z, roll/pitch/yaw, vx/vy/vz, vroll/vpitch/vyaw, ax/ay/az.
-    assert parameters["odom0_config"] == [True] * 9 + [False] * 6
-    assert parameters["imu0_config"] == [False] * 9 + [True] * 3 + [False] * 3
-    assert parameters["imu0_remove_gravitational_acceleration"] is False
-    assert "odom1" not in parameters
-    assert "pose0" not in parameters
-    assert "twist0" not in parameters
+    for field in ("position", "velocity", "orientation", "gyro_bias", "accel_bias"):
+        assert field in header
+    assert "Matrix15d" in header
+    assert "update_pose" in source
+    assert "update_velocity" in source
+    assert "correction * state_.covariance * correction.transpose()" in source
+    assert "-O3" in cmake
+    assert "CMAKE_INTERPROCEDURAL_OPTIMIZATION" in cmake
+    assert "ffast-math" not in cmake
+    assert not (SENSORS / "config/tag_vio_external_imu_ekf.yaml").exists()
 
 
 def test_external_imu_requires_stationary_bias_calibration():
     config = load_yaml("config/external_imu.yaml")
     parameters = config["imu_conditioning"]["ros__parameters"]
-    frames = config["vehicle_frames"]["ros__parameters"]
 
     assert parameters["input_topic"] == "/hardware/aboard_imu_raw"
     assert parameters["output_topic"] == "/sensors/external_imu"
+    assert parameters["fusion_output_topic"] == "/sensors/external_imu_specific_force"
     assert parameters["status_topic"] == "/localization/external_imu_ready"
-    assert parameters["auto_start"] is True
-    assert parameters["calibration_sample_count"] >= 200
-    assert frames["base_to_imu_translation_m"] == [0.018, 0.0, 0.076]
-    assert len(frames["base_to_imu_rpy_rad"]) == 3
+    assert parameters["calibration_sample_count"] == 250
+    assert parameters["calibration_timeout_s"] == 10.0
+    assert parameters["calibration_file"] == "/etc/robotcore/external_imu_calibration.yaml"
+    assert "auto_start" not in parameters
+    assert len(parameters["base_to_imu_rpy_rad"]) == 3
+
+    conditioner = (SENSORS / "src/imu_conditioner_component.cpp").read_text()
+    assert "waiting for operator calibration" in conditioner
+    assert "if (!collecting_) {return;}" in conditioner
+    assert "startup_accel_baseline_ - expected" in conditioner
+    assert "accel - startup_accel_baseline" in conditioner
+    assert "fusion_output_pub_->publish(fusion_output)" in conditioner
+    assert "have_vio_orientation" not in conditioner
+    assert "publish_ready();" in conditioner
 
 
 def test_edge_launch_wires_one_canonical_fixed_rate_output():
@@ -63,27 +69,30 @@ def test_edge_launch_wires_one_canonical_fixed_rate_output():
         ROOT / "ros_ws/src/eup_bringup/launch/eup_edge_system.launch.py"
     ).read_text(encoding="utf-8")
 
-    assert 'executable="imu_conditioning_node"' in launch
-    assert '"imu_topic": LaunchConfiguration("zed_imu_topic")' in launch
-    assert '"publish_imu": True' in launch
-    assert '"output_odometry_topic": "/localization/aligned_vio_odom"' in launch
+    assert 'plugin="eup_sensors::ImuConditionerComponent"' in launch
+    assert 'plugin="eup_sensors::ZedOdometryAdapterComponent"' in launch
+    assert 'plugin="eup_sensors::FixedLagEskfComponent"' in launch
+    assert '"vio_topic": "/localization/zed_odom"' in launch
+    assert '"imu_topic": LaunchConfiguration("external_imu_fusion_topic")' in launch
+    assert '"output_rate_hz": 60.0' in launch
     assert "pressure_depth_odometry_node" not in launch
     assert "/localization/pressure_depth_odom" not in launch
-    assert 'package="robot_localization"' in launch
-    assert 'name="localization_ekf"' in launch
-    assert '("odometry/filtered", "/localization/fused_odom")' in launch
-    assert '"fused_odometry_topic": "/localization/fused_odom"' in launch
+    assert 'package="robot_localization"' not in launch
+    assert "sensor_fusion_node" not in launch
 
 
 def test_body_state_marks_velocity_stale_when_zed_vio_stops():
-    fusion = (
-        SENSORS / "eup_sensors/sensor_fusion_node.py"
-    ).read_text(encoding="utf-8")
+    fusion = (SENSORS / "src/fixed_lag_eskf_component.cpp").read_text(encoding="utf-8")
 
-    assert "body.linear_velocity_valid and vio_fresh" in fusion
-    assert "body.position_estimated = vio_fresh and not tag_accepted" in fusion
-    assert "reliability=ReliabilityPolicy.BEST_EFFORT" in fusion
-    assert "source_stamp_ns <= self.zed_odometry_stamp_ns" in fusion
+    assert "body.linear_velocity_valid = vio_age <= inertial_horizon_s_" in fusion
+    assert "body.position_estimated = estimated" in fusion
+    assert 'return source + " (External IMU unavailable)";' in fusion
+    assert "IMU calibrating" not in fusion
+    assert 'source + " (gyro-only)"' in fusion
+    assert "const bool imu_stale" in fusion
+    assert "measurement_stamp > filter_.state().stamp_ns" in fusion
+    assert "std::deque<VioMeasurement> vio_measurements_" in fusion
+    assert "replay_from(*index)" in fusion
 
 
 def test_localization_status_exposes_rate_age_innovation_and_covariance():

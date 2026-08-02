@@ -3,7 +3,7 @@
 set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 front_camera_topic="${ROBOTCORE_FRONT_CAMERA_TOPIC:-/zedx/zed_node/rgb/color/rect/image}"
-imu_topic="${ROBOTCORE_IMU_TOPIC:-/zedx/zed_node/imu/data}"
+imu_topic="${ROBOTCORE_IMU_TOPIC:-/sensors/external_imu}"
 
 # Keep this list aligned with ACCEPTANCE.md.
 required_topics=(

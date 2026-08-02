@@ -1,20 +1,20 @@
 imu_conditioning:
   ros__parameters:
     input_topic: /hardware/aboard_imu_raw
+    # Startup-flat zero-referenced acceleration for UI, logging, and inspection.
     output_topic: /sensors/external_imu
+    # ROS-standard specific force (gravity preserved) exclusively for the ESKF.
+    fusion_output_topic: /sensors/external_imu_specific_force
     status_topic: /localization/external_imu_ready
-    auto_start: true
-    calibration_sample_count: 200
-    minimum_sample_interval_s: 0.01
-    maximum_sample_gap_s: 0.20
+    # Calibration starts only from the ControlInterface Status action.
+    # Six-face calibration is persistent; the operator-triggered calibration
+    # estimates zero-rate gyro bias and a flat, stationary acceleration baseline.
+    calibration_file: /etc/robotcore/external_imu_calibration.yaml
+    calibration_sample_count: 250
+    calibration_timeout_s: 10.0
     stationary_gyro_limit_rps: 0.04
     stationary_acceleration_tolerance_mps2: 1.0
     gyro_noise_floor_rps: 0.01
-
-vehicle_frames:
-  ros__parameters:
-    # Translation came from the earlier tank installation record. Rotation is
-    # intentionally explicit and must be confirmed with a physical FLU axis
-    # test before the external gyro is trusted for closed-loop control.
-    base_to_imu_translation_m: [0.018, 0.0, 0.076]
+    accel_noise_floor_mps2: 0.15
+    # Confirm this mounting rotation with a physical FLU axis test.
     base_to_imu_rpy_rad: [0.0, 0.0, 0.0]

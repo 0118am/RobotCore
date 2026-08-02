@@ -1,9 +1,10 @@
 """Launch the real Jetson/A-board edge graph."""
 
+import os
 from pathlib import Path
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, SetEnvironmentVariable
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, SetEnvironmentVariable
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import ComposableNodeContainer, Node
@@ -13,7 +14,9 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
-    run_root = str(Path.cwd() / "data" / "robotcore_runs")
+    run_root = os.environ.get(
+        "ROBOTCORE_RUN_ROOT", str(Path.cwd() / "data" / "robotcore_runs")
+    )
 
     return LaunchDescription(
         [
@@ -28,9 +31,10 @@ def generate_launch_description():
             DeclareLaunchArgument("zed_imu_topic", default_value="/zedx/zed_node/imu/data"),
             DeclareLaunchArgument("imu_raw_topic", default_value="/hardware/aboard_imu_raw"),
             DeclareLaunchArgument("external_imu_topic", default_value="/sensors/external_imu"),
-            DeclareLaunchArgument("enable_external_imu", default_value="true"),
-            DeclareLaunchArgument("depth_input_topic", default_value="/hardware/aboard_depth_m"),
-            DeclareLaunchArgument("altitude_input_topic", default_value=""),
+            DeclareLaunchArgument(
+                "external_imu_fusion_topic",
+                default_value="/sensors/external_imu_specific_force",
+            ),
             DeclareLaunchArgument("front_camera_raw_topic", default_value="/zedx/zed_node/rgb/color/rect/image"),
             DeclareLaunchArgument(
                 "front_camera_compressed_topic",
@@ -46,9 +50,7 @@ def generate_launch_description():
             ),
             # AprilTag calibrates map->odom. ZED VIO already fuses the camera
             # IMU and continuously propagates odom->base_link between tags.
-            DeclareLaunchArgument("enable_tag_vio_alignment", default_value="true"),
             DeclareLaunchArgument("enable_fixed_rate_state_estimator", default_value="true"),
-            DeclareLaunchArgument("enable_zed_visual_odometry", default_value="true"),
             DeclareLaunchArgument("zed_odometry_topic", default_value="/zedx/zed_node/odom"),
             DeclareLaunchArgument("zed_workspace", default_value="/home/nvidia/ros2_ws"),
             DeclareLaunchArgument(
@@ -65,26 +67,6 @@ def generate_launch_description():
                     [FindPackageShare("eup_sensors"), "config", "external_imu.yaml"]
                 ),
             ),
-            DeclareLaunchArgument(
-                "state_estimator_config",
-                default_value=PathJoinSubstitution(
-                    [
-                        FindPackageShare("eup_sensors"),
-                        "config",
-                        "tag_vio_external_imu_ekf.yaml",
-                    ]
-                ),
-            ),
-            # Publish the quality-gated PnP observation directly.  Temporal
-            # smoothing adds pose lag while the vehicle is moving; retain it
-            # only when a deployment has measured a jitter problem.
-            DeclareLaunchArgument("apriltag_pose_filter_time_constant_s", default_value="0.0"),
-            # Zero disables gap-triggered filter resets.
-            DeclareLaunchArgument("apriltag_pose_filter_reset_after_s", default_value="0.0"),
-            # The alignment node publishes the fused map pose. Set this true
-            # only for raw-tag TF diagnosis; it otherwise creates a competing
-            # map->base_link transform.
-            DeclareLaunchArgument("apriltag_publish_tf", default_value="false"),
             DeclareLaunchArgument(
                 "apriltag_detected_count_topic",
                 default_value="/localization/apriltag/detected_count",
@@ -109,7 +91,6 @@ def generate_launch_description():
             # 1400–1600 us around a 1500 us neutral command.
             DeclareLaunchArgument("manual_thruster_span_us", default_value="100"),
             DeclareLaunchArgument("manual_thruster_channel_offset", default_value="8"),
-            DeclareLaunchArgument("aboard_poll_rate_hz", default_value="60.0"),
             # The ESC safety heartbeat is intentionally independent of the
             # 60 Hz RL action rate and remains at 100 Hz.
             DeclareLaunchArgument("thruster_command_write_hz", default_value="100.0"),
@@ -139,75 +120,55 @@ def generate_launch_description():
                 ),
             ),
             SetEnvironmentVariable(name="ROBOTCORE_RUN_ROOT", value=run_root),
+            # Static transforms use the standard C++ tf2 publisher. No Python
+            # process remains in the sensor-to-BodyState data path.
             Node(
-                package="eup_sensors",
-                executable="sensor_fusion_node",
-                name="sensor_fusion",
+                package="tf2_ros",
+                executable="static_transform_publisher",
+                name="base_to_zed_link",
                 output="screen",
-                parameters=[
-                    {
-                        "depth_input_topic": LaunchConfiguration("depth_input_topic"),
-                        "altitude_input_topic": LaunchConfiguration("altitude_input_topic"),
-                        "fused_odometry_topic": "/localization/fused_odom",
-                        "zed_odometry_topic": "/localization/zed_odom",
-                        "localization_status_topic": "/localization/status",
-                        "apriltag_pose_status_topic": "/localization/apriltag/pose_status",
-                        "detected_tag_count_topic": LaunchConfiguration(
-                            "apriltag_detected_count_topic"
-                        ),
-                        "tag_fused_sync_tolerance_s": 0.05,
-                        "tag_vio_disagreement_deg": 10.0,
-                        "degraded_localization_pose_topic": "/localization/apriltag_pose_degraded",
-                    }
+                arguments=[
+                    "--x", "0.236", "--y", "0.027", "--z", "0.016",
+                    "--frame-id", "base_link", "--child-frame-id", "zedx_camera_link",
                 ],
             ),
             Node(
-                package="eup_sensors",
-                executable="vehicle_frames_node",
-                name="vehicle_frames",
+                package="tf2_ros",
+                executable="static_transform_publisher",
+                name="base_to_aboard_imu",
                 output="screen",
-                parameters=[
-                    LaunchConfiguration("external_imu_config"),
-                    {
-                        "base_frame": "base_link",
-                        "imu_frame": "aboard_imu_link",
-                        "camera_optical_frame": "front_camera_optical_frame",
-                        "base_to_camera_translation_m": [0.236, 0.027, 0.016],
-                        "camera_link_frame": "zedx_camera_link",
-                    }
+                arguments=[
+                    "--x", "0.018", "--z", "0.076",
+                    "--frame-id", "base_link", "--child-frame-id", "aboard_imu_link",
                 ],
             ),
             Node(
-                package="eup_sensors",
-                executable="imu_conditioning_node",
-                name="imu_conditioning",
+                package="tf2_ros",
+                executable="static_transform_publisher",
+                name="base_to_front_camera_optical",
                 output="screen",
-                condition=IfCondition(LaunchConfiguration("enable_external_imu")),
-                parameters=[
-                    LaunchConfiguration("external_imu_config"),
-                    {
-                        "input_topic": LaunchConfiguration("imu_raw_topic"),
-                        "output_topic": LaunchConfiguration("external_imu_topic"),
-                    },
+                arguments=[
+                    "--x", "0.236", "--y", "0.027", "--z", "0.016",
+                    "--roll", "-1.5707963267948966", "--yaw", "-1.5707963267948966",
+                    "--frame-id", "base_link", "--child-frame-id", "front_camera_optical_frame",
                 ],
             ),
-            Node(
-                package="eup_runtime",
-                executable="zed_camera_launcher",
-                name="zed_camera_launcher",
-                output="screen",
-                parameters=[
-                    {
-                        "zed_workspace": LaunchConfiguration("zed_workspace"),
-                        "zed_params_file": LaunchConfiguration("zed_params_file"),
-                        "zed_serial_number": ParameterValue(
-                            LaunchConfiguration("zed_serial_number"), value_type=str
-                        ),
-                        "zed_camera_id": ParameterValue(
-                            LaunchConfiguration("zed_camera_id"), value_type=str
-                        ),
-                    }
+            ExecuteProcess(
+                cmd=[
+                    "/usr/bin/bash",
+                    "-c",
+                    [
+                        "source ", LaunchConfiguration("zed_workspace"),
+                        "/install/setup.bash && exec ros2 launch zed_wrapper zed_camera.launch.py ",
+                        "camera_model:=zedxm camera_name:=zedx serial_number:=",
+                        LaunchConfiguration("zed_serial_number"),
+                        " camera_id:=", LaunchConfiguration("zed_camera_id"),
+                        " publish_urdf:=true publish_tf:=false publish_map_tf:=false ",
+                        "publish_imu_tf:=false enable_ipc:=false node_log_type:=screen ",
+                        "ros_params_override_path:=", LaunchConfiguration("zed_params_file"),
+                    ],
                 ],
+                output="screen",
             ),
             # Isaac ROS owns only the image-space detector. Its single-size
             # pose and TF outputs are not authoritative because the managed
@@ -219,8 +180,33 @@ def generate_launch_description():
                 name="apriltag_cuda_container",
                 namespace="",
                 output="screen",
+                parameters=[{"thread_num": 2}],
                 condition=IfCondition(LaunchConfiguration("enable_apriltag_localization")),
                 composable_node_descriptions=[
+                    # ZED publishes BGR8 NITROS images, while the CUDA
+                    # AprilTag node requests RGB8. Keep the conversion on GPU
+                    # so format negotiation succeeds without a CPU/DDS image
+                    # round trip.
+                    ComposableNode(
+                        package="isaac_ros_image_proc",
+                        plugin="nvidia::isaac_ros::image_proc::ImageFormatConverterNode",
+                        name="apriltag_bgr_to_rgb",
+                        parameters=[{
+                            "encoding_desired": "rgb8",
+                            # Explicitly pin both ends. Without the input
+                            # constraint the compatible subscriber falls back
+                            # to RGB8 and cannot negotiate with ZED's BGR8
+                            # NITROS publisher.
+                            "image_raw_nitros_format": "nitros_image_bgr8",
+                            "image_nitros_format": "nitros_image_rgb8",
+                            "image_width": 960,
+                            "image_height": 600,
+                        }],
+                        remappings=[
+                            ("image_raw", LaunchConfiguration("front_camera_raw_topic")),
+                            ("image", "/localization/apriltag/image_rgb"),
+                        ],
+                    ),
                     ComposableNode(
                         package="isaac_ros_apriltag",
                         plugin="nvidia::isaac_ros::apriltag::AprilTagNode",
@@ -240,9 +226,9 @@ def generate_launch_description():
                             }
                         ],
                         remappings=[
-                            # Managed NITROS negotiates the /nitros endpoint
-                            # from this base topic name automatically.
-                            ("image", LaunchConfiguration("front_camera_raw_topic")),
+                            # The CUDA converter resolves ZED BGR8 to the RGB8
+                            # format required by AprilTag entirely in NITROS.
+                            ("image", "/localization/apriltag/image_rgb"),
                             ("camera_info", LaunchConfiguration("front_camera_info_topic")),
                             (
                                 "tag_detections",
@@ -252,118 +238,83 @@ def generate_launch_description():
                             # the production TF tree.
                             ("tf", "/localization/apriltag/raw_tf"),
                         ],
-                    )
+                    ),
+                    ComposableNode(
+                        package="eup_sensors",
+                        plugin="eup_sensors::AprilTagMapLocalizerComponent",
+                        name="apriltag_localization",
+                        parameters=[{
+                            "camera_info_topic": LaunchConfiguration("front_camera_info_topic"),
+                            "detections_topic": LaunchConfiguration("apriltag_detections_topic"),
+                            "tag_map_file": LaunchConfiguration("apriltag_tag_map_file"),
+                            "detected_count_topic": LaunchConfiguration("apriltag_detected_count_topic"),
+                            "pose_status_topic": "/localization/apriltag/pose_status",
+                            "tag_size_m": 0.130,
+                            "base_frame": "base_link",
+                            "map_frame": "map",
+                            "minimum_pose_tag_count": 3,
+                            "minimum_inlier_corners_per_tag": 3,
+                            "max_reprojection_rms_px": 3.0,
+                            "max_translation_jump_m": 0.05,
+                            "multi_tag_position_stddev_m": 0.05,
+                            "base_to_camera_translation_m": [0.236, 0.027, 0.016],
+                        }],
+                        extra_arguments=[{"use_intra_process_comms": True}],
+                    ),
                 ],
             ),
-            Node(
-                package="eup_sensors",
-                executable="apriltag_localization_node",
-                name="apriltag_localization",
+            ComposableNodeContainer(
+                package="rclcpp_components",
+                executable="component_container_mt",
+                name="localization_estimator_container",
+                namespace="",
                 output="screen",
-                condition=IfCondition(LaunchConfiguration("enable_apriltag_localization")),
-                parameters=[
-                    {
-                        "camera_info_topic": LaunchConfiguration("front_camera_info_topic"),
-                        "detections_topic": LaunchConfiguration("apriltag_detections_topic"),
-                        "tag_map_file": LaunchConfiguration("apriltag_tag_map_file"),
-                        "detected_count_topic": LaunchConfiguration("apriltag_detected_count_topic"),
-                        "pose_status_topic": "/localization/apriltag/pose_status",
-                        "tag_size_m": 0.130,
-                        "pose_filter_time_constant_s": ParameterValue(
-                            LaunchConfiguration("apriltag_pose_filter_time_constant_s"), value_type=float
-                        ),
-                        "pose_filter_reset_after_s": ParameterValue(
-                            LaunchConfiguration("apriltag_pose_filter_reset_after_s"), value_type=float
-                        ),
-                        "base_frame": "base_link",
-                        "map_frame": "map",
-                        "minimum_pose_tag_count": 3,
-                        "minimum_inlier_corners_per_tag": 3,
-                        "degraded_pose_topic": "/localization/apriltag_pose_degraded",
-                        "aligned_vio_odometry_topic": "/localization/aligned_vio_odom",
-                        "enable_degraded_two_tag_pose": True,
-                        "degraded_two_tag_inlier_corners_per_tag": 4,
-                        "degraded_two_tag_max_full_rms_px": 3.0,
-                        "degraded_two_tag_vio_sync_tolerance_s": 0.05,
-                        "degraded_two_tag_vio_max_translation_m": 0.20,
-                        "degraded_two_tag_vio_max_angle_deg": 10.0,
-                        "tag_map_position_uncertainty_m": 0.05,
-                        "enforce_cuboid_pool_geometry": True,
-                        "pool_length_m": 5.42,
-                        "pool_width_m": 3.73,
-                        "pool_surface_tolerance_m": 0.02,
-                        "pool_orientation_tolerance_deg": 2.0,
-                        "max_reprojection_rms_px": 3.0,
-                        "max_translation_jump_m": 0.05,
-                        "multi_tag_position_stddev_m": 0.05,
-                        "enforce_observation_gates": True,
-                        "enforce_transition_gate": True,
-                        "publish_tf": ParameterValue(
-                            LaunchConfiguration("apriltag_publish_tf"), value_type=bool
-                        ),
-                        "base_to_camera_translation_m": [0.236, 0.027, 0.016],
-                    }
+                parameters=[{"thread_num": 3}],
+                condition=IfCondition(LaunchConfiguration("enable_fixed_rate_state_estimator")),
+                composable_node_descriptions=[
+                    ComposableNode(
+                        package="eup_sensors",
+                        plugin="eup_sensors::ImuConditionerComponent",
+                        name="imu_conditioning",
+                        parameters=[LaunchConfiguration("external_imu_config"), {
+                            "input_topic": LaunchConfiguration("imu_raw_topic"),
+                            "output_topic": LaunchConfiguration("external_imu_topic"),
+                            "fusion_output_topic": LaunchConfiguration(
+                                "external_imu_fusion_topic"
+                            ),
+                            "calibration_sample_count": 250,
+                            "calibration_timeout_s": 10.0,
+                        }],
+                        extra_arguments=[{"use_intra_process_comms": True}],
+                    ),
+                    ComposableNode(
+                        package="eup_sensors",
+                        plugin="eup_sensors::ZedOdometryAdapterComponent",
+                        name="zed_odometry_adapter",
+                        parameters=[{
+                            "input_topic": LaunchConfiguration("zed_odometry_topic"),
+                            "output_topic": "/localization/zed_odom",
+                            "base_frame": "base_link",
+                        }],
+                        extra_arguments=[{"use_intra_process_comms": True}],
+                    ),
+                    ComposableNode(
+                        package="eup_sensors",
+                        plugin="eup_sensors::FixedLagEskfComponent",
+                        name="fixed_lag_eskf",
+                        parameters=[{
+                            "imu_topic": LaunchConfiguration("external_imu_fusion_topic"),
+                            "vio_topic": "/localization/zed_odom",
+                            "tag_topic": "/localization/apriltag_pose",
+                            "output_rate_hz": 60.0,
+                            "history_duration_s": 3.0,
+                            "alignment_correction_alpha": 0.25,
+                            "alignment_max_correction_m": 0.75,
+                            "alignment_max_correction_angle_deg": 20.0,
+                        }],
+                        extra_arguments=[{"use_intra_process_comms": True}],
+                    ),
                 ],
-            ),
-            # Adapt ZED's local odometry from camera_link into base_link,
-            # retaining its local odom-frame pose for map alignment.
-            Node(
-                package="eup_sensors",
-                executable="zed_odometry_adapter_node",
-                name="zed_odometry_adapter",
-                output="screen",
-                condition=IfCondition(LaunchConfiguration("enable_zed_visual_odometry")),
-                parameters=[
-                    {
-                        "input_topic": LaunchConfiguration("zed_odometry_topic"),
-                        "output_topic": "/localization/zed_odom",
-                        "base_frame": "base_link",
-                    }
-                ],
-            ),
-            Node(
-                package="eup_sensors",
-                executable="tag_vio_alignment_node",
-                name="tag_vio_alignment",
-                output="screen",
-                condition=IfCondition(LaunchConfiguration("enable_tag_vio_alignment")),
-                parameters=[
-                    {
-                        "tag_pose_topic": "/localization/apriltag_pose",
-                        "vio_odometry_topic": "/localization/zed_odom",
-                        "output_odometry_topic": "/localization/aligned_vio_odom",
-                        "map_frame": "map",
-                        "base_frame": "base_link",
-                        "alignment_correction_alpha": 0.25,
-                        "alignment_confirm_frames": 4,
-                        "alignment_candidate_max_spread_m": 0.20,
-                        "alignment_candidate_max_angle_deg": 12.0,
-                        "alignment_recalibration_threshold_m": 0.05,
-                        "alignment_recalibration_threshold_deg": 2.0,
-                        "tag_vio_sync_tolerance_s": 0.05,
-                        "alignment_max_correction_m": 0.75,
-                    }
-                ],
-            ),
-            # The alignment output contains the latest absolute Tag correction,
-            # ZED VIO pose, and ZED linear velocity. The independent UART8 gyro
-            # propagates attitude between those visual updates. robot_localization
-            # owns the canonical fixed-rate /localization/fused_odom stream.
-            Node(
-                package="robot_localization",
-                executable="ekf_node",
-                name="localization_ekf",
-                output="screen",
-                condition=IfCondition(
-                    LaunchConfiguration("enable_fixed_rate_state_estimator")
-                ),
-                parameters=[
-                    LaunchConfiguration("state_estimator_config"),
-                    {
-                        "imu0": LaunchConfiguration("external_imu_topic"),
-                    },
-                ],
-                remappings=[("odometry/filtered", "/localization/fused_odom")],
             ),
             Node(
                 package="eup_runtime",
@@ -447,18 +398,12 @@ def generate_launch_description():
                             LaunchConfiguration("thruster_command_write_hz"),
                             value_type=float,
                         ),
-                        "poll_rate_hz": ParameterValue(
-                            LaunchConfiguration("aboard_poll_rate_hz"),
-                            value_type=float,
-                        ),
                         "command_timeout_ms": ParameterValue(
                             LaunchConfiguration("thruster_command_timeout_ms"),
                             value_type=int,
                         ),
-                        # UART8 is an independent high-quality IMU. Publish only
-                        # valid frame-3 samples; the conditioning node estimates
-                        # stationary gyro bias before the 60 Hz EKF consumes it.
-                        "publish_imu": True,
+                        # C++ bridge accepts only versioned, CRC-valid frame-4
+                        # samples with authoritative MCU acquisition stamps.
                         "imu_topic": LaunchConfiguration("imu_raw_topic"),
                         "imu_frame_id": "aboard_imu_link",
                     }

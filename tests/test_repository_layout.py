@@ -43,59 +43,34 @@ def test_apriltag_map_has_one_json_authority():
 
 
 def test_apriltag_pose_separates_trusted_alignment_from_two_tag_validation():
-    localization = (
-        CORE_ROOT / "ros_ws/src/eup_sensors/eup_sensors/apriltag_localization_node.py"
-    ).read_text(encoding="utf-8")
-    alignment = (
-        CORE_ROOT / "ros_ws/src/eup_sensors/eup_sensors/tag_vio_alignment_node.py"
-    ).read_text(encoding="utf-8")
-    fusion = (
-        CORE_ROOT / "ros_ws/src/eup_sensors/eup_sensors/sensor_fusion_node.py"
-    ).read_text(encoding="utf-8")
+    localization = (CORE_ROOT / "ros_ws/src/eup_sensors/src/apriltag_map_localizer_component.cpp").read_text()
+    fusion = (CORE_ROOT / "ros_ws/src/eup_sensors/src/fixed_lag_eskf_component.cpp").read_text()
     edge_launch = (
         CORE_ROOT / "ros_ws/src/eup_bringup/launch/eup_edge_system.launch.py"
     ).read_text(encoding="utf-8")
 
-    assert 'self.declare_parameter("minimum_pose_tag_count", 3)' in localization
+    assert '"minimum_pose_tag_count", 3' in localization
     assert '"minimum_inlier_corners_per_tag", 3' in localization
-    assert '"degraded_two_tag_inlier_corners_per_tag", 4' in localization
-    assert '"degraded_two_tag_max_full_rms_px", 3.0' in localization
     assert '"/localization/apriltag_pose_degraded"' in localization
-    assert '"/localization/apriltag_pose_degraded"' in fusion
-    assert '"/localization/apriltag_pose_degraded"' not in alignment
-    assert "degraded=True," in localization
-    assert "self.pose_uncertainty_scale(" in localization
-    assert "preferred_single_tag_correspondence" not in localization
+    assert '"/localization/apriltag_pose_degraded"' not in fusion
+    assert "const bool degraded = seen_ids.size() == 2U" in localization
+    assert "degraded_consistent" in localization
     assert '"minimum_pose_tag_count": 3' in edge_launch
-    assert '"degraded_two_tag_inlier_corners_per_tag": 4' in edge_launch
-    degraded_block = localization[
-        localization.index("def publish_degraded_two_tag_pose(")
-        : localization.index("def tag_map_uncertainty_allowance_px(")
-    ]
-    assert "reset_pose_filter" not in degraded_block
-    assert "confirm_reacquisition" not in degraded_block
-    assert "filter_map_from_base" not in degraded_block
+    assert "(degraded ? degraded_pub_ : pose_pub_)->publish(pose)" in localization
 
 
-def test_apriltag_reprojection_gate_allows_five_centimetres_of_map_uncertainty():
-    localization = (
-        CORE_ROOT / "ros_ws/src/eup_sensors/eup_sensors/apriltag_localization_node.py"
-    ).read_text(encoding="utf-8")
+def test_apriltag_reprojection_and_transition_gates_are_explicit_in_cpp():
+    localization = (CORE_ROOT / "ros_ws/src/eup_sensors/src/apriltag_map_localizer_component.cpp").read_text()
     edge_launch = (
         CORE_ROOT / "ros_ws/src/eup_bringup/launch/eup_edge_system.launch.py"
     ).read_text(encoding="utf-8")
 
-    assert 'self.declare_parameter("max_reprojection_rms_px", 3.0)' in localization
+    assert '"max_reprojection_rms_px", 3.0' in localization
     assert '"max_reprojection_rms_px": 3.0' in edge_launch
-    assert 'self.declare_parameter("tag_map_position_uncertainty_m", 0.05)' in localization
-    assert "self.tag_map_uncertainty_allowance_px(image_points, seen_ids)" in localization
-    assert '"tag_map_position_uncertainty_m": 0.05' in edge_launch
-    assert '"enforce_cuboid_pool_geometry": True' in edge_launch
-    assert '"pool_length_m": 5.42' in edge_launch
-    assert '"pool_width_m": 3.73' in edge_launch
-    assert 'self.declare_parameter("max_translation_jump_m", 0.05)' in localization
+    assert "solvePnPRansac" in localization
+    assert '"max_translation_jump_m", 0.05' in localization
     assert '"max_translation_jump_m": 0.05' in edge_launch
-    assert 'self.declare_parameter("multi_tag_position_stddev_m", 0.05)' in localization
+    assert '"multi_tag_position_stddev_m", 0.05' in localization
     assert '"multi_tag_position_stddev_m": 0.05' in edge_launch
 
 
@@ -175,8 +150,9 @@ def test_web_bridge_consumes_robot_core_contract_without_owning_devices_or_maps(
     assert "ROBOTCORE_WORKSPACE" in robot_unit
     assert "SupplementaryGroups=robotops video render dialout" in robot_unit
     assert "CONTROL_INTERFACE_WORKSPACE" in web_unit
-    assert "zed_camera_launcher" in edge_launch
-    assert 'LaunchConfiguration("zed_serial_number"), value_type=str' in edge_launch
+    assert "imu_topic:=/sensors/external_imu" in web_unit
+    assert "exec ros2 launch zed_wrapper zed_camera.launch.py" in edge_launch
+    assert 'LaunchConfiguration("zed_serial_number")' in edge_launch
 
 
 def test_robotcore_aboard_rule_matches_the_detected_cdc_acm_board():

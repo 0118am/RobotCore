@@ -72,9 +72,11 @@ def test_isaac_raw_pose_is_not_used_for_mixed_tag_sizes():
 
 def test_detector_capacity_is_bounded_and_degraded_validation_uses_direct_vio():
     launch = LAUNCH.read_text(encoding="utf-8")
+    cpp = (ROOT / "ros_ws/src/eup_sensors/src/apriltag_map_localizer_component.cpp").read_text()
 
     assert 'DeclareLaunchArgument("apriltag_max_tags", default_value="24")' in launch
-    assert '"aligned_vio_odometry_topic": "/localization/aligned_vio_odom"' in launch
+    assert 'plugin="eup_sensors::AprilTagMapLocalizerComponent"' in launch
+    assert '"aligned_vio_odometry_topic", "/localization/aligned_vio_odom"' in cpp
 
 
 def test_zed_nitros_is_enabled_while_operator_video_remains_on_demand():
@@ -86,7 +88,21 @@ def test_zed_nitros_is_enabled_while_operator_video_remains_on_demand():
         ROOT / "ros_ws" / "src" / "eup_runtime" / "eup_runtime" / "zed_camera_launcher.py"
     ).read_text(encoding="utf-8")
 
-    assert '("image", LaunchConfiguration("front_camera_raw_topic"))' in launch
+    assert 'plugin="nvidia::isaac_ros::image_proc::ImageFormatConverterNode"' in launch
+    assert '("image_raw", LaunchConfiguration("front_camera_raw_topic"))' in launch
+    assert '("image", "/localization/apriltag/image_rgb")' in launch
+    assert '"encoding_desired": "rgb8"' in launch
+    assert '"image_raw_nitros_format": "nitros_image_bgr8"' in launch
+    assert '"image_nitros_format": "nitros_image_rgb8"' in launch
     assert "front_camera_nitros_topic" not in launch
     assert "disable_nitros: false" in camera_config
     assert '"enable_ipc:=false"' in zed_launcher
+
+
+def test_imu_latched_status_does_not_disable_high_rate_intra_process_path():
+    conditioner = (
+        ROOT / "ros_ws/src/eup_sensors/src/imu_conditioner_component.cpp"
+    ).read_text(encoding="utf-8")
+
+    assert "status_options.use_intra_process_comm" in conditioner
+    assert "rclcpp::IntraProcessSetting::Disable" in conditioner

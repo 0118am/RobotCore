@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CycloneDDS xmlns="https://cdds.io/config"
+            xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+            xsi:schemaLocation="https://cdds.io/config https://raw.githubusercontent.com/eclipse-cyclonedds/cyclonedds/0.10.x/etc/cyclonedds.xsd">
+  <!-- Production graph and browser run on one Jetson. ROS_LOCALHOST_ONLY=1
+       selects the loopback interface through rmw_cyclonedds_cpp. Do not also
+       declare lo here: Cyclone rejects the same interface selected twice.
+       ROS component containers keep their high-rate paths intra-process. -->
+  <Domain Id="any">
+    <General>
+      <AllowMulticast>false</AllowMulticast>
+      <MaxMessageSize>65500B</MaxMessageSize>
+      <FragmentSize>60000B</FragmentSize>
+    </General>
+    <Discovery>
+      <ParticipantIndex>auto</ParticipantIndex>
+      <MaxAutoParticipantIndex>120</MaxAutoParticipantIndex>
+      <Peers>
+        <Peer Address="localhost" />
+      </Peers>
+    </Discovery>
+    <Internal>
+      <SocketReceiveBufferSize min="2MB" />
+      <SocketSendBufferSize min="416KiB" />
+      <Watermarks>
+        <WhcLow>1MB</WhcLow>
+        <WhcHighInit>2MB</WhcHighInit>
+        <WhcHigh>8MB</WhcHigh>
+      </Watermarks>
+      <DeliveryQueueMaxSamples>2048</DeliveryQueueMaxSamples>
+      <MaxQueuedRexmitBytes>16MB</MaxQueuedRexmitBytes>
+      <MaxQueuedRexmitMessages>1024</MaxQueuedRexmitMessages>
+    </Internal>
+    <Tracing>
+      <Verbosity>warning</Verbosity>
+      <OutputFile>stderr</OutputFile>
+    </Tracing>
+  </Domain>
+</CycloneDDS>

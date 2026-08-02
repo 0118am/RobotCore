@@ -42,15 +42,15 @@ configuration.
 
 ## Phase 2 — split process supervision
 
-1. Install `robotcore.service`, `control-interface.service`, and
-   `robotcore-host-manager.service` from `systemd/`.  They are templates: replace
+1. Install `robotcore.service`, `control-interface.service`,
+   `robotcore-performance.service`, `robotcore-stack.target`, and
+   `robotcore-host-manager.service` from `systemd/`. They are templates: replace
    `/opt/RobotCore` and `/opt/ControlInterface`, then source the reviewed
    `/etc/robotcore/edge.env` values first.
-2. Start `robotcore.service`; it launches `eup_edge_system.launch.py` with
-   `enable_web_ui:=false`.
-3. Start `control-interface.service`; it launches the existing `eup_ui` package as a
-   separate process.  The default bind is loopback, and direct manual serial
-   PWM stays disabled.
+2. Start `robotcore-stack.target`; it applies the Jetson performance profile,
+   then starts `robotcore.service` with `enable_web_ui:=false` and starts
+   `control-interface.service` as a separate process. The default web bind is
+   loopback, and direct manual serial PWM stays disabled.
 4. Enable the host manager last.  Verify its socket cannot be opened by a user
    outside `robotops`.
 5. When AprilTag web editing is required, enable
@@ -97,7 +97,7 @@ the previous application release without modifying the web UI contract.
 
 ## Rollback
 
-Disable the three new units, restore the previous RobotCore/Web release directory, and run
+Disable the stack target and its services, restore the previous RobotCore/Web release directory, and run
 the prior `ros2 launch eup_bringup eup_edge_system.launch.py` command.  Do not
 remove logs, run directories, or the device rule during an incident; preserve
 them for diagnosis.

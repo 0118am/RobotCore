@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT / "ros_ws/src/eup_hardware"))
 
 from eup_hardware.packet import (
     build_uart_direct_pwm_frame,
+    crc16_ccitt,
     normalized_to_direct_pwm_offsets,
     parse_uart_telemetry_frame,
     parse_uart_pwm_feedback_frame,
@@ -95,6 +96,45 @@ def test_uart_telemetry_frame_three_marks_missing_uart8_sample_invalid():
     telemetry = parse_uart_telemetry_frame(bytes(frame))
 
     assert telemetry["uart8_imu_valid"] is False
+
+
+def test_versioned_frame_four_has_crc_counter_and_mcu_tick():
+    frame = bytearray([0xFF, 0xF8, 4, 1, 1])
+    frame.extend((0x12345678).to_bytes(4, "little"))
+    frame.extend((0xFFFFFFF0).to_bytes(4, "little"))
+    for value in [125, -250, 50, 100, -200, 1000]:
+        frame.extend(int(value).to_bytes(2, "little", signed=True))
+    frame.extend(crc16_ccitt(frame).to_bytes(2, "little"))
+
+    telemetry = parse_uart_telemetry_frame(bytes(frame))
+
+    assert telemetry["protocol_version"] == 1
+    assert telemetry["uart8_imu_sample_id"] == 0x12345678
+    assert telemetry["uart8_imu_sample_tick_ms"] == 0xFFFFFFF0
+    assert math.isclose(telemetry["gyro_y_dps"], -2.5)
+    assert math.isclose(telemetry["accel_z_mps2"], 9.80665)
+
+
+def test_versioned_frame_four_rejects_bad_crc_and_version():
+    frame = bytearray([0xFF, 0xF8, 4, 1, 1]) + bytearray(20)
+    frame.extend(crc16_ccitt(frame).to_bytes(2, "little"))
+    frame[10] ^= 0x01
+    try:
+        parse_uart_telemetry_frame(bytes(frame))
+    except ValueError as error:
+        assert "CRC16" in str(error)
+    else:
+        raise AssertionError("bad CRC accepted")
+
+    frame[10] ^= 0x01
+    frame[3] = 2
+    frame[-2:] = crc16_ccitt(frame[:-2]).to_bytes(2, "little")
+    try:
+        parse_uart_telemetry_frame(bytes(frame))
+    except ValueError as error:
+        assert "version" in str(error)
+    else:
+        raise AssertionError("unsupported version accepted")
 
 
 def test_normalized_to_direct_pwm_offsets_pads_to_sixteen():

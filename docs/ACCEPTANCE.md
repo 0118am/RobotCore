@@ -16,14 +16,22 @@ This file defines the first-stage system-chain acceptance target.
       of this ROS publication rate.
 - [ ] `/zedx/zed_node/rgb/color/rect/image` and its matching CameraInfo publish
       real-time ZED frames at up to 30 Hz for AprilTag localisation.
-- [ ] A-board UART8 runs at 115200 baud and frame 3 reports unique external-IMU
-      samples with its valid flag set at approximately 100 Hz. The observed
+- [ ] Use **Status → IMU Calibration → Calibrate** while the vehicle is
+      stationary; no automatic startup calibration or HUD calibration exists.
+- [ ] A-board UART8 runs at 115200 baud and CRC-valid version-1 frame 4 reports
+      unique external-IMU samples at approximately 100 Hz. The observed
       invalid/all-zero 19.3 Hz baseline and repeated-sample forwarding are
       failures, not acceptable fallbacks.
-- [ ] `/hardware/aboard_imu_raw` contains only valid frame-3 samples and
-      `/localization/external_imu_ready` becomes true after a stationary
+- [ ] `/hardware/aboard_imu_raw` contains only valid frame-4 samples and
+      `/localization/external_imu_ready` becomes true after the operator-triggered stationary
       calibration. `/sensors/external_imu` then publishes calibrated angular
-      velocity with strictly increasing timestamps and source sample IDs.
+      velocity and startup-flat-zeroed acceleration with strictly increasing
+      timestamps and source sample IDs. `/sensors/external_imu_specific_force`
+      preserves gravity and is the ESKF-only input.
+- [ ] Record calibrated operator data directly with rosbag from
+      `/sensors/external_imu`. The conditioner publishes no samples before a
+      successful calibration, so the bag cannot mix raw startup data into the
+      calibrated stream.
 - [ ] The browser consumes the ZED compressed image directly; localisation does
       not copy or JPEG-encode camera frames for display.
 - [ ] `/localization/apriltag/detections` is produced by
@@ -36,7 +44,7 @@ This file defines the first-stage system-chain acceptance target.
 - [ ] `/localization/zed_odom` contains ZED VIO local `odom -> base_link`
       pose and base-frame twist; it is never relabelled as a map pose.
 - [ ] `/localization/fused_odom` and `/robot/body_state` each sustain
-      28--32 Hz for at least 60 seconds, with strictly increasing source
+      59--61 Hz for at least 60 seconds, with strictly increasing source
       timestamps, no duplicate samples, and no growing DDS queue.
 - [ ] `/localization/status` reports VIO/Tag/fused rates, source ages,
       transport delays, detected/mapped/inlier Tag counts, reprojection RMS,
@@ -45,9 +53,9 @@ This file defines the first-stage system-chain acceptance target.
 - [ ] During a measured constant-speed run, body-frame linear velocity agrees
       with an independent distance/time reference within the test tolerance;
       it is not obtained by finite-differencing AprilTag detections.
-- [ ] External IMU acceleration remains disabled in the EKF until a physical
-      FLU axis test, mounting-rotation measurement, gravity-removal test, and
-      stationary/noise calibration all pass.
+- [ ] Startup calibration is performed level and stationary. The operator/log
+      acceleration is approximately `0, 0, 0`; the ESKF-specific topic remains
+      approximately `0, 0, +9.80665 m/s²` in the configured level mounting.
 - [ ] The ZED launch publishes only its internal static camera-frame TF tree;
       it does not publish dynamic `odom` or `map` transforms.
 - [ ] Isaac's raw single-size Tag TF is remapped to

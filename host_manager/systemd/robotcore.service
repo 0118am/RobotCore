@@ -1,8 +1,11 @@
 [Unit]
 Description=RobotCore ROS 2 robot graph
-After=network-online.target dev-robotcore-aboard.device nvargus-daemon.service
-Wants=network-online.target nvargus-daemon.service
+After=network-online.target dev-robotcore-aboard.device nvargus-daemon.service robotcore-performance.service
+Wants=network-online.target nvargus-daemon.service robotcore-performance.service
 Requires=dev-robotcore-aboard.device
+PartOf=robotcore-stack.target
+StartLimitIntervalSec=60
+StartLimitBurst=10
 
 [Service]
 Type=simple
@@ -13,16 +16,41 @@ Group=robotcore
 # RobotCore udev ownership rule.
 SupplementaryGroups=robotops video render dialout
 EnvironmentFile=/etc/robotcore/edge.env
-WorkingDirectory=/opt/RobotCore/ros_ws
+Environment=RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+Environment=CYCLONEDDS_URI=file:///etc/robotcore/cyclonedds.xml
+Environment=RCUTILS_LOGGING_BUFFERED_STREAM=1
+WorkingDirectory=/var/lib/robotcore
+StateDirectory=robotcore
+StateDirectoryMode=0750
 # Do not let localisation start against the package's sample map when the
 # deployment has selected a managed map.  This check runs as the robot service
 # account, so it also verifies that the selected revision is readable at boot.
 ExecStartPre=/usr/bin/test -r ${ROBOTCORE_APRILTAG_MAP_FILE}
-ExecStart=/usr/bin/bash -lc 'source "${ROBOTCORE_WORKSPACE}/install/setup.bash" && exec ros2 launch eup_bringup eup_edge_system.launch.py enable_web_ui:=false serial_port:="${ROBOTCORE_ABOARD_PORT}" apriltag_tag_map_file:="${ROBOTCORE_APRILTAG_MAP_FILE}"'
-Restart=on-failure
-RestartSec=3
+ExecStartPre=/usr/bin/test -r /etc/robotcore/cyclonedds.xml
+ExecStartPre=/usr/bin/test -r /opt/ros/humble/lib/librmw_cyclonedds_cpp.so
+ExecStartPre=/usr/bin/test -r ${ROBOTCORE_WORKSPACE}/install/setup.bash
+ExecStartPre=/usr/bin/test -x ${ROBOTCORE_WORKSPACE}/install/eup_sensors/lib/eup_sensors/fixed_lag_eskf_node
+ExecStartPre=/usr/bin/test -r ${ZED_WORKSPACE}/install/setup.bash
+# ROS/colcon setup scripts are not nounset-safe. Enable -u only after every
+# overlay has been sourced so the launched graph still gets strict handling.
+ExecStart=/usr/bin/bash -c 'set -eo pipefail; source /opt/ros/humble/setup.bash; source "${ROBOTCORE_WORKSPACE}/install/setup.bash"; set -u; exec ros2 launch eup_bringup eup_edge_system.launch.py enable_web_ui:=false serial_port:="${ROBOTCORE_ABOARD_PORT}" apriltag_tag_map_file:="${ROBOTCORE_APRILTAG_MAP_FILE}" zed_workspace:="${ZED_WORKSPACE}"'
+Restart=always
+RestartSec=1
 TimeoutStopSec=20
 KillSignal=SIGINT
+KillMode=control-group
+# Reserve six cores for the latency-sensitive graph; CPU 0-1 remain available
+# to the browser, journald, networking, and kernel work.
+CPUAffinity=2 3 4 5 6 7
+CPUWeight=10000
+IOWeight=1000
+Nice=-10
+OOMScoreAdjust=-750
+LimitNICE=-10
+LimitMEMLOCK=infinity
+LimitNOFILE=1048576
+TasksMax=infinity
+TimerSlackNSec=1us
 NoNewPrivileges=true
 PrivateTmp=true
 # Preserve /tmp isolation while exposing only the NVIDIA Argus and IMU-daemon
@@ -31,7 +59,9 @@ PrivateTmp=true
 BindReadOnlyPaths=/tmp/argus_socket
 BindReadOnlyPaths=/tmp/imu_daemon.sock
 ProtectHome=read-only
-ReadWritePaths=/var/lib/robotcore/runs
+ReadWritePaths=/var/lib/robotcore
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target

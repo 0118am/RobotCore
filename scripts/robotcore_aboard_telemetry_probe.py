@@ -17,9 +17,11 @@ from eup_hardware.packet import (
     A_BOARD_PWM_FEEDBACK_HEADER,
     A_BOARD_PWM_FEEDBACK_LEN,
     A_BOARD_TELEMETRY_HEADER,
-    A_BOARD_TELEMETRY_LEN,
+    A_BOARD_IMU_V1_TELEMETRY_LEN,
+    A_BOARD_LEGACY_TELEMETRY_LEN,
     parse_uart_pwm_feedback_frame,
     parse_uart_telemetry_frame,
+    telemetry_frame_length,
 )
 
 
@@ -60,20 +62,23 @@ def percentile(values: list[float], fraction: float) -> float:
 
 def next_frame(buffer: bytearray):
     starts = []
-    for header, length in (
-        (A_BOARD_PWM_FEEDBACK_HEADER, A_BOARD_PWM_FEEDBACK_LEN),
-        (A_BOARD_TELEMETRY_HEADER, A_BOARD_TELEMETRY_LEN),
-    ):
+    for header in (A_BOARD_PWM_FEEDBACK_HEADER, A_BOARD_TELEMETRY_HEADER):
         index = buffer.find(header)
         if index >= 0:
-            starts.append((index, header, length))
+            starts.append((index, header))
     if not starts:
-        if len(buffer) > max(A_BOARD_PWM_FEEDBACK_LEN, A_BOARD_TELEMETRY_LEN):
+        if len(buffer) > max(A_BOARD_PWM_FEEDBACK_LEN, A_BOARD_IMU_V1_TELEMETRY_LEN):
             del buffer[:-1]
         return None
-    start, header, length = min(starts, key=lambda item: item[0])
+    start, header = min(starts, key=lambda item: item[0])
     if start:
         del buffer[:start]
+    if header == A_BOARD_PWM_FEEDBACK_HEADER:
+        length = A_BOARD_PWM_FEEDBACK_LEN
+    else:
+        if len(buffer) < 3:
+            return None
+        length = telemetry_frame_length(buffer[2])
     if len(buffer) < length:
         return None
     frame = bytes(buffer[:length])
@@ -88,7 +93,7 @@ def measure(port: str, baud: int, duration_s: float) -> int:
     uart8_valid_times: list[float] = []
     buffer = bytearray()
     first_bad_frames: dict[int, str] = {}
-    first_uart8_values: tuple[int, ...] | None = None
+    first_uart8_sample: dict[str, object] | None = None
     started = time.monotonic()
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -128,9 +133,9 @@ def measure(port: str, baud: int, duration_s: float) -> int:
                 del buffer[:frame_length]
                 frame_number = int(frame[2])
                 counters[f"telemetry_{frame_number}"] += 1
-                if frame_number == 3:
-                    if first_uart8_values is None:
-                        first_uart8_values = struct.unpack("<8h", frame[3:-1])
+                if frame_number == 4:
+                    if first_uart8_sample is None:
+                        first_uart8_sample = telemetry
                     uart8_times.append(received_at)
                     if telemetry and telemetry.get("uart8_imu_valid"):
                         counters["uart8_valid"] += 1
@@ -150,8 +155,8 @@ def measure(port: str, baud: int, duration_s: float) -> int:
         print(f"{name}={count}{suffix}")
     for frame_number, frame_hex in sorted(first_bad_frames.items()):
         print(f"first_bad_telemetry_{frame_number}_hex={frame_hex}")
-    if first_uart8_values is not None:
-        print(f"first_uart8_int16_values={list(first_uart8_values)}")
+    if first_uart8_sample is not None:
+        print(f"first_uart8_sample={first_uart8_sample}")
     if len(uart8_times) >= 2:
         intervals_ms = [
             (current - previous) * 1000.0
@@ -173,7 +178,7 @@ def measure(port: str, baud: int, duration_s: float) -> int:
         print("warning=no valid UART8 IMU samples observed")
         return 2
     if not uart8_times:
-        print("warning=no UART8 telemetry frame 3 observed")
+        print("warning=no versioned UART8 telemetry frame 4 observed")
         return 3
     return 0
 

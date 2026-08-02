@@ -7,7 +7,11 @@ A_BOARD_PWM_FEEDBACK_HEADER = bytes([0xFF, 0xFB])
 A_BOARD_TELEMETRY_HEADER = bytes([0xFF, 0xF8])
 A_BOARD_DIRECT_PWM_CHANNELS = 16
 A_BOARD_PWM_FEEDBACK_LEN = 2 + A_BOARD_DIRECT_PWM_CHANNELS * 2 + 1
-A_BOARD_TELEMETRY_LEN = 20
+A_BOARD_LEGACY_TELEMETRY_LEN = 20
+A_BOARD_IMU_V1_TELEMETRY_LEN = 27
+# Kept for the legacy Python test fixtures. Runtime parsing is implemented by
+# the C++ bridge and accepts the length selected by the frame number.
+A_BOARD_TELEMETRY_LEN = A_BOARD_LEGACY_TELEMETRY_LEN
 A_BOARD_ACCEL_LSB_PER_G = 4096.0
 STANDARD_GRAVITY_MPS2 = 9.80665
 
@@ -49,6 +53,20 @@ def parse_uart_pwm_feedback_frame(frame: bytes):
     return list(struct.unpack("<16H", frame[2:-1]))
 
 
+def crc16_ccitt(data: bytes, initial: int = 0xFFFF) -> int:
+    """Return CRC-16/CCITT-FALSE, matching the A-board frame-4 firmware."""
+    crc = initial
+    for byte in data:
+        crc ^= byte << 8
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
+    return crc
+
+
+def telemetry_frame_length(frame_number: int) -> int:
+    return A_BOARD_IMU_V1_TELEMETRY_LEN if frame_number == 4 else A_BOARD_LEGACY_TELEMETRY_LEN
+
+
 def parse_uart_telemetry_frame(frame: bytes):
     """Parse one FF F8 A-board telemetry frame.
 
@@ -58,15 +76,42 @@ def parse_uart_telemetry_frame(frame: bytes):
     the ROS calibration stage removes it only after attitude and bias have
     been validated.
     """
-    if len(frame) != A_BOARD_TELEMETRY_LEN:
-        raise ValueError(f"expected {A_BOARD_TELEMETRY_LEN} bytes, got {len(frame)}")
     if frame[:2] != A_BOARD_TELEMETRY_HEADER:
         raise ValueError("invalid A-board telemetry header")
+    if len(frame) < 3:
+        raise ValueError("truncated A-board telemetry header")
+    expected_length = telemetry_frame_length(frame[2])
+    if len(frame) != expected_length:
+        raise ValueError(f"expected {expected_length} bytes, got {len(frame)}")
+
+    frame_num = frame[2]
+    if frame_num == 4:
+        expected_crc = crc16_ccitt(frame[:-2])
+        received_crc = int.from_bytes(frame[-2:], "little")
+        if received_crc != expected_crc:
+            raise ValueError("invalid A-board frame-4 CRC16")
+        version, flags, sample_counter, sample_tick_ms = struct.unpack_from("<BBII", frame, 3)
+        if version != 1:
+            raise ValueError(f"unsupported A-board IMU protocol version {version}")
+        values = struct.unpack_from("<6h", frame, 13)
+        return {
+            "protocol_version": version,
+            "uart8_imu_valid": bool(flags & 0x01),
+            "uart8_imu_flags": flags,
+            "uart8_imu_sample_id": sample_counter,
+            "uart8_imu_sample_tick_ms": sample_tick_ms,
+            "gyro_x_dps": values[0] / 100.0,
+            "gyro_y_dps": values[1] / 100.0,
+            "gyro_z_dps": values[2] / 100.0,
+            "accel_x_mps2": values[3] * STANDARD_GRAVITY_MPS2 / 1000.0,
+            "accel_y_mps2": values[4] * STANDARD_GRAVITY_MPS2 / 1000.0,
+            "accel_z_mps2": values[5] * STANDARD_GRAVITY_MPS2 / 1000.0,
+        }
+
     checksum = sum(frame[:-1]) & 0xFF
     if frame[-1] != checksum:
         raise ValueError("invalid A-board telemetry checksum")
 
-    frame_num = frame[2]
     values = struct.unpack("<8h", frame[3:-1])
     if frame_num == 0:
         return {

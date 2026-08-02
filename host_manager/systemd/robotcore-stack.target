@@ -1,0 +1,7 @@
+[Unit]
+Description=RobotCore robot and browser service stack
+Wants=robotcore-performance.service robotcore-host-manager.service robotcore.service control-interface.service
+After=robotcore-performance.service robotcore-host-manager.service
+
+[Install]
+WantedBy=multi-user.target

@@ -29,11 +29,13 @@ acceleration, and a validity flag. The bridge publishes only valid samples as
 `/hardware/aboard_imu_raw`; invalid or stale values are not fabricated into a
 60 Hz stream.
 
-The conditioning node performs a stationary gyro-bias calibration and then
-publishes `/sensors/external_imu`. UART8 telemetry has no attitude estimate.
-Until the physical IMU axes and mounting rotation have been verified, only its
-calibrated angular velocity is fused. Raw acceleration retains gravity and is
-explicitly excluded from position and velocity estimation.
+The Status panel's **IMU Calibration** action is the only trigger for the
+conditioning node's stationary gyro-bias calibration; the node then publishes
+`/sensors/external_imu`, whose acceleration is referenced to the level,
+stationary startup mean for operator display and logging. The parallel
+`/sensors/external_imu_specific_force` topic preserves the expected gravity
+vector for the ESKF. This startup calibration uses the configured rigid IMU
+mounting and does not require VIO, a camera, or AprilTags.
 
 The fixed-rate state chain is:
 
@@ -77,19 +79,20 @@ robot target is 115200 baud and 100 Hz external-IMU samples; 60 Hz is the
 canonical fused-state output. Going to 200/500 Hz adds load without improving
 the 60 Hz control/state contract.
 
-The STM32 project is outside this RobotCore repository and was not modified or
-flashed during this work. Before hardware acceptance its firmware must:
+This paragraph records the 2026-07-30 baseline. On 2026-08-02 the separate
+STM32 source was updated to UART8 115200/100 Hz and versioned CRC frame 4,
+flashed, independently read back, and verified for 1,011 consecutive samples
+across multiple packed-BCD source-counter wraps. Before full system acceptance
+the deployment must still:
 
 - confirm the exact external IMU model and UART protocol;
 - confirm its physical +X/+Y/+Z axes relative to ROS `base_link` FLU;
-- transition both the sensor and STM32 UART8 to 115200 baud, select float
-  gyro+acceleration output at 100 Hz, and verify command acknowledgements;
-- forward frame 3 when a new sensor sample arrives rather than periodically
-  repeating the latest sample;
-- carry the Bewei sample counter (or an MCU sample timestamp) in the currently
-  unused eighth `int16` field so duplicate, dropped, and stale samples are
-  measurable. RobotCore deliberately rejects an initial zero/unchanged sample
-  ID instead of assigning repeated values new timestamps.
+- verify the sensor persisted at 115200 baud and acknowledges 100 Hz float
+  gyro+acceleration output;
+- restart the RobotCore service to load the rebuilt bridge's STM32-reset
+  handling and repeat the end-to-end frame-4 timing check;
+- reject duplicate, dropped, stale or time-regressing samples rather than
+  assigning them new host timestamps.
 
 The normal edge command needs no IMU argument:
 
@@ -109,12 +112,25 @@ ros2 topic hz /zedx/zed_node/odom
 ros2 topic echo /localization/external_imu_ready --once
 ros2 topic hz /hardware/aboard_imu_raw
 ros2 topic hz /sensors/external_imu
+ros2 topic hz /sensors/external_imu_specific_force
 ros2 topic hz /localization/fused_odom
 ros2 topic hz /robot/body_state
 ros2 topic echo /localization/status --once
 ros2 topic delay /localization/zed_odom
 ros2 topic delay /localization/apriltag/detections
 ```
+
+Record the startup-zeroed IMU stream directly with rosbag:
+
+```bash
+ros2 bag record -o calibrated_imu_bag \
+  /sensors/external_imu \
+  /localization/external_imu_ready
+```
+
+Start recording before or after pressing **Calibrate**. The conditioner does
+not publish `/sensors/external_imu` until calibration succeeds, so all IMU
+messages in this bag use the calibrated startup baseline.
 
 ## Aboard Confirmation Items
 

@@ -1,11 +1,11 @@
 # A-board external IMU firmware upgrade contract
 
-This document defines the firmware-side work required by RobotCore's 60 Hz
-state estimator. The currently discovered STM32 source is
-`/home/nvidia/aCube_1`; it is a separate clean repository and is not modified
-by RobotCore.
+This document records the firmware/host protocol used by RobotCore's 60 Hz
+state estimator. The STM32 source is the separate repository
+`/home/nvidia/aCube_1`; it must be flashed atomically with the matching C++
+host bridge.
 
-## Current behavior
+## Superseded baseline
 
 The source identifies UT8/UART8 as a Bewei IMU connection:
 
@@ -18,22 +18,25 @@ The source identifies UT8/UART8 as a Bewei IMU connection:
   telemetry frame 3. The telemetry scheduler runs frame 3 at about 20 Hz, so
   one 10 Hz IMU sample can be sent twice.
 
-RobotCore will not treat periodic retransmission as new sensor data. Frame-3
-word 7 must contain a changing source sample ID.
+RobotCore does not treat this legacy frame-3 path as a production IMU input.
 
 ## Required target
 
 | Item | Target |
 | --- | --- |
 | Sensor UART | 115200 baud, 8N1 |
-| Sensor output | command `0x70`, float gyro xyz and acceleration xyz |
+| Sensor output | connected VG/AH/MINS mode `0x06`, 48-byte `0x59` float packet; IMU-family `0x70` also accepted |
 | Sensor rate | 100 Hz (`0x0C = 0x06`) |
 | A-board to Jetson | UART6 at 115200 baud |
-| Frame-3 delivery | once per new IMU sample, approximately 100 Hz |
-| Frame-3 word 6 | nonzero only for a fresh, checksum-valid sample |
-| Frame-3 word 7 | source counter/sample ID, unsigned modulo 65536 |
+| Frame-4 delivery | once per new IMU sample, approximately 100 Hz |
+| Integrity | version 1, valid flag, CRC16-CCITT |
+| Time/sequence | uint32 extension of the source counter and uint32 MCU sample tick |
 
-The six data values retain the existing scale:
+The versioned 27-byte wire layout is:
+
+`FF F8 04 | version=1 | flags | uint32 counter | uint32 tick_ms | 3×int16 gyro | 3×int16 accel | CRC16-CCITT`
+
+The six data values use:
 
 - words 0--2: gyro xyz in centi-degrees/second;
 - words 3--5: acceleration xyz in milli-g.
@@ -56,17 +59,20 @@ maximum rate is product-dependent.
 
 ## Scheduler and timestamp rules
 
-- Parse and store the counter from bytes 24--27 of the `0x70` data area.
+- For the connected sensor, decode the packed-BCD `000`--`255` counter from
+  bytes 43--44 of the 48-byte `0x59` packet and extend its 8-bit wrap to
+  uint32. The IMU-family 33-byte `0x70` packet uses bytes 28--29 similarly.
 - Atomically copy gyro, acceleration, source counter, and receive tick.
-- Enqueue frame 3 only when that counter changes. Do not publish the latest
+- Enqueue frame 4 only when that counter changes. Do not publish the latest
   sample from an unrelated periodic telemetry loop.
 - Keep frame 0/1/2 and PWM feedback at their existing operational rates unless
   bandwidth measurement requires a deliberate change.
 - Measure UART8 checksum errors, duplicate counters, skipped counters, and
   sample age; expose them in diagnostics before closed-loop trials.
 
-At 100 Hz, a 33-byte Bewei receive packet uses about 33 kbit/s on UART8. A
-20-byte compact frame 3 at 100 Hz uses about 20 kbit/s on UART6. Both fit
+At 100 Hz, the connected sensor's 48-byte receive packet uses about 48 kbit/s
+on UART8. A
+27-byte frame 4 at 100 Hz uses about 27 kbit/s on UART6. Both fit
 115200 baud with margin, including existing traffic, but the complete UART6
 schedule still needs a measured utilization and jitter check.
 
@@ -74,7 +80,7 @@ schedule still needs a measured utilization and jitter check.
 
 With thrusters disarmed and the vehicle stationary:
 
-1. Observe at least 1,000 consecutive valid unique frame-3 samples.
+1. Observe at least 1,000 consecutive valid unique frame-4 samples.
 2. Verify 95th-percentile interval at or below 12 ms and no interval above
    25 ms.
 3. Verify no duplicate counter, and account for every counter skip.
@@ -82,3 +88,20 @@ With thrusters disarmed and the vehicle stationary:
 5. Rotate each physical positive axis separately and confirm its ROS FLU sign.
 6. Record gyro bias/noise, mounting RPY, and end-to-end arrival latency.
 7. Run the RobotCore 60 Hz estimator check for at least 60 seconds.
+
+## 2026-08-02 implementation status
+
+The source now configures UART8 for 115200 baud and requests 100 Hz float
+output, forwards each newly parsed sample as frame 4, extends the sensor's BCD
+counter, includes the MCU acquisition tick, and protects the payload with
+CRC16-CCITT. Release firmware SHA256
+`57b7df80d412125b87ca93b9d343c05494c57f3c523ecf3044d2d98a0ebf6871`
+was flashed and independently read back byte-for-byte on 2026-08-02. A
+debugger-side run observed two samples spanning multiple source-counter wraps:
+frame count `1726 -> 2737` and extended sample ID `1776 -> 2787`, both `+1011`,
+with zero UART8 checksum errors and zero stack overflows.
+
+The matching host bridge now resets its counter/clock mapping when the STM32
+tick rolls backwards. The installed RobotCore service must be restarted to
+load that rebuilt bridge before completing estimator calibration, timing,
+noise, and physical-axis acceptance in `docs/LOCALIZATION_CPP_ACCEPTANCE.md`.

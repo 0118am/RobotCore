@@ -77,9 +77,11 @@ Core topics:
 - `/hardware/aboard_imu_raw`: valid external UART8 gyro and acceleration
   samples forwarded by the A-board. No sample is published for an invalid
   frame-3 payload.
-- `/sensors/external_imu`: stationary-bias-corrected external gyro. Orientation
-  and acceleration are marked unavailable to the estimator until mounting and
-  gravity handling are validated.
+- `/sensors/external_imu`: stationary-bias-corrected gyro plus acceleration
+  referenced to the level, stationary startup pose. It is the UI/logging topic,
+  so stationary acceleration is approximately `0, 0, 0` after calibration.
+- `/sensors/external_imu_specific_force`: calibrated ESKF input retaining the
+  ROS specific-force convention (`+g` on Z at rest for a level FLU mounting).
 - `/localization/aligned_vio_odom`: event-driven map-frame pose from AprilTag
   map-to-odom alignment plus ZED VIO, retaining the ZED base-frame twist.
 - `/localization/fused_odom`: canonical 30 Hz map-frame estimate. It uses the

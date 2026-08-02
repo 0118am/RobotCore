@@ -1,0 +1,14 @@
+# Copy to /etc/robotcore/external_imu_calibration.yaml only after a measured
+# six-face calibration. The template marker deliberately disables accel fusion.
+sensor_serial: "REPLACE_WITH_MANUFACTURING_SENSOR_ID"
+config_hash: "sha256:REPLACE_WITH_HASH_OF_THE_CALIBRATION_INPUTS"
+
+# Row-major matrices. Values below are identities, not calibration results.
+accel_matrix: [1.0, 0.0, 0.0,
+               0.0, 1.0, 0.0,
+               0.0, 0.0, 1.0]
+accel_bias_mps2: [0.0, 0.0, 0.0]
+gyro_matrix: [1.0, 0.0, 0.0,
+              0.0, 1.0, 0.0,
+              0.0, 0.0, 1.0]
+gyro_bias_rps: [0.0, 0.0, 0.0]

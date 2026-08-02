@@ -34,7 +34,6 @@ class ImuConditioningNode(Node):
         self.declare_parameter("input_topic", "/hardware/aboard_imu_raw")
         self.declare_parameter("output_topic", "/sensors/external_imu")
         self.declare_parameter("status_topic", "/localization/external_imu_ready")
-        self.declare_parameter("auto_start", True)
         self.declare_parameter("calibration_sample_count", 200)
         self.declare_parameter("minimum_sample_interval_s", 0.01)
         self.declare_parameter("maximum_sample_gap_s", 0.20)
@@ -66,10 +65,9 @@ class ImuConditioningNode(Node):
         self.collecting = False
         self.ready = False
         self.last_progress_bucket = -1
-        if bool(self.get_parameter("auto_start").value):
-            self.start_calibration()
-        else:
-            self.publish_status()
+        # The ControlInterface Status action is the only operator calibration
+        # entry point. Do not begin collecting stationary samples at startup.
+        self.publish_status()
 
     def start_calibration(self):
         self.samples = []

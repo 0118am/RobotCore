@@ -1,0 +1,15 @@
+[Unit]
+Description=Jetson maximum-performance profile for RobotCore
+Before=robotcore.service
+ConditionFileIsExecutable=/usr/sbin/nvpmodel
+ConditionFileIsExecutable=/usr/bin/jetson_clocks
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/nvpmodel -m 0
+ExecStart=/usr/bin/jetson_clocks
+RemainAfterExit=yes
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target
