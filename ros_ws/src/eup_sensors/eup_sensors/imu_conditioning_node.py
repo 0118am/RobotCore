@@ -1,4 +1,4 @@
-"""Bias-calibrate UART8 gyro data before it enters the 60 Hz state estimator."""
+"""Bias-calibrate UART8 gyro data before it enters the fixed-rate estimator."""
 
 from __future__ import annotations
 

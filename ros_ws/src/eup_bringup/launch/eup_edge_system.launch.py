@@ -89,6 +89,7 @@ def generate_launch_description():
                 "apriltag_detected_count_topic",
                 default_value="/localization/apriltag/detected_count",
             ),
+            DeclareLaunchArgument("apriltag_max_tags", default_value="24"),
             DeclareLaunchArgument(
                 "apriltag_tag_map_file",
                 # The host manager and the separate web UI use this one
@@ -149,6 +150,13 @@ def generate_launch_description():
                         "altitude_input_topic": LaunchConfiguration("altitude_input_topic"),
                         "fused_odometry_topic": "/localization/fused_odom",
                         "zed_odometry_topic": "/localization/zed_odom",
+                        "localization_status_topic": "/localization/status",
+                        "apriltag_pose_status_topic": "/localization/apriltag/pose_status",
+                        "detected_tag_count_topic": LaunchConfiguration(
+                            "apriltag_detected_count_topic"
+                        ),
+                        "tag_fused_sync_tolerance_s": 0.05,
+                        "tag_vio_disagreement_deg": 10.0,
                         "degraded_localization_pose_topic": "/localization/apriltag_pose_degraded",
                     }
                 ],
@@ -224,11 +232,16 @@ def generate_launch_description():
                                 # Ignored by map localisation. It is needed by
                                 # Isaac's non-authoritative raw pose output.
                                 "size": 0.4,
-                                "max_tags": 64,
+                                "max_tags": ParameterValue(
+                                    LaunchConfiguration("apriltag_max_tags"),
+                                    value_type=int,
+                                ),
                                 "tile_size": 4,
                             }
                         ],
                         remappings=[
+                            # Managed NITROS negotiates the /nitros endpoint
+                            # from this base topic name automatically.
                             ("image", LaunchConfiguration("front_camera_raw_topic")),
                             ("camera_info", LaunchConfiguration("front_camera_info_topic")),
                             (
@@ -254,6 +267,7 @@ def generate_launch_description():
                         "detections_topic": LaunchConfiguration("apriltag_detections_topic"),
                         "tag_map_file": LaunchConfiguration("apriltag_tag_map_file"),
                         "detected_count_topic": LaunchConfiguration("apriltag_detected_count_topic"),
+                        "pose_status_topic": "/localization/apriltag/pose_status",
                         "tag_size_m": 0.130,
                         "pose_filter_time_constant_s": ParameterValue(
                             LaunchConfiguration("apriltag_pose_filter_time_constant_s"), value_type=float
@@ -266,10 +280,11 @@ def generate_launch_description():
                         "minimum_pose_tag_count": 3,
                         "minimum_inlier_corners_per_tag": 3,
                         "degraded_pose_topic": "/localization/apriltag_pose_degraded",
-                        "aligned_vio_odometry_topic": "/localization/fused_odom",
+                        "aligned_vio_odometry_topic": "/localization/aligned_vio_odom",
                         "enable_degraded_two_tag_pose": True,
                         "degraded_two_tag_inlier_corners_per_tag": 4,
                         "degraded_two_tag_max_full_rms_px": 3.0,
+                        "degraded_two_tag_vio_sync_tolerance_s": 0.05,
                         "degraded_two_tag_vio_max_translation_m": 0.20,
                         "degraded_two_tag_vio_max_angle_deg": 10.0,
                         "tag_map_position_uncertainty_m": 0.05,
@@ -323,7 +338,9 @@ def generate_launch_description():
                         "alignment_confirm_frames": 4,
                         "alignment_candidate_max_spread_m": 0.20,
                         "alignment_candidate_max_angle_deg": 12.0,
-                        "alignment_recalibration_threshold_m": 0.12,
+                        "alignment_recalibration_threshold_m": 0.05,
+                        "alignment_recalibration_threshold_deg": 2.0,
+                        "tag_vio_sync_tolerance_s": 0.05,
                         "alignment_max_correction_m": 0.75,
                     }
                 ],
@@ -331,7 +348,7 @@ def generate_launch_description():
             # The alignment output contains the latest absolute Tag correction,
             # ZED VIO pose, and ZED linear velocity. The independent UART8 gyro
             # propagates attitude between those visual updates. robot_localization
-            # owns the canonical fixed 60 Hz /localization/fused_odom stream.
+            # owns the canonical fixed-rate /localization/fused_odom stream.
             Node(
                 package="robot_localization",
                 executable="ekf_node",

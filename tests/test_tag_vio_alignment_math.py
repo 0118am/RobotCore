@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT / "ros_ws/src/eup_sensors"))
 from eup_sensors.localization_math import transform_matrix
 from eup_sensors.tag_vio_alignment_math import (  # noqa: E402
     AlignmentCandidateWindow,
+    aligned_pose_covariance,
     blend_transform,
     interpolate_transform,
     map_from_base_from_vio,
@@ -117,6 +118,27 @@ def test_alignment_candidate_confirms_four_consistent_frames_and_averages_them()
     representative = window.representative()
     np.testing.assert_allclose(representative[:3, 3], [1.01, 2.0, 0.0], atol=1e-12)
     np.testing.assert_allclose(representative[:3, :3], np.eye(3), atol=1e-12)
+    covariance = np.asarray(window.covariance()).reshape(6, 6)
+    assert covariance[0, 0] > 0.0
+    assert covariance[5, 5] > 0.0
+    np.testing.assert_allclose(covariance, covariance.T, atol=1e-12)
+
+
+def test_aligned_pose_covariance_rotates_vio_axes_and_preserves_full_matrix():
+    alignment = np.diag([0.01, 0.02, 0.03, 0.04, 0.05, 0.06])
+    vio = np.diag([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+    map_from_odom = transform_matrix([0.0, 0.0, 0.0], [0.0, 0.0, np.pi / 2.0])
+
+    combined = np.asarray(
+        aligned_pose_covariance(alignment.reshape(-1), vio.reshape(-1), map_from_odom)
+    ).reshape(6, 6)
+
+    np.testing.assert_allclose(
+        np.diag(combined),
+        [2.01, 1.02, 3.03, 5.04, 4.05, 6.06],
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(combined, combined.T, atol=1e-12)
 
 
 def test_alignment_candidate_resets_for_time_spread_position_and_angle_outliers():

@@ -35,15 +35,15 @@ Until the physical IMU axes and mounting rotation have been verified, only its
 calibrated angular velocity is fused. Raw acceleration retains gravity and is
 explicitly excluded from position and velocity estimation.
 
-The 60 Hz state chain is:
+The fixed-rate state chain is:
 
 ```text
 AprilTag absolute map pose
              + ZED VIO pose and linear velocity
              -> /localization/aligned_vio_odom
              + calibrated UART8 angular velocity
-             -> 60 Hz /localization/fused_odom
-             -> 60 Hz /robot/body_state
+             -> 30 Hz /localization/fused_odom
+             -> 30 Hz /robot/body_state
 ```
 
 ZED X Mini uses one fixed 30 Hz clock for camera grab/VIO and AprilTag image
@@ -111,6 +111,9 @@ ros2 topic hz /hardware/aboard_imu_raw
 ros2 topic hz /sensors/external_imu
 ros2 topic hz /localization/fused_odom
 ros2 topic hz /robot/body_state
+ros2 topic echo /localization/status --once
+ros2 topic delay /localization/zed_odom
+ros2 topic delay /localization/apriltag/detections
 ```
 
 ## Aboard Confirmation Items

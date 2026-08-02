@@ -63,7 +63,8 @@ def test_apriltag_pose_separates_trusted_alignment_from_two_tag_validation():
     assert '"/localization/apriltag_pose_degraded"' in localization
     assert '"/localization/apriltag_pose_degraded"' in fusion
     assert '"/localization/apriltag_pose_degraded"' not in alignment
-    assert "self.publish_pose(observation, observed, degraded=True)" in localization
+    assert "degraded=True," in localization
+    assert "self.pose_uncertainty_scale(" in localization
     assert "preferred_single_tag_correspondence" not in localization
     assert '"minimum_pose_tag_count": 3' in edge_launch
     assert '"degraded_two_tag_inlier_corners_per_tag": 4' in edge_launch
@@ -110,7 +111,7 @@ def test_apriltag_relocalize_bypasses_the_old_pose_jump_gate_once():
     ]
     assert "if self.relocalization_pending:" in transition_block
     assert transition_block.index("if self.relocalization_pending:") < transition_block.index(
-        'self.get_parameter("enforce_transition_gate").value'
+        'self.runtime_parameters["enforce_transition_gate"]'
     )
     assert "self.relocalization_pending = False" in transition_block
 

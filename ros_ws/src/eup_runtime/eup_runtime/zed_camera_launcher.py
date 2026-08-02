@@ -34,6 +34,9 @@ def zed_launch_command(
         "publish_tf:=false",
         "publish_map_tf:=false",
         "publish_imu_tf:=false",
+        # NITROS owns the GPU image path. ZED's launch file intentionally
+        # treats its separate TypeAdapter IPC mode as mutually exclusive.
+        "enable_ipc:=false",
         "node_log_type:=screen",
         f"ros_params_override_path:={params_file}",
     ]

@@ -7,6 +7,7 @@ around the same run directory in a later phase.
 
 import json
 import hashlib
+import math
 import os
 import shutil
 from datetime import datetime
@@ -19,6 +20,7 @@ from std_msgs.msg import String
 from eup_interfaces.msg import (
     ArmCommand,
     ControlAuthorityStatus,
+    LocalizationStatus,
     PidStatus,
     PolicyStatus,
     SafetyEvent,
@@ -26,6 +28,11 @@ from eup_interfaces.msg import (
     TrackingStatus,
     TrajectoryTarget,
 )
+
+
+def finite_or_none(value):
+    value = float(value)
+    return value if math.isfinite(value) else None
 
 
 class RunLogger(Node):
@@ -49,6 +56,7 @@ class RunLogger(Node):
         self.event_log_path = self.run_dir / "event_log.jsonl"
         self.last_safety_signature = None
         self.last_safety_log_ns = 0
+        self.last_localization_log_ns = 0
         # Policy nodes subscribe to this topic so all policy_io files land in
         # the same run folder without sharing process-local state.
         self.run_dir_pub = self.create_publisher(String, "/runtime/run_dir", 10)
@@ -77,6 +85,12 @@ class RunLogger(Node):
             20,
         )
         self.create_subscription(PidStatus, "/control/pid/status", self.on_pid_status, 20)
+        self.create_subscription(
+            LocalizationStatus,
+            "/localization/status",
+            self.on_localization_status,
+            20,
+        )
         self.create_subscription(
             String,
             "/runtime/tracking_experiment/event",
@@ -365,6 +379,63 @@ class RunLogger(Node):
                 "saturation_fraction": float(msg.saturation_fraction),
                 "configuration_hash": msg.configuration_hash,
                 "message": msg.message,
+            },
+        )
+
+    def on_localization_status(self, msg):
+        """Persist localisation health at 1 Hz without growing logs at filter rate."""
+
+        now_ns = self.get_clock().now().nanoseconds
+        if now_ns - self.last_localization_log_ns < 1_000_000_000:
+            return
+        self.last_localization_log_ns = now_ns
+        diagonal_indices = (0, 7, 14, 21, 28, 35)
+        pose_diagonal = [
+            float(msg.pose_covariance[index]) for index in diagonal_indices
+        ]
+        twist_diagonal = [
+            float(msg.twist_covariance[index]) for index in diagonal_indices
+        ]
+        self.write_event(
+            "localization_status",
+            {
+                "localization_source": msg.localization_source,
+                "vio_fresh": bool(msg.vio_fresh),
+                "tag_fresh": bool(msg.tag_fresh),
+                "tag_consistent": bool(msg.tag_consistent),
+                "absolute_fix_valid": bool(msg.absolute_fix_valid),
+                "position_estimated": bool(msg.position_estimated),
+                "tag_observation_class": msg.tag_observation_class,
+                "rejection_reason": msg.rejection_reason,
+                "detected_tag_count": int(msg.detected_tag_count),
+                "mapped_tag_count": int(msg.mapped_tag_count),
+                "inlier_tag_count": int(msg.inlier_tag_count),
+                "tag_reprojection_rms_px": finite_or_none(
+                    msg.tag_reprojection_rms_px
+                ),
+                "minimum_tag_edge_px": finite_or_none(msg.minimum_tag_edge_px),
+                "tag_pose_published": bool(msg.tag_pose_published),
+                "apriltag_rejection_reason": msg.apriltag_rejection_reason,
+                "vio_age_s": finite_or_none(msg.vio_age_s),
+                "tag_age_s": finite_or_none(msg.tag_age_s),
+                "absolute_fix_age_s": finite_or_none(msg.absolute_fix_age_s),
+                "apriltag_frame_age_s": finite_or_none(
+                    msg.apriltag_frame_age_s
+                ),
+                "vio_rate_hz": float(msg.vio_rate_hz),
+                "tag_rate_hz": float(msg.tag_rate_hz),
+                "fused_rate_hz": float(msg.fused_rate_hz),
+                "apriltag_frame_rate_hz": float(msg.apriltag_frame_rate_hz),
+                "vio_transport_delay_s": finite_or_none(msg.vio_transport_delay_s),
+                "tag_transport_delay_s": finite_or_none(msg.tag_transport_delay_s),
+                "tag_vio_translation_residual_m": finite_or_none(
+                    msg.tag_vio_translation_residual_m
+                ),
+                "tag_vio_angle_residual_deg": finite_or_none(
+                    msg.tag_vio_angle_residual_deg
+                ),
+                "pose_covariance_diagonal": pose_diagonal,
+                "twist_covariance_diagonal": twist_diagonal,
             },
         )
 

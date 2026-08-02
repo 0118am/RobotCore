@@ -8,10 +8,11 @@ import numpy as np
 import rclpy
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
 from tf2_ros import Buffer, TransformException, TransformListener
 
-from .localization_math import invert_transform, quaternion_xyzw
+from .localization_math import covariance_with_diagonal_floor, invert_transform, quaternion_xyzw
 
 
 def rotation_from_quaternion(quaternion) -> np.ndarray:
@@ -79,16 +80,44 @@ class ZedOdometryAdapterNode(Node):
         self.declare_parameter("output_topic", "/localization/zed_odom")
         self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("minimum_linear_speed_mps", 0.002)
+        self.declare_parameter("position_stddev_floor_m", 0.01)
+        self.declare_parameter("orientation_stddev_floor_rad", math.radians(0.25))
+        self.declare_parameter("linear_velocity_stddev_floor_mps", 0.03)
+        self.declare_parameter("angular_velocity_stddev_floor_rps", math.radians(2.0))
         self.last_warning = ""
 
         self.base_frame = str(self.get_parameter("base_frame").value)
+        self.minimum_linear_speed_mps = max(
+            0.0, float(self.get_parameter("minimum_linear_speed_mps").value)
+        )
+        self.linear_velocity_variance_floor = max(
+            0.0, float(self.get_parameter("linear_velocity_stddev_floor_mps").value)
+        ) ** 2
+        self.angular_velocity_variance_floor = max(
+            0.0, float(self.get_parameter("angular_velocity_stddev_floor_rps").value)
+        ) ** 2
+        self.position_variance_floor = max(
+            0.0, float(self.get_parameter("position_stddev_floor_m").value)
+        ) ** 2
+        self.orientation_variance_floor = max(
+            0.0, float(self.get_parameter("orientation_stddev_floor_rad").value)
+        ) ** 2
+        self.latest_odometry_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+        )
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self, spin_thread=True)
         self.publisher = self.create_publisher(
-            Odometry, str(self.get_parameter("output_topic").value), 20
+            Odometry, str(self.get_parameter("output_topic").value), self.latest_odometry_qos
         )
         self.create_subscription(
-            Odometry, str(self.get_parameter("input_topic").value), self.on_odometry, 20
+            Odometry,
+            str(self.get_parameter("input_topic").value),
+            self.on_odometry,
+            self.latest_odometry_qos,
         )
 
     def on_odometry(self, message: Odometry):
@@ -129,13 +158,20 @@ class ZedOdometryAdapterNode(Node):
         base_twist = twist_adjoint(base_from_source) @ source_twist
         linear = base_twist[:3]
         angular = base_twist[3:]
-        minimum_speed = max(0.0, float(self.get_parameter("minimum_linear_speed_mps").value))
-        if float(np.linalg.norm(linear)) < minimum_speed:
+        if float(np.linalg.norm(linear)) < self.minimum_linear_speed_mps:
             linear[:] = 0.0
         output.twist.twist.linear.x, output.twist.twist.linear.y, output.twist.twist.linear.z = linear
         output.twist.twist.angular.x, output.twist.twist.angular.y, output.twist.twist.angular.z = angular
-        output.twist.covariance = self.transform_covariance(message.twist.covariance, base_from_source)
-        output.pose.covariance = self.transform_covariance(message.pose.covariance, base_from_source)
+        output.twist.covariance = covariance_with_diagonal_floor(
+            self.transform_covariance(message.twist.covariance, base_from_source),
+            [self.linear_velocity_variance_floor] * 3
+            + [self.angular_velocity_variance_floor] * 3,
+        )
+        output.pose.covariance = covariance_with_diagonal_floor(
+            self.transform_covariance(message.pose.covariance, base_from_source),
+            [self.position_variance_floor] * 3
+            + [self.orientation_variance_floor] * 3,
+        )
         self.publisher.publish(output)
         self.last_warning = ""
 

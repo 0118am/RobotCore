@@ -100,6 +100,24 @@ def filter_tag_correspondences_by_minimum_edge(
     )
 
 
+def covariance_with_diagonal_floor(covariance, diagonal_floor) -> list[float]:
+    """Return a finite symmetric 6x6 covariance with minimum variances.
+
+    Some odometry publishers leave twist covariance at all zeros. A Kalman
+    filter interprets that as perfect velocity, so adapters must supply an
+    explicit sensor floor instead of silently over-trusting that message.
+    """
+
+    matrix = np.asarray(covariance, dtype=np.float64).reshape(6, 6).copy()
+    matrix[~np.isfinite(matrix)] = 0.0
+    matrix = 0.5 * (matrix + matrix.T)
+    floors = np.asarray(diagonal_floor, dtype=np.float64).reshape(6)
+    if not np.isfinite(floors).all() or np.any(floors < 0.0):
+        raise ValueError("covariance diagonal floors must be finite and non-negative")
+    np.fill_diagonal(matrix, np.maximum(np.diag(matrix), floors))
+    return matrix.reshape(-1).tolist()
+
+
 def tag36h11_corners_in_map_axis_order(opencv_corners) -> np.ndarray:
     """Convert OpenCV tag36h11 corners to the physical map's tag-axis order.
 

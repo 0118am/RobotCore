@@ -33,6 +33,9 @@ def test_map_localizer_consumes_cuda_corners_without_detecting_images():
     assert "from isaac_ros_apriltag_interfaces.msg import AprilTagDetectionArray" in source
     assert '"detections_topic", "/localization/apriltag/detections"' in source
     assert "def on_detections(" in source
+    assert '"pose_status_topic", "/localization/apriltag/pose_status"' in source
+    assert "status.reprojection_rms_px" in source
+    assert "status.rejection_reason" in source
     assert "isaac_ros_tag36h11_corners_in_map_axis_order" in source
     assert "detectMarkers" not in source
     assert "ArucoDetector" not in source
@@ -54,6 +57,7 @@ def test_weak_tags_are_removed_without_rejecting_strong_tags_or_logging_acceptan
     assert "filter_tag_correspondences_by_minimum_edge(" in source
     assert "continuing with {seen_ids}" in source
     assert "degraded two-Tag VIO validation accepted" not in source
+    assert "AprilTag correction accepted from mapped Tags" not in source
 
 
 def test_isaac_raw_pose_is_not_used_for_mixed_tag_sizes():
@@ -62,4 +66,27 @@ def test_isaac_raw_pose_is_not_used_for_mixed_tag_sizes():
 
     assert '"size": 0.4' in launch
     assert "detection.pose" not in source
-    assert 'definition["size_m"]' in source
+    assert 'definition.get("size_m", default_size)' in source
+    assert '"corners_m": tag_corners_in_map(center, rpy, size)' in source
+
+
+def test_detector_capacity_is_bounded_and_degraded_validation_uses_direct_vio():
+    launch = LAUNCH.read_text(encoding="utf-8")
+
+    assert 'DeclareLaunchArgument("apriltag_max_tags", default_value="24")' in launch
+    assert '"aligned_vio_odometry_topic": "/localization/aligned_vio_odom"' in launch
+
+
+def test_zed_nitros_is_enabled_while_operator_video_remains_on_demand():
+    launch = LAUNCH.read_text(encoding="utf-8")
+    camera_config = (
+        ROOT / "ros_ws" / "src" / "eup_sensors" / "config" / "zedx_minimal_open.yaml"
+    ).read_text(encoding="utf-8")
+    zed_launcher = (
+        ROOT / "ros_ws" / "src" / "eup_runtime" / "eup_runtime" / "zed_camera_launcher.py"
+    ).read_text(encoding="utf-8")
+
+    assert '("image", LaunchConfiguration("front_camera_raw_topic"))' in launch
+    assert "front_camera_nitros_topic" not in launch
+    assert "disable_nitros: false" in camera_config
+    assert '"enable_ipc:=false"' in zed_launcher

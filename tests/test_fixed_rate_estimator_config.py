@@ -28,7 +28,7 @@ def test_fixed_rate_ekf_fuses_visual_state_and_only_external_gyro():
         "localization_ekf"
     ]["ros__parameters"]
 
-    assert parameters["frequency"] == 60.0
+    assert parameters["frequency"] == 30.0
     assert parameters["world_frame"] == "map"
     assert parameters["odom0"] == "/localization/aligned_vio_odom"
     assert parameters["imu0"] == "/sensors/external_imu"
@@ -39,6 +39,9 @@ def test_fixed_rate_ekf_fuses_visual_state_and_only_external_gyro():
     assert parameters["odom0_config"] == [True] * 9 + [False] * 6
     assert parameters["imu0_config"] == [False] * 9 + [True] * 3 + [False] * 3
     assert parameters["imu0_remove_gravitational_acceleration"] is False
+    assert "odom1" not in parameters
+    assert "pose0" not in parameters
+    assert "twist0" not in parameters
 
 
 def test_external_imu_requires_stationary_bias_calibration():
@@ -64,6 +67,8 @@ def test_edge_launch_wires_one_canonical_fixed_rate_output():
     assert '"imu_topic": LaunchConfiguration("zed_imu_topic")' in launch
     assert '"publish_imu": True' in launch
     assert '"output_odometry_topic": "/localization/aligned_vio_odom"' in launch
+    assert "pressure_depth_odometry_node" not in launch
+    assert "/localization/pressure_depth_odom" not in launch
     assert 'package="robot_localization"' in launch
     assert 'name="localization_ekf"' in launch
     assert '("odometry/filtered", "/localization/fused_odom")' in launch
@@ -75,7 +80,43 @@ def test_body_state_marks_velocity_stale_when_zed_vio_stops():
         SENSORS / "eup_sensors/sensor_fusion_node.py"
     ).read_text(encoding="utf-8")
 
-    assert (
-        "body.linear_velocity_valid and self.zed_odometry_is_fresh()"
-        in fusion
-    )
+    assert "body.linear_velocity_valid and vio_fresh" in fusion
+    assert "body.position_estimated = vio_fresh and not tag_accepted" in fusion
+    assert "reliability=ReliabilityPolicy.BEST_EFFORT" in fusion
+    assert "source_stamp_ns <= self.zed_odometry_stamp_ns" in fusion
+
+
+def test_localization_status_exposes_rate_age_innovation_and_covariance():
+    interface = (
+        ROOT / "ros_ws/src/eup_interfaces/msg/LocalizationStatus.msg"
+    ).read_text(encoding="utf-8")
+    cmake = (
+        ROOT / "ros_ws/src/eup_interfaces/CMakeLists.txt"
+    ).read_text(encoding="utf-8")
+    logger = (
+        ROOT / "ros_ws/src/eup_runtime/eup_runtime/run_logger.py"
+    ).read_text(encoding="utf-8")
+
+    assert '"msg/LocalizationStatus.msg"' in cmake
+    for field in (
+        "vio_age_s",
+        "tag_age_s",
+        "vio_rate_hz",
+        "tag_rate_hz",
+        "fused_rate_hz",
+        "apriltag_frame_rate_hz",
+        "apriltag_frame_age_s",
+        "tag_vio_translation_residual_m",
+        "tag_vio_angle_residual_deg",
+        "mapped_tag_count",
+        "inlier_tag_count",
+        "tag_reprojection_rms_px",
+        "apriltag_rejection_reason",
+        "pose_covariance",
+        "twist_covariance",
+        "rejection_reason",
+    ):
+        assert field in interface
+    assert '"/localization/status"' in logger
+    assert '"localization_status"' in logger
+    assert '"msg/AprilTagPoseStatus.msg"' in cmake

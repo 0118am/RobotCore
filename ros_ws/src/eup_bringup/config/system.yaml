@@ -9,6 +9,7 @@ fixed_stack:
 topics:
   imu: /zedx/zed_node/imu/data
   body_state: /robot/body_state
+  localization_status: /localization/status
   arm_state: /robot/arm_state
   thruster_state: /robot/thruster_state
   thruster_cmd: /control/thruster_cmd

@@ -82,12 +82,16 @@ Core topics:
   gravity handling are validated.
 - `/localization/aligned_vio_odom`: event-driven map-frame pose from AprilTag
   map-to-odom alignment plus ZED VIO, retaining the ZED base-frame twist.
-- `/localization/fused_odom`: canonical 60 Hz map-frame estimate. It uses the
+- `/localization/fused_odom`: canonical 30 Hz map-frame estimate. It uses the
   aligned AprilTag/ZED pose and linear velocity plus calibrated UART8 angular
   velocity.
-- `/robot/body_state`: 60 Hz fused base pose, body-frame velocity, and
+- `/robot/body_state`: 30 Hz fused base pose, body-frame velocity, and
   validity. Velocity is estimated by ZED VIO and the EKF, not by finite
   differencing AprilTag poses.
+- `/localization/status`: quantitative source ages, measured rates, transport
+  delays, detected/mapped/inlier Tag counts, reprojection RMS, Tag/VIO
+  innovation, rejection reasons, and fused covariance. The run logger persists
+  this status at 1 Hz.
 - `/robot/arm_state`: arm joint state and validity.
 - `/robot/thruster_state`: 8-thruster normalized and PWM feedback.
 - `/control/thruster_cmd`: 8 normalized thruster commands.

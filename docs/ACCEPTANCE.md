@@ -36,8 +36,12 @@ This file defines the first-stage system-chain acceptance target.
 - [ ] `/localization/zed_odom` contains ZED VIO local `odom -> base_link`
       pose and base-frame twist; it is never relabelled as a map pose.
 - [ ] `/localization/fused_odom` and `/robot/body_state` each sustain
-      57--63 Hz for at least 60 seconds, with strictly increasing source
+      28--32 Hz for at least 60 seconds, with strictly increasing source
       timestamps, no duplicate samples, and no growing DDS queue.
+- [ ] `/localization/status` reports VIO/Tag/fused rates, source ages,
+      transport delays, detected/mapped/inlier Tag counts, reprojection RMS,
+      Tag/VIO translation and angle residuals, rejection reasons, and finite
+      6x6 pose/twist covariance while sources are healthy.
 - [ ] During a measured constant-speed run, body-frame linear velocity agrees
       with an independent distance/time reference within the test tolerance;
       it is not obtained by finite-differencing AprilTag detections.

@@ -6,8 +6,6 @@ from collections import deque
 import json
 import math
 from pathlib import Path
-import time
-from typing import Any
 
 import numpy as np
 import rclpy
@@ -20,6 +18,8 @@ from sensor_msgs.msg import CameraInfo
 from std_msgs.msg import Int32
 from std_srvs.srv import Trigger
 from tf2_ros import TransformBroadcaster
+
+from eup_interfaces.msg import AprilTagPoseStatus
 
 from .localization_math import (
     filter_tag_correspondences_by_minimum_edge,
@@ -66,6 +66,9 @@ class AprilTagLocalizationNode(Node):
         self.declare_parameter("pool_orientation_tolerance_deg", 2.0)
         self.declare_parameter("relocalize_service", "/localization/apriltag/relocalize")
         self.declare_parameter("pose_topic", "/localization/apriltag_pose")
+        self.declare_parameter(
+            "pose_status_topic", "/localization/apriltag/pose_status"
+        )
         # Strict two-Tag observations use a separate topic. The map-to-odom
         # alignment node deliberately never subscribes to it, so degraded
         # observations cannot establish or recalibrate the global transform.
@@ -73,7 +76,7 @@ class AprilTagLocalizationNode(Node):
             "degraded_pose_topic", "/localization/apriltag_pose_degraded"
         )
         self.declare_parameter(
-            "aligned_vio_odometry_topic", "/localization/fused_odom"
+            "aligned_vio_odometry_topic", "/localization/aligned_vio_odom"
         )
         # This reports raw visual detections, including IDs that do not yet
         # exist in the map.  It is intentionally independent of PnP success
@@ -147,13 +150,12 @@ class AprilTagLocalizationNode(Node):
         tag_map_filename = str(self.get_parameter("tag_map_file").value).strip()
         self.tag_map_path = Path(tag_map_filename).expanduser() if tag_map_filename else None
         self.tag_layout, _ = self.load_tag_layout(tag_map_filename)
+        self.cache_runtime_parameters()
         if str(self.get_parameter("tag_family").value).lower() != "tag36h11":
             raise ValueError("the CUDA AprilTag pipeline supports tag36h11 only")
         self.camera_matrix: np.ndarray | None = None
         self.distortion: np.ndarray | None = None
         self.last_error = ""
-        self.last_warning_at_s: dict[str, float] = {}
-        self.last_accepted_inlier_tag_ids: tuple[int, ...] = ()
         self.filtered_map_from_base: np.ndarray | None = None
         self.filtered_pose_stamp_ns = 0
         self.aligned_vio_history: deque[tuple[int, np.ndarray]] = deque()
@@ -188,10 +190,15 @@ class AprilTagLocalizationNode(Node):
         self.detected_count_pub = self.create_publisher(
             Int32, str(self.get_parameter("detected_count_topic").value), 10
         )
+        self.pose_status_pub = self.create_publisher(
+            AprilTagPoseStatus,
+            str(self.get_parameter("pose_status_topic").value),
+            10,
+        )
         self.tf_broadcaster = (
             TransformBroadcaster(self) if bool(self.get_parameter("publish_tf").value) else None
         )
-        self.create_subscription(
+        self.camera_info_subscription = self.create_subscription(
             CameraInfo,
             str(self.get_parameter("camera_info_topic").value),
             self.on_camera_info,
@@ -207,7 +214,7 @@ class AprilTagLocalizationNode(Node):
             Odometry,
             str(self.get_parameter("aligned_vio_odometry_topic").value),
             self.on_aligned_vio_odometry,
-            20,
+            self.latest_image_qos,
         )
         self.relocalize_service = self.create_service(
             Trigger,
@@ -226,6 +233,47 @@ class AprilTagLocalizationNode(Node):
         except Exception as exc:
             raise RuntimeError(f"OpenCV is required for map PnP: {exc}") from exc
         return cv2
+
+    def cache_runtime_parameters(self):
+        """Resolve hot-path ROS parameters once per explicit map revision."""
+
+        names = (
+            "image_is_rectified",
+            "map_frame",
+            "base_frame",
+            "min_tag_edge_px",
+            "minimum_pose_tag_count",
+            "enable_degraded_two_tag_pose",
+            "degraded_two_tag_inlier_corners_per_tag",
+            "minimum_inlier_corners_per_tag",
+            "enforce_observation_gates",
+            "enforce_transition_gate",
+            "degraded_two_tag_vio_history_s",
+            "degraded_two_tag_vio_sync_tolerance_s",
+            "max_reprojection_error_px",
+            "min_tag_depth_m",
+            "max_reprojection_rms_px",
+            "degraded_two_tag_max_full_rms_px",
+            "degraded_two_tag_vio_max_translation_m",
+            "degraded_two_tag_vio_max_angle_deg",
+            "tag_map_position_uncertainty_m",
+            "pose_transition_max_elapsed_s",
+            "max_translation_jump_m",
+            "max_translation_speed_mps",
+            "reacquisition_max_gap_s",
+            "reacquisition_max_spread_m",
+            "reacquisition_confirm_frames",
+            "pose_filter_time_constant_s",
+            "pose_filter_reset_after_s",
+            "pose_filter_max_elapsed_s",
+            "multi_tag_position_stddev_m",
+            "multi_tag_angle_stddev_deg",
+            "degraded_two_tag_position_stddev_m",
+            "degraded_two_tag_angle_stddev_deg",
+        )
+        self.runtime_parameters = {
+            name: self.get_parameter(name).value for name in names
+        }
 
     def load_tag_layout(
         self, filename: str
@@ -270,7 +318,14 @@ class AprilTagLocalizationNode(Node):
                     or size <= 0.0
                 ):
                     raise ValueError(f"tag {raw_id} must contain finite three-value position_m and rpy_deg")
-                layout[int(raw_id)] = {"position_m": center, "rpy_rad": rpy, "size_m": size}
+                layout[int(raw_id)] = {
+                    "position_m": center,
+                    "rpy_rad": rpy,
+                    "size_m": size,
+                    # This geometry is immutable until explicit Relocalize.
+                    # Avoid rebuilding it for every detection frame.
+                    "corners_m": tag_corners_in_map(center, rpy, size),
+                }
             if layout and bool(
                 self.get_parameter("enforce_cuboid_pool_geometry").value
             ):
@@ -310,6 +365,7 @@ class AprilTagLocalizationNode(Node):
             return response
 
         self.tag_layout = replacement
+        self.cache_runtime_parameters()
         self.reset_pose_filter()
         self.aligned_vio_history.clear()
         self.relocalization_pending = True
@@ -322,7 +378,7 @@ class AprilTagLocalizationNode(Node):
         return response
 
     def on_camera_info(self, msg: CameraInfo):
-        if bool(self.get_parameter("image_is_rectified").value):
+        if bool(self.runtime_parameters["image_is_rectified"]):
             # CameraInfo.K/D describe the raw, distorted image. P describes
             # the processed rectified image subscribed above.
             matrix = np.asarray(msg.p, dtype=np.float64).reshape(3, 4)[:, :3]
@@ -341,6 +397,11 @@ class AprilTagLocalizationNode(Node):
             return
         self.camera_matrix = matrix
         self.distortion = distortion
+        # Calibration is fixed for this launch. Releasing the subscription
+        # avoids processing the same 30 Hz CameraInfo message indefinitely.
+        if self.camera_info_subscription is not None:
+            self.destroy_subscription(self.camera_info_subscription)
+            self.camera_info_subscription = None
 
     @staticmethod
     def message_stamp_ns(message) -> int:
@@ -351,8 +412,8 @@ class AprilTagLocalizationNode(Node):
     def on_aligned_vio_odometry(self, message: Odometry):
         """Keep map-frame VIO predictions only after map->odom is established."""
 
-        map_frame = str(self.get_parameter("map_frame").value)
-        base_frame = str(self.get_parameter("base_frame").value)
+        map_frame = str(self.runtime_parameters["map_frame"])
+        base_frame = str(self.runtime_parameters["base_frame"])
         if message.header.frame_id != map_frame or message.child_frame_id != base_frame:
             self.warn_throttled(
                 "degraded-vio-frame",
@@ -388,21 +449,17 @@ class AprilTagLocalizationNode(Node):
             return
         if self.aligned_vio_history and sample_ns < self.aligned_vio_history[-1][0]:
             self.warn_throttled(
-                "degraded-vio-time", "aligned VIO timestamp moved backwards"
+                "degraded-vio-time",
+                "aligned VIO timestamp moved backwards; validation history reset",
             )
-            return
+            self.aligned_vio_history.clear()
         sample = (sample_ns, map_from_base)
         if self.aligned_vio_history and sample_ns == self.aligned_vio_history[-1][0]:
             self.aligned_vio_history[-1] = sample
         else:
             self.aligned_vio_history.append(sample)
         history_ns = int(
-            max(
-                0.1,
-                float(
-                    self.get_parameter("degraded_two_tag_vio_history_s").value
-                ),
-            )
+            max(0.1, float(self.runtime_parameters["degraded_two_tag_vio_history_s"]))
             * 1e9
         )
         while (
@@ -420,9 +477,9 @@ class AprilTagLocalizationNode(Node):
             max(
                 0.0,
                 float(
-                    self.get_parameter(
+                    self.runtime_parameters[
                         "degraded_two_tag_vio_sync_tolerance_s"
-                    ).value
+                    ]
                 ),
             )
             * 1e9
@@ -436,12 +493,7 @@ class AprilTagLocalizationNode(Node):
                 after = sample
                 break
         if before is None or after is None:
-            nearest = (
-                self.aligned_vio_history[0]
-                if before is None
-                else self.aligned_vio_history[-1]
-            )
-            return nearest[1] if abs(nearest[0] - target_ns) <= tolerance_ns else None
+            return None
         if before[0] == after[0]:
             return before[1]
         if max(target_ns - before[0], after[0] - target_ns) > tolerance_ns:
@@ -470,22 +522,28 @@ class AprilTagLocalizationNode(Node):
 
     def on_detections(self, msg: AprilTagDetectionArray):
         corners, ids = self.detection_corners_and_ids(msg)
+        status = self.make_pose_status(msg, ids)
         try:
             if self.camera_matrix is None or self.distortion is None:
+                status.rejection_reason = "waiting for calibrated CameraInfo"
                 self.warn_once("waiting for calibrated CameraInfo before AprilTag localisation")
                 return
             if not self.tag_layout:
+                status.rejection_reason = "tag map is empty or unavailable"
                 self.warn_once("waiting for measured tag IDs and map poses in tag_map_file")
                 return
             object_points, image_points, seen_ids = self.mapped_correspondences(corners, ids)
+            status.mapped_tag_count = len(seen_ids)
             if len(seen_ids) == 0:
+                status.rejection_reason = "no detected Tag IDs exist in the active map"
                 return
+            status.minimum_tag_edge_px = self.minimum_tag_edge_px(image_points)
             object_points, image_points, seen_ids, small_tag_ids = (
                 filter_tag_correspondences_by_minimum_edge(
                     object_points,
                     image_points,
                     seen_ids,
-                    float(self.get_parameter("min_tag_edge_px").value),
+                    float(self.runtime_parameters["min_tag_edge_px"]),
                 )
             )
             if small_tag_ids:
@@ -495,15 +553,20 @@ class AprilTagLocalizationNode(Node):
                     f"mapped Tags {small_tag_ids}; continuing with {seen_ids}",
                 )
             if len(seen_ids) == 0:
+                status.rejection_reason = "all mapped Tags are undersampled"
                 return
+            status.mapped_tag_count = len(seen_ids)
             minimum_tag_count = max(
-                3, int(self.get_parameter("minimum_pose_tag_count").value)
+                3, int(self.runtime_parameters["minimum_pose_tag_count"])
             )
             degraded_two_tag = (
-                bool(self.get_parameter("enable_degraded_two_tag_pose").value)
+                bool(self.runtime_parameters["enable_degraded_two_tag_pose"])
                 and len(seen_ids) == 2
             )
             if len(seen_ids) < minimum_tag_count and not degraded_two_tag:
+                status.rejection_reason = (
+                    f"requires {minimum_tag_count} mapped Tags; received {len(seen_ids)}"
+                )
                 self.warn_throttled(
                     "too-few-mapped-tags",
                     "AprilTag pose withheld: "
@@ -514,6 +577,7 @@ class AprilTagLocalizationNode(Node):
                 object_points, image_points, seen_ids
             )
             if not success or inliers is None or len(inliers) < 4:
+                status.rejection_reason = "joint PnP/RANSAC did not produce enough inliers"
                 self.warn_throttled(
                     "pnp-rejected",
                     "multi-tag PnP rejected for mapped Tags "
@@ -522,20 +586,25 @@ class AprilTagLocalizationNode(Node):
                 return
             minimum_inlier_corners = (
                 int(
-                    self.get_parameter(
+                    self.runtime_parameters[
                         "degraded_two_tag_inlier_corners_per_tag"
-                    ).value
+                    ]
                 )
                 if degraded_two_tag
-                else int(
-                    self.get_parameter("minimum_inlier_corners_per_tag").value
-                )
+                else int(self.runtime_parameters["minimum_inlier_corners_per_tag"])
             )
             inlier_tag_ids = self.inlier_tag_ids(
                 inliers, seen_ids, minimum_corners=minimum_inlier_corners
             )
+            status.inlier_tag_count = len(inlier_tag_ids)
+            status.reprojection_rms_px = self.reprojection_rms_px(
+                object_points, image_points, inliers, rvec, tvec
+            )
             required_supported_tags = 2 if degraded_two_tag else minimum_tag_count
             if len(inlier_tag_ids) < required_supported_tags:
+                status.rejection_reason = (
+                    "insufficient independently supported inlier Tags"
+                )
                 self.warn_throttled(
                     "pnp-inlier-tags",
                     "multi-tag PnP lacks support from at least "
@@ -547,7 +616,7 @@ class AprilTagLocalizationNode(Node):
                 return
             rotation, _ = self.cv2.Rodrigues(rvec)
             enforce_observation_gates = bool(
-                self.get_parameter("enforce_observation_gates").value
+                self.runtime_parameters["enforce_observation_gates"]
             )
             observation_is_credible = (
                 self.pnp_observation_is_credible(
@@ -557,6 +626,7 @@ class AprilTagLocalizationNode(Node):
                 else True
             )
             if (enforce_observation_gates or degraded_two_tag) and not observation_is_credible:
+                status.rejection_reason = "PnP observation quality gate rejected the frame"
                 return
             camera_from_map = np.eye(4, dtype=np.float64)
             camera_from_map[:3, :3] = rotation
@@ -564,7 +634,8 @@ class AprilTagLocalizationNode(Node):
             map_from_camera = invert_transform(camera_from_map)
             map_from_base = map_from_camera @ invert_transform(self.base_to_camera)
             if degraded_two_tag:
-                self.publish_degraded_two_tag_pose(
+                status.degraded = True
+                status.pose_published = self.publish_degraded_two_tag_pose(
                     msg,
                     map_from_base,
                     object_points,
@@ -574,6 +645,8 @@ class AprilTagLocalizationNode(Node):
                     rvec,
                     tvec,
                 )
+                if not status.pose_published:
+                    status.rejection_reason = "two-Tag VIO validation gate rejected the frame"
                 return
             if self.relocalization_pending:
                 # Relocalize means the old global pose is explicitly invalid.
@@ -581,23 +654,26 @@ class AprilTagLocalizationNode(Node):
                 # translation or rotation change relative to the old pose.
                 self.relocalization_pending = False
                 self.clear_reacquisition_candidate()
-            elif bool(
-                self.get_parameter("enforce_transition_gate").value
-            ) and not self.pose_transition_is_credible(
+            elif bool(self.runtime_parameters["enforce_transition_gate"]) and not self.pose_transition_is_credible(
                 map_from_base, msg, seen_ids, inlier_tag_ids
             ):
+                status.rejection_reason = "pose transition/reacquisition gate rejected the frame"
                 return
             map_from_base = self.filter_map_from_base(map_from_base, msg)
-            accepted_inlier_tag_ids = tuple(inlier_tag_ids)
-            if accepted_inlier_tag_ids != self.last_accepted_inlier_tag_ids:
-                self.get_logger().info(
-                    "AprilTag correction accepted from mapped Tags "
-                    f"{seen_ids}; PnP inlier Tags {inlier_tag_ids}"
-                )
-                self.last_accepted_inlier_tag_ids = accepted_inlier_tag_ids
-            self.publish_pose(msg, map_from_base)
+            self.publish_pose(
+                msg,
+                map_from_base,
+                object_points=object_points,
+                image_points=image_points,
+                seen_ids=inlier_tag_ids,
+                inliers=inliers,
+                rvec=rvec,
+                tvec=tvec,
+            )
+            status.pose_published = True
             self.last_error = ""
         except Exception as exc:
+            status.rejection_reason = f"localisation frame exception: {exc}"
             self.warn_throttled(
                 "frame-rejected", f"AprilTag localisation frame rejected: {exc}"
             )
@@ -606,6 +682,33 @@ class AprilTagLocalizationNode(Node):
             # array. A zero means “no tag in this frame”; silence means the
             # detector or camera path is no longer producing observations.
             self.publish_detected_count(ids)
+            self.pose_status_pub.publish(status)
+
+    @staticmethod
+    def make_pose_status(
+        observation: AprilTagDetectionArray, ids
+    ) -> AprilTagPoseStatus:
+        status = AprilTagPoseStatus()
+        status.header = observation.header
+        status.detected_tag_count = 0 if ids is None else int(len(ids))
+        status.reprojection_rms_px = math.nan
+        status.minimum_tag_edge_px = math.nan
+        return status
+
+    @staticmethod
+    def minimum_tag_edge_px(image_points) -> float:
+        points = np.asarray(image_points, dtype=np.float64).reshape(-1, 4, 2)
+        return float(
+            np.min(np.linalg.norm(points - np.roll(points, -1, axis=1), axis=2))
+        )
+
+    def reprojection_rms_px(self, object_points, image_points, inliers, rvec, tvec) -> float:
+        projected, _ = self.cv2.projectPoints(
+            object_points, rvec, tvec, self.camera_matrix, self.distortion
+        )
+        residuals = np.asarray(image_points, dtype=np.float64) - projected.reshape(-1, 2)
+        selected = residuals[np.asarray(inliers, dtype=np.intp).reshape(-1)]
+        return float(math.sqrt(np.mean(np.sum(selected * selected, axis=1))))
 
     def publish_detected_count(self, ids):
         """Publish the number of raw IDs recognized in the current image."""
@@ -618,7 +721,7 @@ class AprilTagLocalizationNode(Node):
         """Solve the joint PnP observation from the mapped Tags in one frame."""
 
         reprojection_limit_px = max(
-            0.0, float(self.get_parameter("max_reprojection_error_px").value)
+            0.0, float(self.runtime_parameters["max_reprojection_error_px"])
         ) + self.tag_map_uncertainty_allowance_px(image_points, seen_ids)
         return self.cv2.solvePnPRansac(
             object_points,
@@ -639,7 +742,9 @@ class AprilTagLocalizationNode(Node):
         camera_points = (
             rotation @ np.asarray(object_points, dtype=np.float64).T
         ).T + tvec.reshape(1, 3)
-        minimum_depth_m = max(0.0, float(self.get_parameter("min_tag_depth_m").value))
+        minimum_depth_m = max(
+            0.0, float(self.runtime_parameters["min_tag_depth_m"])
+        )
         tag_camera_points = camera_points.reshape(-1, 4, 3)
         invalid_depth_ids = [
             int(tag_id)
@@ -661,7 +766,7 @@ class AprilTagLocalizationNode(Node):
         selected = residuals[np.asarray(inliers, dtype=np.intp).reshape(-1)]
         rms_px = float(math.sqrt(np.mean(np.sum(selected * selected, axis=1))))
         rms_limit_px = max(
-            0.0, float(self.get_parameter("max_reprojection_rms_px").value)
+            0.0, float(self.runtime_parameters["max_reprojection_rms_px"])
         ) + self.tag_map_uncertainty_allowance_px(image_points, seen_ids)
         if not math.isfinite(rms_px) or rms_px > rms_limit_px:
             inlier_indices = np.asarray(inliers, dtype=np.intp).reshape(-1)
@@ -700,7 +805,7 @@ class AprilTagLocalizationNode(Node):
         inlier_tag_ids: list[int],
         rvec,
         tvec,
-    ):
+    ) -> bool:
         """Publish a two-Tag VIO validation without touching alignment state."""
 
         if self.relocalization_pending:
@@ -709,9 +814,9 @@ class AprilTagLocalizationNode(Node):
                 "AprilTag two-Tag pose withheld during relocalization; "
                 "three Tags are required",
             )
-            return
+            return False
         if sorted(inlier_tag_ids) != sorted(seen_ids):
-            return
+            return False
 
         projected, _ = self.cv2.projectPoints(
             object_points, rvec, tvec, self.camera_matrix, self.distortion
@@ -720,9 +825,7 @@ class AprilTagLocalizationNode(Node):
         per_tag_rms_px = per_tag_full_corner_rms_px(residuals, seen_ids)
         maximum_rms_px = max(
             0.0,
-            float(
-                self.get_parameter("degraded_two_tag_max_full_rms_px").value
-            ),
+            float(self.runtime_parameters["degraded_two_tag_max_full_rms_px"]),
         )
         if any(
             not math.isfinite(rms_px) or rms_px > maximum_rms_px
@@ -737,7 +840,7 @@ class AprilTagLocalizationNode(Node):
                 "AprilTag two-Tag pose withheld: full-corner RMS(px) "
                 f"{rounded} exceeds {maximum_rms_px:.2f}px",
             )
-            return
+            return False
 
         predicted = self.aligned_vio_pose_at(self.message_stamp_ns(observation))
         if predicted is None:
@@ -746,7 +849,7 @@ class AprilTagLocalizationNode(Node):
                 "AprilTag two-Tag pose withheld: no time-aligned map-frame "
                 "VIO prediction; three Tags are required to establish alignment",
             )
-            return
+            return False
         translation_residual_m = float(
             np.linalg.norm(observed[:3, 3] - predicted[:3, 3])
         )
@@ -756,16 +859,12 @@ class AprilTagLocalizationNode(Node):
         maximum_translation_m = max(
             0.0,
             float(
-                self.get_parameter(
-                    "degraded_two_tag_vio_max_translation_m"
-                ).value
+                self.runtime_parameters["degraded_two_tag_vio_max_translation_m"]
             ),
         )
         maximum_angle_deg = max(
             0.0,
-            float(
-                self.get_parameter("degraded_two_tag_vio_max_angle_deg").value
-            ),
+            float(self.runtime_parameters["degraded_two_tag_vio_max_angle_deg"]),
         )
         if (
             translation_residual_m > maximum_translation_m
@@ -777,18 +876,29 @@ class AprilTagLocalizationNode(Node):
                 f"{translation_residual_m:.2f}m/{angle_residual_deg:.1f}deg; "
                 f"limits are {maximum_translation_m:.2f}m/{maximum_angle_deg:.1f}deg",
             )
-            return
+            return False
 
         # Accepted two-Tag validation is intentionally silent. It is a normal
         # high-rate fallback path and must not continuously grow ROS logs.
-        self.publish_pose(observation, observed, degraded=True)
+        self.publish_pose(
+            observation,
+            observed,
+            degraded=True,
+            object_points=object_points,
+            image_points=image_points,
+            seen_ids=seen_ids,
+            inliers=np.arange(len(image_points), dtype=np.intp).reshape(-1, 1),
+            rvec=rvec,
+            tvec=tvec,
+        )
         self.last_error = ""
+        return True
 
     def tag_map_uncertainty_allowance_px(self, image_points, seen_ids: list[int]) -> float:
         """Project the configured tag-centre uncertainty into the current image."""
 
         uncertainty_m = max(
-            0.0, float(self.get_parameter("tag_map_position_uncertainty_m").value)
+            0.0, float(self.runtime_parameters["tag_map_position_uncertainty_m"])
         )
         if uncertainty_m == 0.0 or not seen_ids:
             return 0.0
@@ -824,12 +934,15 @@ class AprilTagLocalizationNode(Node):
             )
             return False
         maximum_gate_elapsed_s = max(
-            0.0, float(self.get_parameter("pose_transition_max_elapsed_s").value)
+            0.0, float(self.runtime_parameters["pose_transition_max_elapsed_s"])
         )
         if maximum_gate_elapsed_s > 0.0:
             elapsed_s = min(elapsed_s, maximum_gate_elapsed_s)
-        allowed_m = max(0.0, float(self.get_parameter("max_translation_jump_m").value)) + (
-            max(0.0, float(self.get_parameter("max_translation_speed_mps").value)) * elapsed_s
+        allowed_m = max(
+            0.0, float(self.runtime_parameters["max_translation_jump_m"])
+        ) + (
+            max(0.0, float(self.runtime_parameters["max_translation_speed_mps"]))
+            * elapsed_s
         )
         displacement_m = float(
             np.linalg.norm(np.asarray(observed[:3, 3]) - np.asarray(self.filtered_map_from_base[:3, 3]))
@@ -849,10 +962,11 @@ class AprilTagLocalizationNode(Node):
         """Accept a stable pose cluster after the normal transition gate rejects it."""
 
         maximum_gap_ns = int(
-            max(0.0, float(self.get_parameter("reacquisition_max_gap_s").value)) * 1e9
+            max(0.0, float(self.runtime_parameters["reacquisition_max_gap_s"]))
+            * 1e9
         )
         maximum_spread_m = max(
-            0.0, float(self.get_parameter("reacquisition_max_spread_m").value)
+            0.0, float(self.runtime_parameters["reacquisition_max_spread_m"])
         )
         candidate = self.reacquisition_candidate
         sample_is_consistent = (
@@ -873,15 +987,13 @@ class AprilTagLocalizationNode(Node):
         self.reacquisition_stamp_ns = stamp_ns
 
         required_samples = max(
-            1, int(self.get_parameter("reacquisition_confirm_frames").value)
+            1, int(self.runtime_parameters["reacquisition_confirm_frames"])
         )
         if self.reacquisition_count < required_samples:
             return False
 
-        self.get_logger().warn(
-            "AprilTag accepted a stable pose after transition-gate rejection; "
-            "resetting the pose filter"
-        )
+        # This recovery is observable through pose/status topics.  Avoid console
+        # I/O on the localization hot path.
         self.reset_pose_filter()
         return True
 
@@ -890,7 +1002,6 @@ class AprilTagLocalizationNode(Node):
 
         self.filtered_map_from_base = None
         self.filtered_pose_stamp_ns = 0
-        self.last_accepted_inlier_tag_ids = ()
         self.clear_reacquisition_candidate()
 
     def clear_reacquisition_candidate(self):
@@ -904,8 +1015,12 @@ class AprilTagLocalizationNode(Node):
         """Apply a timestamp-aware low-pass to direct AprilTag map poses."""
 
         stamp_ns = self.message_stamp_ns(observation)
-        time_constant_s = max(0.0, float(self.get_parameter("pose_filter_time_constant_s").value))
-        reset_after_s = max(0.0, float(self.get_parameter("pose_filter_reset_after_s").value))
+        time_constant_s = max(
+            0.0, float(self.runtime_parameters["pose_filter_time_constant_s"])
+        )
+        reset_after_s = max(
+            0.0, float(self.runtime_parameters["pose_filter_reset_after_s"])
+        )
         elapsed_s = (stamp_ns - self.filtered_pose_stamp_ns) / 1e9
         should_reset = (
             self.filtered_map_from_base is None
@@ -916,7 +1031,7 @@ class AprilTagLocalizationNode(Node):
             filtered = np.asarray(observed, dtype=np.float64).copy()
         else:
             maximum_elapsed_s = max(
-                0.0, float(self.get_parameter("pose_filter_max_elapsed_s").value)
+                0.0, float(self.runtime_parameters["pose_filter_max_elapsed_s"])
             )
             if maximum_elapsed_s > 0.0:
                 elapsed_s = min(elapsed_s, maximum_elapsed_s)
@@ -944,9 +1059,7 @@ class AprilTagLocalizationNode(Node):
             corners, ids, self.tag_layout
         ):
             definition = self.tag_layout[tag_id]
-            object_points.extend(
-                tag_corners_in_map(definition["position_m"], definition["rpy_rad"], definition["size_m"])
-            )
+            object_points.extend(definition["corners_m"])
             image_points.extend(
                 isaac_ros_tag36h11_corners_in_map_axis_order(detected_corners)
             )
@@ -969,11 +1082,17 @@ class AprilTagLocalizationNode(Node):
         map_from_base: np.ndarray,
         *,
         degraded: bool = False,
+        object_points=None,
+        image_points=None,
+        seen_ids: list[int] | None = None,
+        inliers=None,
+        rvec=None,
+        tvec=None,
     ):
         x, y, z, w = quaternion_xyzw(map_from_base[:3, :3])
         pose = PoseWithCovarianceStamped()
         pose.header.stamp = observation.header.stamp
-        pose.header.frame_id = str(self.get_parameter("map_frame").value)
+        pose.header.frame_id = str(self.runtime_parameters["map_frame"])
         pose.pose.pose.position.x = float(map_from_base[0, 3])
         pose.pose.pose.position.y = float(map_from_base[1, 3])
         pose.pose.pose.position.z = float(map_from_base[2, 3])
@@ -981,23 +1100,36 @@ class AprilTagLocalizationNode(Node):
         pose.pose.pose.orientation.y = y
         pose.pose.pose.orientation.z = z
         pose.pose.pose.orientation.w = w
-        # Values are conservative defaults, not a substitute for calibrated
-        # covariance. The degraded topic uses larger uncertainty and is never
-        # consumed by map-to-odom alignment.
-        position_stddev = float(
-            self.get_parameter(
+        # Start from deployment-measured conservative floors, then increase or
+        # decrease uncertainty using the current PnP residual, apparent Tag
+        # size, and number of independently observed Tags. This is deliberately
+        # bounded; a future camera/map calibration can replace it with a full
+        # PnP Jacobian covariance without changing the message contract.
+        base_position_stddev = float(
+            self.runtime_parameters[
                 "degraded_two_tag_position_stddev_m"
                 if degraded
                 else "multi_tag_position_stddev_m"
-            ).value
+            ]
         )
-        angle_stddev_deg = float(
-            self.get_parameter(
+        base_angle_stddev_deg = float(
+            self.runtime_parameters[
                 "degraded_two_tag_angle_stddev_deg"
                 if degraded
                 else "multi_tag_angle_stddev_deg"
-            ).value
+            ]
         )
+        quality_scale = self.pose_uncertainty_scale(
+            object_points=object_points,
+            image_points=image_points,
+            seen_ids=seen_ids or [],
+            inliers=inliers,
+            rvec=rvec,
+            tvec=tvec,
+            degraded=degraded,
+        )
+        position_stddev = base_position_stddev * quality_scale
+        angle_stddev_deg = base_angle_stddev_deg * quality_scale
         position_variance = max(0.001, position_stddev) ** 2
         angle_variance = math.radians(max(0.1, angle_stddev_deg)) ** 2
         for index in (0, 7, 14):
@@ -1013,10 +1145,65 @@ class AprilTagLocalizationNode(Node):
         if self.tf_broadcaster is not None and not degraded:
             transform = TransformStamped()
             transform.header = pose.header
-            transform.child_frame_id = str(self.get_parameter("base_frame").value)
+            transform.child_frame_id = str(self.runtime_parameters["base_frame"])
             transform.transform.translation = pose.pose.pose.position
             transform.transform.rotation = pose.pose.pose.orientation
             self.tf_broadcaster.sendTransform(transform)
+
+    def pose_uncertainty_scale(
+        self,
+        *,
+        object_points,
+        image_points,
+        seen_ids: list[int],
+        inliers,
+        rvec,
+        tvec,
+        degraded: bool,
+    ) -> float:
+        """Return a bounded quality multiplier for the Tag pose covariance."""
+
+        if (
+            object_points is None
+            or image_points is None
+            or inliers is None
+            or rvec is None
+            or tvec is None
+            or not seen_ids
+        ):
+            return 1.0
+        projected, _ = self.cv2.projectPoints(
+            object_points, rvec, tvec, self.camera_matrix, self.distortion
+        )
+        residuals = np.asarray(image_points, dtype=np.float64) - projected.reshape(-1, 2)
+        indices = np.asarray(inliers, dtype=np.intp).reshape(-1)
+        selected = residuals[indices]
+        rms_px = float(math.sqrt(np.mean(np.sum(selected * selected, axis=1))))
+
+        tag_points = np.asarray(image_points, dtype=np.float64).reshape(-1, 4, 2)
+        minimum_edge_px = float(
+            np.min(
+                np.linalg.norm(
+                    tag_points - np.roll(tag_points, -1, axis=1), axis=2
+                )
+            )
+        )
+        rms_reference_px = max(
+            0.5, float(self.runtime_parameters["max_reprojection_rms_px"]) * 0.5
+        )
+        edge_reference_px = max(
+            1.0, float(self.runtime_parameters["min_tag_edge_px"]) * 2.0
+        )
+        required_tags = 2 if degraded else max(
+            3, int(self.runtime_parameters["minimum_pose_tag_count"])
+        )
+        residual_factor = min(2.5, max(0.5, rms_px / rms_reference_px))
+        edge_factor = min(
+            2.0,
+            max(0.5, math.sqrt(edge_reference_px / max(1.0, minimum_edge_px))),
+        )
+        count_factor = math.sqrt(required_tags / max(required_tags, len(seen_ids)))
+        return min(3.0, max(0.5, residual_factor * edge_factor * count_factor))
 
     def warn_once(self, message: str):
         if message != self.last_error:
@@ -1024,13 +1211,11 @@ class AprilTagLocalizationNode(Node):
             self.last_error = message
 
     def warn_throttled(self, key: str, message: str, interval_s: float = 5.0):
-        """Log a changing frame-level rejection at a bounded rate."""
+        """Suppress frame-level rejection logs on the localization hot path."""
 
-        now_s = time.monotonic()
-        if now_s - self.last_warning_at_s.get(key, float("-inf")) < interval_s:
-            return
-        self.last_warning_at_s[key] = now_s
-        self.get_logger().warn(message)
+        # Rejection state remains available on /localization/apriltag/pose_status
+        # and /localization/status without synchronous terminal output.
+        del key, message, interval_s
 
 def main(args=None):
     rclpy.init(args=args)

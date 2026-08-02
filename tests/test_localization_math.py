@@ -236,6 +236,37 @@ def test_small_tag_filter_can_return_an_empty_well_shaped_observation():
     assert rejected == [67]
 
 
+def test_covariance_floor_prevents_zero_variance_velocity_measurements():
+    covariance = MATH.covariance_with_diagonal_floor(
+        [0.0] * 36,
+        [0.0009, 0.0009, 0.0009, 0.0016, 0.0016, 0.0016],
+    )
+    matrix = np.asarray(covariance).reshape(6, 6)
+
+    np.testing.assert_allclose(
+        np.diag(matrix), [0.0009, 0.0009, 0.0009, 0.0016, 0.0016, 0.0016]
+    )
+    np.testing.assert_allclose(matrix - np.diag(np.diag(matrix)), 0.0)
+
+
+def test_covariance_floor_preserves_larger_finite_variances_and_symmetrizes():
+    matrix = np.zeros((6, 6))
+    matrix[0, 0] = 0.25
+    matrix[0, 1] = 0.04
+    matrix[1, 0] = 0.02
+    matrix[2, 2] = float("nan")
+
+    result = np.asarray(
+        MATH.covariance_with_diagonal_floor(matrix.reshape(-1), [0.01] * 6)
+    ).reshape(6, 6)
+
+    assert np.isfinite(result).all()
+    assert result[0, 0] == pytest.approx(0.25)
+    assert result[2, 2] == pytest.approx(0.01)
+    assert result[0, 1] == pytest.approx(0.03)
+    assert result[1, 0] == pytest.approx(0.03)
+
+
 def test_tag0_map_rotation_points_the_print_face_normal_toward_positive_x():
     rotation = MATH.rpy_matrix(*np.deg2rad([90.0, 0.0, 90.0]))
 

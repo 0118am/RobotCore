@@ -1,16 +1,20 @@
 sensor_fusion:
   body_state_topic: /robot/body_state
+  localization_status_topic: /localization/status
+  apriltag_pose_status_topic: /localization/apriltag/pose_status
   depth_input_topic: /hardware/aboard_depth_m
   altitude_input_topic: ""
   localization_pose_topic: /localization/apriltag_pose
   degraded_localization_pose_topic: /localization/apriltag_pose_degraded
   localization_max_age_s: 0.20
+  tag_fused_sync_tolerance_s: 0.05
   fused_odometry_topic: /localization/fused_odom
   zed_odometry_topic: /localization/zed_odom
   zed_odometry_max_age_s: 0.35
   external_imu_topic: /sensors/external_imu
   external_imu_max_age_s: 0.20
   tag_vio_disagreement_m: 0.50
+  tag_vio_disagreement_deg: 10.0
 
 vehicle_frames:
   base_frame: base_link
@@ -34,12 +38,13 @@ apriltag_localization:
   minimum_pose_tag_count: 3
   minimum_inlier_corners_per_tag: 3
   degraded_pose_topic: /localization/apriltag_pose_degraded
-  # Used only to validate degraded two-tag observations against the canonical
-  # fixed-rate estimate. Tag/VIO alignment itself publishes aligned_vio_odom.
-  aligned_vio_odometry_topic: /localization/fused_odom
+  # Used only to validate degraded two-tag observations against the direct
+  # aligned VIO stream; the 60 Hz EKF output would add needless callbacks.
+  aligned_vio_odometry_topic: /localization/aligned_vio_odom
   enable_degraded_two_tag_pose: true
   degraded_two_tag_inlier_corners_per_tag: 4
   degraded_two_tag_max_full_rms_px: 3.0
+  degraded_two_tag_vio_sync_tolerance_s: 0.05
   degraded_two_tag_vio_max_translation_m: 0.20
   degraded_two_tag_vio_max_angle_deg: 10.0
   max_translation_speed_mps: 1.0
@@ -49,6 +54,7 @@ apriltag_localization:
   tag_map_file: /etc/robotcore/apriltag_map.json
   pose_topic: /localization/apriltag_pose
   detected_count_topic: /localization/apriltag/detected_count
+  pose_status_topic: /localization/apriltag/pose_status
 
 body_state:
   topic: /robot/body_state

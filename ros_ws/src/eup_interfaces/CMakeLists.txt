@@ -18,9 +18,11 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   # runtime, policy, control, logging, and UI packages.
   "msg/ArmCommand.msg"
   "msg/ArmState.msg"
+  "msg/AprilTagPoseStatus.msg"
   "msg/BoardStatus.msg"
   "msg/ControlAuthorityStatus.msg"
   "msg/BodyState.msg"
+  "msg/LocalizationStatus.msg"
   "msg/MujocoStatus.msg"
   "msg/PidStatus.msg"
   "msg/PolicyStatus.msg"

@@ -106,4 +106,7 @@
       stream_enabled: false
 
     debug:
+      # AprilTag subscribes to the GPU-backed /nitros image.  The ZED wrapper
+      # retains only an on-demand JPEG transport for the operator switch.
+      disable_nitros: false
       sdk_verbose: 1
