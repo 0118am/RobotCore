@@ -1,9 +1,0 @@
-# Command the MuJoCo backend from CLI, Web UI, or automation.
-# Supported commands: pause, resume, reset, step, viewer_on, viewer_off.
-string command
----
-bool accepted
-string message
-bool paused
-bool viewer_running
-uint64 step_count

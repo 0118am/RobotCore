@@ -7,10 +7,10 @@ import numpy as np
 
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "ros_ws/src/eup_sensors"))
+sys.path.insert(0, str(ROOT / "ros_ws/src/robotcore_sensors"))
 
-from eup_sensors.localization_math import transform_matrix
-from eup_sensors.tag_vio_alignment_math import (  # noqa: E402
+from robotcore_sensors.localization_math import transform_matrix
+from robotcore_sensors.tag_vio_alignment_math import (  # noqa: E402
     AlignmentCandidateWindow,
     aligned_pose_covariance,
     blend_transform,
@@ -33,7 +33,7 @@ def test_tag_observation_establishes_global_vio_alignment():
 
 def test_alignment_waits_for_web_relocalize_after_startup():
     source = (
-        ROOT / "ros_ws/src/eup_sensors/eup_sensors/tag_vio_alignment_node.py"
+        ROOT / "ros_ws/src/robotcore_sensors/robotcore_sensors/tag_vio_alignment_node.py"
     ).read_text(encoding="utf-8")
 
     assert "self.relocalize_requested = False" in source
@@ -44,7 +44,7 @@ def test_alignment_waits_for_web_relocalize_after_startup():
 
 def test_relocalization_replaces_any_old_alignment_without_a_jump_limit():
     source = (
-        ROOT / "ros_ws/src/eup_sensors/eup_sensors/tag_vio_alignment_node.py"
+        ROOT / "ros_ws/src/robotcore_sensors/robotcore_sensors/tag_vio_alignment_node.py"
     ).read_text(encoding="utf-8")
 
     assert "self.relocalization_pending = True" in source

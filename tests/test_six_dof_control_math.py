@@ -4,10 +4,10 @@ import sys
 import numpy as np
 
 
-PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "ros_ws" / "src" / "eup_control"
+PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "ros_ws" / "src" / "robotcore_control"
 sys.path.insert(0, str(PACKAGE_ROOT))
 
-from eup_control.control_math import (  # noqa: E402
+from robotcore_control.control_math import (  # noqa: E402
     ConditionalPid,
     PidGains,
     quaternion_apply,
@@ -62,4 +62,3 @@ def test_pid_reset_clears_derivative_and_integral_state():
     assert pid.integral == 0.0
     assert pid.previous_measurement is None
     assert pid.filtered_derivative == 0.0
-

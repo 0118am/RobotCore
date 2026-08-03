@@ -59,3 +59,34 @@ robotcore-hostctl apriltag-delete --tag-id 12
 Deletion atomically writes the remaining map. An empty, valid map is also
 reloaded, so deleting the final tag removes it from
 localisation rather than retaining a stale layout.
+
+An empty map is a deliberate fail-closed state: the localizer clears the prior
+layout, resets map alignment, continues publishing detection counts/status, and
+publishes no absolute pose. A missing, malformed, wrong-frame, or geometrically
+invalid replacement is rejected and cannot overwrite the last valid in-memory
+revision.
+
+The repository does not provide a fallback map or synthesize coordinates. Each
+non-empty deployed revision must contain `schema_version: 1`, `frame: "map"`, a
+canonical unsigned ID, and an explicit measured `size_m` for every Tag. With
+cuboid validation enabled, every centre and black-square corner must lie on or
+inside the configured pool surfaces; face normals must point into the pool and
+wall-mounted printed tops must point upward.
+
+Before a map revision is approved for automatic control:
+
+1. Survey every black-square centre, printed-axis orientation, and edge length
+   from the same physical datum; record the tool, operator, date, and map hash.
+2. Run the on-robot structural/geometry check:
+
+   ```bash
+   ROBOTCORE_TEST_DEPLOYED_TAG_MAP=/etc/robotcore/apriltag_map.json \
+     /home/nvidia/RobotCore/ros_ws/build/robotcore_sensors/test_apriltag_map \
+     --gtest_filter=AprilTagMap.DeployedSurveyCanBeValidatedExplicitly
+   ```
+
+3. With independent ground truth, meet the localization acceptance limits:
+   position RMSE at most `0.10 m`, attitude RMSE at most `3 deg`, and p95 at
+   most `0.15 m / 5 deg`; verify at least three mapped Tags across every
+   intended operating region. A parser pass alone is not evidence of survey
+   accuracy.

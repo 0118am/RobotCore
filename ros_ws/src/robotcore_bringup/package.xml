@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>robotcore_bringup</name>
+  <version>0.1.0</version>
+  <description>Launch and configuration package for RobotCore.</description>
+  <maintainer email="maintainer@example.com">RobotCore Team</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <exec_depend>robotcore_control</exec_depend>
+  <exec_depend>robotcore_hardware</exec_depend>
+  <exec_depend>robotcore_interfaces</exec_depend>
+  <exec_depend>robotcore_policy</exec_depend>
+  <exec_depend>robotcore_runtime</exec_depend>
+  <exec_depend>robotcore_sensors</exec_depend>
+  <exec_depend>isaac_ros_apriltag</exec_depend>
+  <exec_depend>isaac_ros_image_proc</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>rclcpp_components</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>rmw_cyclonedds_cpp</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

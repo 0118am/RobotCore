@@ -3,14 +3,14 @@
 `host_manager` is the **local management plane** for an edge computer.  It
 does not join the ROS 2 control graph and it is not a browser backend.  Its
 only listener is a root-owned Unix-domain socket.  The browser operator remains
-in [`../../ControlInterface/eup_ui`](../../ControlInterface/eup_ui/README.md), and continues to use ROS 2 topics,
+in [`../../ControlInterface/control_interface`](../../ControlInterface/control_interface/README.md), and continues to use ROS 2 topics,
 services, and actions.
 
 ## Responsibility boundary
 
 | Area | Owner | Entry point |
 | --- | --- | --- |
-| Camera, telemetry, policy status, task controls, emergency abort | `eup_ui` | browser -> HTTP/SSE -> ROS 2 |
+| Camera, telemetry, policy status, task controls, emergency abort | `control_interface` | browser -> HTTP/SSE -> ROS 2 |
 | Thruster command safety, A-board protocol, failsafe | ROS runtime/hardware | ROS 2 -> A-board |
 | Start/stop the ROS graph and web service | host manager | `robotcore-hostctl` Unix socket; ControlInterface exposes only RobotCore Start/Stop |
 | Device identity and Linux permissions | host manager | udev + systemd |

@@ -70,7 +70,7 @@ def test_stack_target_starts_both_services_and_edge_env_is_local_dds():
 
 def test_component_executor_thread_counts_are_bounded():
     launch = (
-        ROOT / "ros_ws/src/eup_bringup/launch/eup_edge_system.launch.py"
+        ROOT / "ros_ws/src/robotcore_bringup/launch/robotcore_edge_system.launch.py"
     ).read_text(encoding="utf-8")
 
     assert 'parameters=[{"thread_num": 2}]' in launch

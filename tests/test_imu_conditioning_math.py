@@ -7,7 +7,7 @@ import numpy as np
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODULE_PATH = ROOT / "ros_ws/src/eup_sensors/eup_sensors/imu_conditioning_math.py"
+MODULE_PATH = ROOT / "ros_ws/src/robotcore_sensors/robotcore_sensors/imu_conditioning_math.py"
 SPEC = importlib.util.spec_from_file_location("imu_conditioning_math", MODULE_PATH)
 MATH = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None

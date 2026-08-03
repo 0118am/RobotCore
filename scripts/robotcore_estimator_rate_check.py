@@ -13,7 +13,7 @@ from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from sensor_msgs.msg import Imu
 
-from eup_interfaces.msg import BodyState
+from robotcore_interfaces.msg import BodyState
 
 
 def stamp_ns(stamp) -> int:

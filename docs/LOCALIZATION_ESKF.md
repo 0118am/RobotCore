@@ -117,11 +117,11 @@ T_{map,odom}=T_{map,base}^{tag}(T_{odom,base}^{eskf})^{-1}.
 | CameraInfo | 启动/低频 | 投影内参 | 无有效内参不发布 Tag 位姿 |
 | Tag map | 启动/重定位 | 每个 Tag 的尺寸、地图位姿 | 文件无效时保持旧地图或拒绝定位 |
 | 静态 TF/安装标定 | 启动 | 传感器到 `base_link` 外参 | 错误外参产生系统偏差，滤波无法自行消除 |
-| 压力深度/高度 | 不使用 | 无 | `depth_m`、`altitude_m` 固定为 NaN |
-
 输出位姿为 map/FLU，线速度和角速度为 base_link/FLU。Tag 新鲜且通过质量门时
 `state_valid=true`；Tag 遮挡但 VIO/ESKF 仍可用时
-`position_estimated=true`。
+`position_estimated=true`。水池底为 `map` 原点时，垂向位置统一使用
+`pose.position.z`（FLU，向上为正），不再维护方向相反且未标定的深度字段，
+也不保留与池底原点重复的高度占位字段。
 
 ## 可观测性
 

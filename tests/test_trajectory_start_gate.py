@@ -2,7 +2,7 @@
 
 from types import SimpleNamespace
 
-from eup_runtime.trajectory_command_node import TrajectoryCommandNode
+from robotcore_runtime.trajectory_command_node import TrajectoryCommandNode
 
 
 def make_trajectory():

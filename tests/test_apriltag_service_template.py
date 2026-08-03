@@ -7,7 +7,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SERVICE = ROOT / "host_manager" / "systemd" / "robotcore.service"
 ARGUS_DROP_IN = ROOT / "host_manager" / "systemd" / "robotcore-argus.conf"
-TAG_VIO_DROP_IN = ROOT / "host_manager" / "systemd" / "robotcore-tag-vio.conf"
 EDGE_ENV = ROOT / "host_manager" / "systemd" / "edge.env.example"
 HOST_MANAGER_CONFIG = ROOT / "host_manager" / "config" / "host-manager.example.json"
 
@@ -17,6 +16,7 @@ def test_robot_service_requires_and_passes_the_managed_apriltag_map():
 
     assert "ExecStartPre=/usr/bin/test -r ${ROBOTCORE_APRILTAG_MAP_FILE}" in service
     assert 'apriltag_tag_map_file:="${ROBOTCORE_APRILTAG_MAP_FILE}"' in service
+    assert not (ROOT / "host_manager/systemd/robotcore-tag-vio.conf").exists()
 
 
 def test_robot_service_exposes_only_the_argus_socket_to_the_zed_runtime():
@@ -38,15 +38,6 @@ def test_argus_drop_in_preserves_tmp_isolation_except_for_the_ipc_socket():
     assert "BindReadOnlyPaths=/tmp/imu_daemon.sock" in drop_in
     assert "SupplementaryGroups=imu" in drop_in
     assert "PrivateTmp=false" not in drop_in
-
-
-def test_tag_vio_drop_in_sources_the_alignment_workspace_before_launching():
-    drop_in = TAG_VIO_DROP_IN.read_text(encoding="utf-8")
-
-    assert "ExecStart=" in drop_in
-    assert "source /home/nvidia/RobotCore/ros_ws/install/setup.bash" in drop_in
-    assert 'serial_port:="${ROBOTCORE_ABOARD_PORT}"' in drop_in
-    assert 'apriltag_tag_map_file:="${ROBOTCORE_APRILTAG_MAP_FILE}"' in drop_in
 
 
 def test_example_edge_environment_uses_the_managed_map_default():

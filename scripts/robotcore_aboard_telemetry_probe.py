@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure A-board receive telemetry without transmitting motor commands."""
+"""Read-only timing/integrity probe for aCube UART protocol v2."""
 
 from __future__ import annotations
 
@@ -13,18 +13,12 @@ import struct
 import termios
 import time
 
-from eup_hardware.packet import (
-    A_BOARD_PWM_FEEDBACK_HEADER,
-    A_BOARD_PWM_FEEDBACK_LEN,
-    A_BOARD_TELEMETRY_HEADER,
-    A_BOARD_IMU_V1_TELEMETRY_LEN,
-    A_BOARD_LEGACY_TELEMETRY_LEN,
-    parse_uart_pwm_feedback_frame,
-    parse_uart_telemetry_frame,
-    telemetry_frame_length,
-)
 
-
+STATUS_HEADER = b"\xff\xfd"
+IMU_HEADER = b"\xff\xf8\x04"
+STATUS_LEN = 48
+IMU_LEN = 27
+PROTOCOL_V2 = 2
 BAUD_CONSTANTS = {
     9600: termios.B9600,
     19200: termios.B19200,
@@ -34,11 +28,20 @@ BAUD_CONSTANTS = {
 }
 
 
+def crc16_ccitt(data: bytes) -> int:
+    crc = 0xFFFF
+    for value in data:
+        crc ^= value << 8
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
+    return crc
+
+
 def configure_read_only_port(fd: int, baud: int):
     if baud not in BAUD_CONSTANTS:
         raise ValueError(f"unsupported baud rate: {baud}")
-    attributes = termios.tcgetattr(fd)
-    configured = list(attributes)
+    original = termios.tcgetattr(fd)
+    configured = list(original)
     configured[0] = 0
     configured[1] = 0
     configured[2] = termios.CLOCAL | termios.CREAD | termios.CS8
@@ -49,7 +52,7 @@ def configure_read_only_port(fd: int, baud: int):
     configured[6][termios.VMIN] = 0
     configured[6][termios.VTIME] = 1
     termios.tcsetattr(fd, termios.TCSANOW, configured)
-    return attributes
+    return original
 
 
 def percentile(values: list[float], fraction: float) -> float:
@@ -62,42 +65,99 @@ def percentile(values: list[float], fraction: float) -> float:
 
 def next_frame(buffer: bytearray):
     starts = []
-    for header in (A_BOARD_PWM_FEEDBACK_HEADER, A_BOARD_TELEMETRY_HEADER):
+    for header, length, kind in (
+        (STATUS_HEADER, STATUS_LEN, "status"),
+        (IMU_HEADER, IMU_LEN, "imu"),
+    ):
         index = buffer.find(header)
         if index >= 0:
-            starts.append((index, header))
+            starts.append((index, length, kind))
     if not starts:
-        if len(buffer) > max(A_BOARD_PWM_FEEDBACK_LEN, A_BOARD_IMU_V1_TELEMETRY_LEN):
-            del buffer[:-1]
+        if len(buffer) > STATUS_LEN:
+            del buffer[:-2]
         return None
-    start, header = min(starts, key=lambda item: item[0])
+    start, length, kind = min(starts)
     if start:
         del buffer[:start]
-    if header == A_BOARD_PWM_FEEDBACK_HEADER:
-        length = A_BOARD_PWM_FEEDBACK_LEN
-    else:
-        if len(buffer) < 3:
-            return None
-        length = telemetry_frame_length(buffer[2])
     if len(buffer) < length:
         return None
-    frame = bytes(buffer[:length])
-    return header, length, frame
+    return kind, bytes(buffer[:length])
+
+
+def require_crc(frame: bytes) -> None:
+    if int.from_bytes(frame[-2:], "little") != crc16_ccitt(frame[:-2]):
+        raise ValueError("CRC16 mismatch")
+
+
+def parse_status(frame: bytes) -> dict[str, object]:
+    if len(frame) != STATUS_LEN or frame[:2] != STATUS_HEADER or frame[2] != PROTOCOL_V2:
+        raise ValueError("invalid status header/version")
+    if frame[3] & ~0x07:
+        raise ValueError("invalid status flags")
+    require_crc(frame)
+    tick, boot_id, session, received, applied = struct.unpack_from("<IIIII", frame, 4)
+    age = struct.unpack_from("<H", frame, 24)[0]
+    rx_crc_errors = struct.unpack_from("<H", frame, 28)[0]
+    return {
+        "flags": frame[3],
+        "tick_ms": tick,
+        "boot_id": boot_id,
+        "session_id": session,
+        "received_sequence": received,
+        "applied_sequence": applied,
+        "command_age_ms": age,
+        "safety_reason": frame[26],
+        "reset_cause": frame[27],
+        "rx_crc_errors": rx_crc_errors,
+        "pwm_us": list(struct.unpack_from("<8H", frame, 30)),
+    }
+
+
+def parse_imu(frame: bytes) -> dict[str, object]:
+    if len(frame) != IMU_LEN or frame[:3] != IMU_HEADER or frame[3] != 1:
+        raise ValueError("invalid IMU header/version")
+    require_crc(frame)
+    sample_id, tick_ms = struct.unpack_from("<II", frame, 5)
+    values = struct.unpack_from("<6h", frame, 13)
+    return {
+        "valid": bool(frame[4] & 0x01),
+        "sample_id": sample_id,
+        "tick_ms": tick_ms,
+        "gyro_cdeg_s": list(values[:3]),
+        "accel_mg": list(values[3:]),
+    }
+
+
+def print_intervals(name: str, times: list[float]) -> None:
+    if len(times) < 2:
+        return
+    intervals_ms = [
+        (current - previous) * 1000.0
+        for previous, current in zip(times, times[1:])
+    ]
+    span_s = times[-1] - times[0]
+    print(f"{name}_span_rate_hz={(len(times) - 1) / span_s:.3f}")
+    print(
+        f"{name}_arrival_interval_ms "
+        f"mean={statistics.fmean(intervals_ms):.3f} "
+        f"median={statistics.median(intervals_ms):.3f} "
+        f"p95={percentile(intervals_ms, 0.95):.3f} "
+        f"p99={percentile(intervals_ms, 0.99):.3f} "
+        f"max={max(intervals_ms):.3f}"
+    )
 
 
 def measure(port: str, baud: int, duration_s: float) -> int:
     fd = os.open(port, os.O_RDONLY | os.O_NOCTTY | os.O_NONBLOCK)
-    original_attributes = None
-    counters: Counter[str] = Counter()
-    uart8_times: list[float] = []
-    uart8_valid_times: list[float] = []
+    original = None
+    counts: Counter[str] = Counter()
+    arrivals = {"status": [], "imu": []}
+    first = {}
     buffer = bytearray()
-    first_bad_frames: dict[int, str] = {}
-    first_uart8_sample: dict[str, object] | None = None
     started = time.monotonic()
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        original_attributes = configure_read_only_port(fd, baud)
+        original = configure_read_only_port(fd, baud)
         deadline = started + max(0.1, duration_s)
         while time.monotonic() < deadline:
             try:
@@ -108,78 +168,45 @@ def measure(port: str, baud: int, duration_s: float) -> int:
             if not chunk:
                 time.sleep(0.0005)
                 continue
-            counters["bytes"] += len(chunk)
+            counts["bytes"] += len(chunk)
             buffer.extend(chunk)
-            while True:
-                parsed_frame = next_frame(buffer)
-                if parsed_frame is None:
-                    break
-                header, frame_length, frame = parsed_frame
-                received_at = time.monotonic()
+            while (candidate := next_frame(buffer)) is not None:
+                kind, frame = candidate
                 try:
-                    if header == A_BOARD_PWM_FEEDBACK_HEADER:
-                        parse_uart_pwm_feedback_frame(frame)
-                        counters["pwm_feedback"] += 1
-                        del buffer[:frame_length]
-                        continue
-                    telemetry = parse_uart_telemetry_frame(frame)
+                    parsed = parse_status(frame) if kind == "status" else parse_imu(frame)
                 except ValueError:
-                    counters["bad_frame"] += 1
-                    frame_number = int(frame[2]) if len(frame) >= 3 else -1
-                    counters[f"bad_telemetry_{frame_number}"] += 1
-                    first_bad_frames.setdefault(frame_number, frame.hex(" "))
+                    counts[f"bad_{kind}"] += 1
                     del buffer[:1]
                     continue
-                del buffer[:frame_length]
-                frame_number = int(frame[2])
-                counters[f"telemetry_{frame_number}"] += 1
-                if frame_number == 4:
-                    if first_uart8_sample is None:
-                        first_uart8_sample = telemetry
-                    uart8_times.append(received_at)
-                    if telemetry and telemetry.get("uart8_imu_valid"):
-                        counters["uart8_valid"] += 1
-                        uart8_valid_times.append(received_at)
-                    else:
-                        counters["uart8_invalid"] += 1
+                del buffer[: len(frame)]
+                counts[kind] += 1
+                arrivals[kind].append(time.monotonic())
+                first.setdefault(kind, parsed)
+                if kind == "imu" and not parsed["valid"]:
+                    counts["imu_invalid"] += 1
     finally:
-        if original_attributes is not None:
-            termios.tcsetattr(fd, termios.TCSANOW, original_attributes)
+        if original is not None:
+            termios.tcsetattr(fd, termios.TCSANOW, original)
         os.close(fd)
 
     elapsed = max(1e-9, time.monotonic() - started)
     print(f"port={port} baud={baud} elapsed_s={elapsed:.3f}")
-    for name in sorted(counters):
-        count = counters[name]
-        suffix = "" if name == "bytes" else f" rate_hz={count / elapsed:.3f}"
-        print(f"{name}={count}{suffix}")
-    for frame_number, frame_hex in sorted(first_bad_frames.items()):
-        print(f"first_bad_telemetry_{frame_number}_hex={frame_hex}")
-    if first_uart8_sample is not None:
-        print(f"first_uart8_sample={first_uart8_sample}")
-    if len(uart8_times) >= 2:
-        intervals_ms = [
-            (current - previous) * 1000.0
-            for previous, current in zip(uart8_times, uart8_times[1:])
-        ]
-        source_span_s = uart8_times[-1] - uart8_times[0]
-        print(f"uart8_span_rate_hz={(len(uart8_times) - 1) / source_span_s:.3f}")
-        print(
-            "uart8_arrival_interval_ms "
-            f"mean={statistics.fmean(intervals_ms):.3f} "
-            f"median={statistics.median(intervals_ms):.3f} "
-            f"p95={percentile(intervals_ms, 0.95):.3f} "
-            f"p99={percentile(intervals_ms, 0.99):.3f} "
-            f"max={max(intervals_ms):.3f}"
-        )
-        zero_like = sum(interval <= 0.1 for interval in intervals_ms)
-        print(f"uart8_batched_interval_le_0_1ms={zero_like}")
-    if uart8_times and not uart8_valid_times:
+    for name in sorted(counts):
+        suffix = "" if name == "bytes" else f" rate_hz={counts[name] / elapsed:.3f}"
+        print(f"{name}={counts[name]}{suffix}")
+    for kind in ("status", "imu"):
+        if kind in first:
+            print(f"first_{kind}={first[kind]}")
+        print_intervals(kind, arrivals[kind])
+    if not arrivals["status"]:
+        print("warning=no protocol-v2 board status observed")
+        return 4
+    if not arrivals["imu"]:
+        print("warning=no versioned UART8 IMU frame observed")
+        return 3
+    if counts["imu_invalid"] == counts["imu"]:
         print("warning=no valid UART8 IMU samples observed")
         return 2
-    if not uart8_times:
-        print("warning=no versioned UART8 telemetry frame 4 observed")
-        return 3
     return 0
 
 
@@ -191,8 +218,8 @@ def main() -> int:
     )
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--duration", type=float, default=10.0)
-    arguments = parser.parse_args()
-    return measure(arguments.port, arguments.baud, arguments.duration)
+    args = parser.parse_args()
+    return measure(args.port, args.baud, args.duration)
 
 
 if __name__ == "__main__":

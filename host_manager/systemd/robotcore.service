@@ -29,11 +29,11 @@ ExecStartPre=/usr/bin/test -r ${ROBOTCORE_APRILTAG_MAP_FILE}
 ExecStartPre=/usr/bin/test -r /etc/robotcore/cyclonedds.xml
 ExecStartPre=/usr/bin/test -r /opt/ros/humble/lib/librmw_cyclonedds_cpp.so
 ExecStartPre=/usr/bin/test -r ${ROBOTCORE_WORKSPACE}/install/setup.bash
-ExecStartPre=/usr/bin/test -x ${ROBOTCORE_WORKSPACE}/install/eup_sensors/lib/eup_sensors/fixed_lag_eskf_node
+ExecStartPre=/usr/bin/test -x ${ROBOTCORE_WORKSPACE}/install/robotcore_sensors/lib/robotcore_sensors/fixed_lag_eskf_node
 ExecStartPre=/usr/bin/test -r ${ZED_WORKSPACE}/install/setup.bash
 # ROS/colcon setup scripts are not nounset-safe. Enable -u only after every
 # overlay has been sourced so the launched graph still gets strict handling.
-ExecStart=/usr/bin/bash -c 'set -eo pipefail; source /opt/ros/humble/setup.bash; source "${ROBOTCORE_WORKSPACE}/install/setup.bash"; set -u; exec ros2 launch eup_bringup eup_edge_system.launch.py enable_web_ui:=false serial_port:="${ROBOTCORE_ABOARD_PORT}" apriltag_tag_map_file:="${ROBOTCORE_APRILTAG_MAP_FILE}" zed_workspace:="${ZED_WORKSPACE}"'
+ExecStart=/usr/bin/bash -c 'set -eo pipefail; source /opt/ros/humble/setup.bash; source "${ROBOTCORE_WORKSPACE}/install/setup.bash"; set -u; exec ros2 launch robotcore_bringup robotcore_edge_system.launch.py enable_web_ui:=false serial_port:="${ROBOTCORE_ABOARD_PORT}" apriltag_tag_map_file:="${ROBOTCORE_APRILTAG_MAP_FILE}" zed_workspace:="${ZED_WORKSPACE}"'
 Restart=always
 RestartSec=1
 TimeoutStopSec=20

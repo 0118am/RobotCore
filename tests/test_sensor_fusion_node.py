@@ -5,10 +5,10 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from eup_interfaces.msg import AprilTagPoseStatus, LocalizationStatus
-from eup_sensors.apriltag_localization_node import AprilTagLocalizationNode
-from eup_sensors.localization_math import transform_matrix
-from eup_sensors.sensor_fusion_node import SensorFusionNode
+from robotcore_interfaces.msg import AprilTagPoseStatus, LocalizationStatus
+from robotcore_sensors.apriltag_localization_node import AprilTagLocalizationNode
+from robotcore_sensors.localization_math import transform_matrix
+from robotcore_sensors.sensor_fusion_node import SensorFusionNode
 
 
 def test_message_freshness_requires_both_recent_source_and_arrival_time():

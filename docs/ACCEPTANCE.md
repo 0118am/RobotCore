@@ -4,10 +4,8 @@ This file defines the first-stage system-chain acceptance target.
 
 ## Launch
 
-- [ ] `ros2 launch eup_bringup eup_edge_system.launch.py` starts the Jetson/A-board
+- [ ] `ros2 launch robotcore_bringup robotcore_edge_system.launch.py` starts the Jetson/A-board
       edge graph and the ZED visual-inertial odometry stack.
-- [ ] `ros2 launch eup_bringup eup_mujoco_system.launch.py` starts the MuJoCo
-      backend path.
 
 ## Sensor and Robot State
 
@@ -94,7 +92,8 @@ This file defines the first-stage system-chain acceptance target.
 - [ ] The run folder contains `policy_io/`.
 - [ ] The run folder contains `configs/`.
 
-## Backend Migration
+## Hardware Boundary
 
-- [ ] MuJoCo and edge hardware share the same ROS 2 interface contracts.
-- [ ] Jetson/Aboard details are isolated in `eup_hardware` and `eup_firmware`.
+- [ ] Jetson/aCube details are isolated in `robotcore_hardware` and the aCube firmware.
+- [ ] A bridge or board reset cannot resume PWM until an explicit disarm and a
+      later arm generation establish a new session.

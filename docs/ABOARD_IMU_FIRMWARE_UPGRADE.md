@@ -2,7 +2,7 @@
 
 This document records the firmware/host protocol used by RobotCore's 60 Hz
 state estimator. The STM32 source is the separate repository
-`/home/nvidia/aCube_1`; it must be flashed atomically with the matching C++
+`/home/nvidia/aquaboard`; it must be flashed atomically with the matching C++
 host bridge.
 
 ## Superseded baseline
@@ -65,16 +65,16 @@ maximum rate is product-dependent.
 - Atomically copy gyro, acceleration, source counter, and receive tick.
 - Enqueue frame 4 only when that counter changes. Do not publish the latest
   sample from an unrelated periodic telemetry loop.
-- Keep frame 0/1/2 and PWM feedback at their existing operational rates unless
-  bandwidth measurement requires a deliberate change.
+- Production UART6 emits only frame 4 at up to 100 Hz and protocol-v2 status at
+  20 Hz; legacy rotating frame 0/1/2 and `FF FB` feedback are removed.
 - Measure UART8 checksum errors, duplicate counters, skipped counters, and
   sample age; expose them in diagnostics before closed-loop trials.
 
 At 100 Hz, the connected sensor's 48-byte receive packet uses about 48 kbit/s
 on UART8. A
-27-byte frame 4 at 100 Hz uses about 27 kbit/s on UART6. Both fit
-115200 baud with margin, including existing traffic, but the complete UART6
-schedule still needs a measured utilization and jitter check.
+27-byte frame 4 at 100 Hz uses about 27 kbit/s on UART6. Together with the
+48-byte status at 20 Hz, UART6 TX uses 31.8% of an 8N1 115200-baud line; a
+coincident 75-byte burst serializes in 6.51 ms.
 
 ## Hardware acceptance
 
@@ -89,19 +89,22 @@ With thrusters disarmed and the vehicle stationary:
 6. Record gyro bias/noise, mounting RPY, and end-to-end arrival latency.
 7. Run the RobotCore 60 Hz estimator check for at least 60 seconds.
 
-## 2026-08-02 implementation status
+## Historical 2026-08-02 baseline (superseded)
 
-The source now configures UART8 for 115200 baud and requests 100 Hz float
-output, forwards each newly parsed sample as frame 4, extends the sensor's BCD
-counter, includes the MCU acquisition tick, and protects the payload with
-CRC16-CCITT. Release firmware SHA256
+The firmware built on that date configured UART8 for 115200 baud and requested
+100 Hz float output, forwarded each newly parsed sample as frame 4, extended
+the sensor's BCD counter, included the MCU acquisition tick, and protected the
+payload with CRC16-CCITT. Its Release image SHA256
 `57b7df80d412125b87ca93b9d343c05494c57f3c523ecf3044d2d98a0ebf6871`
 was flashed and independently read back byte-for-byte on 2026-08-02. A
 debugger-side run observed two samples spanning multiple source-counter wraps:
 frame count `1726 -> 2737` and extended sample ID `1776 -> 2787`, both `+1011`,
-with zero UART8 checksum errors and zero stack overflows.
+with zero UART8 checksum errors and zero stack overflows. That hash predates
+the protocol-v2 session/ACK, synchronized PWM latch, and task cleanup and must
+not be treated as the current production image.
 
-The matching host bridge now resets its counter/clock mapping when the STM32
-tick rolls backwards. The installed RobotCore service must be restarted to
-load that rebuilt bridge before completing estimator calibration, timing,
-noise, and physical-axis acceptance in `docs/LOCALIZATION_CPP_ACCEPTANCE.md`.
+The current aCube and RobotCore sources must be built, flashed, and deployed as
+one atomic protocol-v2 cutover. No claim is made here that the current image
+has been flashed. After deployment, complete estimator calibration, timing,
+noise, physical-axis, brownout, and full-thrust acceptance before arming in
+water.

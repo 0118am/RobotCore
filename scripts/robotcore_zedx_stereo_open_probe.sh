@@ -5,7 +5,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 zed_ros_ws="${ZED_ROS_WS:-/home/nvidia/ros2_ws}"
-override_path="${ROBOTCORE_ZEDX_OPEN_OVERRIDE:-${repo_root}/ros_ws/src/eup_sensors/config/zedx_minimal_open.yaml}"
+override_path="${ROBOTCORE_ZEDX_OPEN_OVERRIDE:-${repo_root}/ros_ws/src/robotcore_sensors/config/zedx_minimal_open.yaml}"
 timeout_s="${ROBOTCORE_ZEDX_OPEN_TIMEOUT:-25s}"
 serial_number="${ROBOTCORE_ZEDX_SERIAL_NUMBER:-50649148}"
 camera_id="${ROBOTCORE_ZEDX_CAMERA_ID:--1}"

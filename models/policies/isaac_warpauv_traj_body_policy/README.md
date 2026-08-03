@@ -1,4 +1,4 @@
-# Isaac WarpAUV Trajectory Body Policy
+# Isaac WarpAUV Trajectory Body Policy (offline only)
 
 This policy was exported from IsaacLab RSL-RL:
 
@@ -8,14 +8,15 @@ This policy was exported from IsaacLab RSL-RL:
 
 The source task is `Isaac-WarpAUV-Traj-Direct-v1`.
 
-Important contract:
+This artifact is deliberately quarantined from RobotCore deployment: it emits
+six actions for a deleted simulator model, while the physical vehicle contract
+is eight thrusters. Its manifest is named `offline_policy.yaml`, so normal
+policy selection cannot load it as a deployable package.
+
+Historical contract:
 
 - Observation: 20-D IsaacLab trajectory observation.
-- Action: 6-D normalized WarpAUV thruster/PWM command.
-- EUP now includes `eup_mujoco_env/models/warpauv_6thruster.xml` for this
-  6-output policy. The older BlueROV2-style 8-thruster skeleton can still run
-  the ROS graph, but it is not the recommended dynamics match.
+- Action: six WarpAUV actuators; no mapping to the physical eight-thruster
+  vehicle has been validated.
 
-Trajectory target fields are provided by `/runtime/trajectory_target`, published
-by `trajectory_command_node`. Manifest defaults remain only as an ONNX smoke-test
-fallback.
+The ONNX/PT files remain only for reproducibility and offline inspection.

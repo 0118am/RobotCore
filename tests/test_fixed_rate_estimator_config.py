@@ -6,7 +6,7 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SENSORS = ROOT / "ros_ws/src/eup_sensors"
+SENSORS = ROOT / "ros_ws/src/robotcore_sensors"
 
 
 def load_yaml(relative: str):
@@ -24,7 +24,7 @@ def test_zed_camera_uses_one_fixed_30_hz_frame_rate():
 
 
 def test_fixed_lag_eskf_is_native_cpp_and_has_the_planned_state_and_updates():
-    header = (SENSORS / "include/eup_sensors/fixed_lag_eskf.hpp").read_text()
+    header = (SENSORS / "include/robotcore_sensors/fixed_lag_eskf.hpp").read_text()
     source = (SENSORS / "src/fixed_lag_eskf.cpp").read_text()
     cmake = (SENSORS / "CMakeLists.txt").read_text()
 
@@ -53,6 +53,7 @@ def test_external_imu_requires_stationary_bias_calibration():
     assert parameters["calibration_file"] == "/etc/robotcore/external_imu_calibration.yaml"
     assert "auto_start" not in parameters
     assert len(parameters["base_to_imu_rpy_rad"]) == 3
+    assert parameters["base_frame_id"] == "base_link"
 
     conditioner = (SENSORS / "src/imu_conditioner_component.cpp").read_text()
     assert "waiting for operator calibration" in conditioner
@@ -60,18 +61,21 @@ def test_external_imu_requires_stationary_bias_calibration():
     assert "startup_accel_baseline_ - expected" in conditioner
     assert "accel - startup_accel_baseline" in conditioner
     assert "fusion_output_pub_->publish(fusion_output)" in conditioner
+    assert "output.header.frame_id = base_frame_id_" in conditioner
+    assert "rotate_imu_vector_to_base(corrected_gyro, base_from_imu_)" in conditioner
+    assert "persistent_calibration_valid_, startup_accel_residual_.norm()" in conditioner
     assert "have_vio_orientation" not in conditioner
     assert "publish_ready();" in conditioner
 
 
 def test_edge_launch_wires_one_canonical_fixed_rate_output():
     launch = (
-        ROOT / "ros_ws/src/eup_bringup/launch/eup_edge_system.launch.py"
+        ROOT / "ros_ws/src/robotcore_bringup/launch/robotcore_edge_system.launch.py"
     ).read_text(encoding="utf-8")
 
-    assert 'plugin="eup_sensors::ImuConditionerComponent"' in launch
-    assert 'plugin="eup_sensors::ZedOdometryAdapterComponent"' in launch
-    assert 'plugin="eup_sensors::FixedLagEskfComponent"' in launch
+    assert 'plugin="robotcore_sensors::ImuConditionerComponent"' in launch
+    assert 'plugin="robotcore_sensors::ZedOdometryAdapterComponent"' in launch
+    assert 'plugin="robotcore_sensors::FixedLagEskfComponent"' in launch
     assert '"vio_topic": "/localization/zed_odom"' in launch
     assert '"imu_topic": LaunchConfiguration("external_imu_fusion_topic")' in launch
     assert '"output_rate_hz": 60.0' in launch
@@ -92,18 +96,21 @@ def test_body_state_marks_velocity_stale_when_zed_vio_stops():
     assert "const bool imu_stale" in fusion
     assert "measurement_stamp > filter_.state().stamp_ns" in fusion
     assert "std::deque<VioMeasurement> vio_measurements_" in fusion
-    assert "replay_from(*index)" in fusion
+    assert "const bool accepted = replay_from(*index, measurement_stamp)" in fusion
+    assert "record_accepted_vio(accepted, measurement_stamp, arrival_ns)" in fusion
+    assert "measurement_stamp <= vio_freshness_.stamp_ns" in fusion
+    assert "odom.header.stamp = rclcpp::Time(state.stamp_ns, RCL_ROS_TIME)" in fusion
 
 
 def test_localization_status_exposes_rate_age_innovation_and_covariance():
     interface = (
-        ROOT / "ros_ws/src/eup_interfaces/msg/LocalizationStatus.msg"
+        ROOT / "ros_ws/src/robotcore_interfaces/msg/LocalizationStatus.msg"
     ).read_text(encoding="utf-8")
     cmake = (
-        ROOT / "ros_ws/src/eup_interfaces/CMakeLists.txt"
+        ROOT / "ros_ws/src/robotcore_interfaces/CMakeLists.txt"
     ).read_text(encoding="utf-8")
     logger = (
-        ROOT / "ros_ws/src/eup_runtime/eup_runtime/run_logger.py"
+        ROOT / "ros_ws/src/robotcore_runtime/robotcore_runtime/run_logger.py"
     ).read_text(encoding="utf-8")
 
     assert '"msg/LocalizationStatus.msg"' in cmake

@@ -7,10 +7,10 @@ import pytest
 
 
 CORE_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(CORE_ROOT / "ros_ws/src/eup_runtime"))
+sys.path.insert(0, str(CORE_ROOT / "ros_ws/src/robotcore_runtime"))
 rclpy = pytest.importorskip("rclpy")
 
-from eup_runtime.zed_camera_launcher import zed_launch_command
+from robotcore_runtime.zed_camera_launcher import zed_launch_command
 
 
 def test_zed_command_sources_only_the_configured_zed_workspace():

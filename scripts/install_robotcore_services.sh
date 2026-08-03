@@ -76,7 +76,7 @@ test -r "${robot_workspace}/install/setup.bash" || {
   echo "RobotCore workspace is not built: ${robot_workspace}" >&2
   exit 1
 }
-test -x "${robot_workspace}/install/eup_sensors/lib/eup_sensors/fixed_lag_eskf_node" || {
+test -x "${robot_workspace}/install/robotcore_sensors/lib/robotcore_sensors/fixed_lag_eskf_node" || {
   echo "C++ fixed_lag_eskf_node is missing from ${robot_workspace}" >&2
   exit 1
 }
@@ -172,6 +172,7 @@ systemd-analyze verify \
   "${unit_root}/control-interface.service" \
   "${unit_root}/robotcore-stack.target"
 systemctl daemon-reload
+
 systemctl disable robotcore.service control-interface.service >/dev/null 2>&1 || true
 systemctl enable robotcore-stack.target
 

@@ -9,9 +9,9 @@ checkout.
 
 Edit the installed-source equivalents of:
 
-- `ros_ws/src/eup_control/config/real_pool_thrusters.yaml`
-- `ros_ws/src/eup_control/config/real_pool_pid.yaml`
-- `ros_ws/src/eup_control/config/real_pool_safety.yaml`
+- `ros_ws/src/robotcore_control/config/real_pool_thrusters.yaml`
+- `ros_ws/src/robotcore_control/config/real_pool_pid.yaml`
+- `ros_ws/src/robotcore_control/config/real_pool_safety.yaml`
 
 For every thruster record the physical channel, `base_link` position, positive
 force direction, wiring/ESC sign, and a monotonic command-to-thrust curve.
@@ -45,11 +45,11 @@ explicitly arm again.
 
 ```bash
 ros2 service call /control/authority/set \
-  eup_interfaces/srv/SetControlAuthority \
+  robotcore_interfaces/srv/SetControlAuthority \
   "{source: pid, arm: false, clear_fault: true}"
 
 ros2 service call /control/authority/set \
-  eup_interfaces/srv/SetControlAuthority \
+  robotcore_interfaces/srv/SetControlAuthority \
   "{source: pid, arm: true, clear_fault: false}"
 ```
 
@@ -59,7 +59,7 @@ The edge launch starts the complete path:
 cd /home/nvidia/RobotCore/ros_ws
 source /opt/ros/humble/setup.bash
 source install/setup.bash
-ros2 launch eup_bringup eup_edge_system.launch.py enable_web_ui:=false
+ros2 launch robotcore_bringup robotcore_edge_system.launch.py enable_web_ui:=false
 ```
 
 The browser exposes the same source selection, preflight details, Arm, Disarm,
@@ -73,7 +73,7 @@ allow-listed scenario:
 
 ```bash
 ros2 action send_goal /runtime/run_tracking_experiment \
-  eup_interfaces/action/RunTrackingExperiment \
+  robotcore_interfaces/action/RunTrackingExperiment \
   "{scenario: pose_lissajous_6dof, controller: pid, duration_s: 70.0}" \
   --feedback
 ```
@@ -81,7 +81,7 @@ ros2 action send_goal /runtime/run_tracking_experiment \
 The action resets the scenario clock, runs the configured hold/tracking phases,
 and always disarms when it completes, is canceled, or detects an authority
 fault. Scenario definitions live in
-`ros_ws/src/eup_runtime/config/tracking_scenarios.yaml`.
+`ros_ws/src/robotcore_runtime/config/tracking_scenarios.yaml`.
 
 Analyze one or more completed run directories with:
 
@@ -102,6 +102,6 @@ are at least 99%, and no abort or authority fault occurred.
 `/control/candidates/rl` is reserved for a future eight-output policy adapter.
 The adapter requires exactly eight finite outputs, a measured thruster
 configuration, and a non-empty `policy_layout_hash` equal to that
-configuration's hash. The edge authority rejects RL by default. The existing
-six-thruster WarpAUV policy remains a MuJoCo-only artifact and must not be
-enabled by changing the edge safety defaults.
+configuration's hash. The edge authority rejects RL by default. The retained
+six-thruster WarpAUV weights are offline provenance only: they have no
+deployable `policy.yaml` and must not be mapped or padded onto this vehicle.

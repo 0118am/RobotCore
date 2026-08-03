@@ -16,8 +16,29 @@ RoboMaster Aboard candidate:
 
 - Validates command packets.
 - Maps normalized commands to PWM.
-- Handles heartbeat, estop, failsafe, and board status.
+- Handles heartbeat, failsafe, and board status.
 - Returns telemetry to Jetson.
+
+## Propulsion ownership boundary
+
+There is one production propulsion path:
+
+```text
+ControlInterface manual candidate
+  -> /control/candidates/manual
+  -> command_authority
+  -> /control/thruster_cmd
+  -> aboard_bridge (normalized limit and UART-v2 framing)
+  -> aCube synchronized PWM latch (logical 0..7 -> physical PWM 8..15)
+```
+
+The browser does not open an A-board device, construct UART frames, choose a
+physical PWM channel offset, or map normalized commands to microseconds. The
+historically named `manual_thruster_span_us` launch argument is retained only
+as the A-board bridge's final `span_us` limit; it applies to every authority
+source and must not be passed to the web node. `BoardStatus.pwm_us` is the
+MCU-latched command echo at the timer update boundary, not ESC speed, current,
+or thrust feedback.
 
 ## A-board UART8 inertial telemetry
 
@@ -60,7 +81,7 @@ eight payload values equal to zero. No process held the serial endpoint and the
 RobotCore service was inactive. Therefore the current firmware/IMU path does
 not yet supply usable external IMU samples.
 
-A separate, clean STM32 project at `/home/nvidia/aCube_1` identifies UART8 as a
+A separate, clean STM32 project at `/home/nvidia/aquaboard` identifies UART8 as a
 Bewei IMU link. Its current source:
 
 - initializes UART8 as 9600 8N1;
@@ -97,10 +118,9 @@ the deployment must still:
 The normal edge command needs no IMU argument:
 
 ```bash
-ros2 launch eup_bringup eup_edge_system.launch.py \
+ros2 launch robotcore_bringup robotcore_edge_system.launch.py \
   serial_port:=/dev/ttyACM0 \
-  manual_thruster_span_us:=100 \
-  manual_thruster_channel_offset:=8
+  manual_thruster_span_us:=100
 ```
 
 Validate all estimator inputs after launch:

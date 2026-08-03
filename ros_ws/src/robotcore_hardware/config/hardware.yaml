@@ -1,0 +1,20 @@
+edge:
+  compute: Jetson Orin NX
+  low_level_board: RoboMaster Aboard TBD
+
+aboard:
+  transport: uart6
+  serial_port: /dev/serial/by-id/usb-1a86_USB_Single_Serial_5B7A033320-if00
+  baud: 115200
+  protocol_version: 2
+  command_frame_type: 0xFC
+  status_frame_type: 0xFD
+  logical_thruster_channels: 8
+  physical_pwm_first_index: 8
+  pwm_neutral_us: 1500
+  pwm_span_us: 100
+  fixed_command_rate_hz: 50
+  status_rate_hz: 20
+  external_imu_rate_hz: 100
+  host_producer_timeout_ms: 150
+  mcu_command_timeout_ms: 250

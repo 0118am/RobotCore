@@ -98,6 +98,6 @@ the previous application release without modifying the web UI contract.
 ## Rollback
 
 Disable the stack target and its services, restore the previous RobotCore/Web release directory, and run
-the prior `ros2 launch eup_bringup eup_edge_system.launch.py` command.  Do not
+the prior `ros2 launch robotcore_bringup robotcore_edge_system.launch.py` command.  Do not
 remove logs, run directories, or the device rule during an incident; preserve
 them for diagnosis.

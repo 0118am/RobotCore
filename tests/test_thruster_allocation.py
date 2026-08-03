@@ -4,17 +4,17 @@ import sys
 import numpy as np
 
 
-PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "ros_ws" / "src" / "eup_control"
+PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "ros_ws" / "src" / "robotcore_control"
 sys.path.insert(0, str(PACKAGE_ROOT))
 
-from eup_control.thruster_allocation import ThrusterAllocator  # noqa: E402
+from robotcore_control.thruster_allocation import ThrusterAllocator  # noqa: E402
 
 
 CONFIG = (
     Path(__file__).resolve().parents[1]
     / "ros_ws"
     / "src"
-    / "eup_control"
+    / "robotcore_control"
     / "config"
     / "real_pool_thrusters.yaml"
 )
@@ -50,4 +50,3 @@ def test_forward_and_reverse_curve_inversion_is_asymmetric():
     thruster = allocator.thrusters[0]
     assert np.isclose(thruster.force_to_command(25.0), 0.5)
     assert np.isclose(thruster.force_to_command(-20.0), -0.5)
-

@@ -1,20 +1,17 @@
-# EUPSystemInfraPack Project Guide
+# RobotCore Project Guide
 
 ## 1. Definition
 
-EUPSystemInfraPack is the system infrastructure layer for underwater robot
-simulation validation and edge deployment.
+RobotCore is the system infrastructure layer for underwater robot
+edge deployment.
 
-The first stage validates the full control chain in MuJoCo. The code structure
-keeps the future migration path to Jetson Orin NX plus RoboMaster Aboard clear.
-
-The project uses ROS 2 as the main integration spine. MuJoCo, edge hardware,
-policy, control, safety, logging, and UI components are decoupled through stable
+The project uses ROS 2 as the main integration spine. Edge hardware, policy,
+control, safety, logging, and UI components are decoupled through stable
 ROS 2 topics, services, actions, tf, rosbag2, and ros2_control boundaries.
 
 ## 2. Architecture Principles
 
-ROS 2 is the backbone. MuJoCo is the first hardware backend. The operator UI is
+ROS 2 is the backbone. The operator UI is
 an independent project in `../ControlInterface`; its `web_operator_node.py` remains a
 ROS state bridge but has no ownership of hardware, host services, or map files.
 
@@ -22,16 +19,13 @@ ROS state bridge but has no ownership of hardware, host services, or map files.
 UI
   -> ROS 2 interface
      -> Runtime / Policy / Control / Safety / Logging
-        -> MuJoCo backend
         -> Edge backend
 ```
 
 Design rules:
 
-- `eup_interfaces` owns message, service, and action contracts.
-- Runtime packages depend on interfaces, not directly on MuJoCo or Aboard.
-- MuJoCo publishes simulated sensor and robot state, then consumes control
-  commands.
+- `robotcore_interfaces` owns message, service, and action contracts.
+- Runtime packages depend on interfaces, not directly on Aboard.
 - Edge hardware publishes real sensor and board state, then consumes the same
   control commands.
 - The UI calls services/actions and subscribes to status topics. It does not
@@ -41,23 +35,21 @@ Design rules:
 
 | Package | Responsibility |
 | --- | --- |
-| `eup_interfaces` | ROS 2 msg/srv/action contracts |
-| `eup_bringup` | launch files and system configuration |
-| `eup_runtime` | task manager, blackboard, safety events, run logging orchestration |
-| `eup_policy` | policy registry, model runners, observation builder, action decoder |
-| `eup_control` | thruster allocation, PWM mapping, arm command routing, safety filtering |
-| `eup_sensors` | AprilTag/ZED/external-IMU localisation, sensor conditioning, and fixed transforms |
-| `eup_hardware` | ros2_control hardware interface, serial/CAN/Aboard packet boundary |
-| `eup_mujoco_env` | MuJoCo model assets, sensor publisher, actuator subscriber |
-| `eup_ui` | browser project in `../ControlInterface`; its ROS-to-web bridge consumes installed interfaces |
+| `robotcore_interfaces` | ROS 2 msg/srv/action contracts |
+| `robotcore_bringup` | launch files and system configuration |
+| `robotcore_runtime` | task manager, blackboard, safety events, run logging orchestration |
+| `robotcore_policy` | policy registry, model runners, observation builder, action decoder |
+| `robotcore_control` | thruster allocation, PWM mapping, arm command routing, safety filtering |
+| `robotcore_sensors` | AprilTag/ZED/external-IMU localisation, sensor conditioning, and fixed transforms |
+| `robotcore_hardware` | ros2_control hardware interface, serial/CAN/Aboard packet boundary |
+| `control_interface` | browser project in `../ControlInterface`; its ROS-to-web bridge consumes installed interfaces |
 | `robotcore_host_manager` | local-only systemd/device/config/log/maintenance management; not a ROS package |
-| `eup_firmware` | STM32 packet, PWM, heartbeat, failsafe, board status skeleton |
+| `../aquaboard` | Sole STM32 PWM 8–15, UART-v2, watchdog, failsafe, and board-status implementation |
 
 ## 4. Topic and Service Contract
 
 Core topics:
 
-- `/clock`: simulation time from MuJoCo backend.
 - `/zedx/zed_node/imu/data`: ZED camera IMU for the operator HUD. ZED fuses
   it internally for VIO; it is not a separate localisation input.
 - `/zedx/zed_node/rgb/color/rect/image`: rectified ZED RGB stream consumed only
@@ -95,12 +87,12 @@ Core topics:
   innovation, rejection reasons, and fused covariance. The run logger persists
   this status at 1 Hz.
 - `/robot/arm_state`: arm joint state and validity.
-- `/robot/thruster_state`: 8-thruster normalized and PWM feedback.
 - `/control/thruster_cmd`: 8 normalized thruster commands.
 - `/control/arm_cmd`: arm joint or end-effector command.
 - `/policy/body/status`, `/policy/arm/status`: readiness and missing inputs.
 - `/safety/events`: aborts, failsafe transitions, limits, and warnings.
-- `/hardware/board_status`: Aboard or mock board heartbeat.
+- `/hardware/board_status`: Aboard link safety state and MCU-latched PWM
+  command echoes; it is not motor/ESC feedback.
 
 Browser-facing camera endpoints:
 
@@ -117,23 +109,20 @@ Core action:
 
 - `/runtime/run_task`: long-running task execution entry point.
 
-## 5. Backend Boundary
-
-MuJoCo backend:
-
-- Loads MJCF assets.
-- Publishes `/clock`, sensor state, body state, arm state, and thruster state.
-- Subscribes to `/control/thruster_cmd` and `/control/arm_cmd`.
-- May later be replaced by or integrated with `mujoco_ros2_control`.
-
-Edge backend:
+## 5. Hardware Boundary
 
 - Jetson runs ROS 2, policy inference, planning, vision, sensor bridge, and
   logging.
 - Aboard receives 8 normalized thruster commands, validates packets, maps to
-  PWM, handles heartbeat/failsafe/estop, returns board status, and forwards the
+  PWM, handles heartbeat/failsafe state, returns board status, and forwards the
   IMU connected to its UART8 as telemetry on the shared UART6 transport.
-- Aboard details remain Phase 0 confirmation items.
+- aCube accepts only the CRC/session/sequence UART v2 command path and maps its
+  eight logical channels to physical PWM indexes 8 through 15.
+- The browser publishes only `/control/candidates/manual`. It has no serial
+  device parameter, UART encoder, PWM span, or physical-channel mapping; the
+  central authority and the sole A-board bridge remain mandatory boundaries.
+- `BoardStatus.pwm_us` is an MCU timer-latch acknowledgement. It must not be
+  presented as measured ESC, motor-speed, or thrust feedback.
 
 ## 6. Policy Runtime Contract
 
@@ -176,10 +165,9 @@ artifacts, and config snapshots.
 
 ## 8. Development Order
 
-1. Phase 0: confirm versions, models, and hardware unknowns.
-2. Phase 1: build the ROS 2 mock graph.
-3. Phase 2: attach MuJoCo backend.
-4. Phase 3: run BodyPolicy and ArmPolicy through the common runtime.
-5. Phase 4: run the independent operator UI.
-6. Phase 5: implement Aboard packet, PWM, mock serial, and firmware skeleton.
-7. Phase 6: validate end-to-end MuJoCo to UI demo.
+1. Confirm hardware mapping, sensor frames, and operating limits.
+2. Validate the fail-closed ROS 2 command-authority graph.
+3. Validate UART protocol, PWM mapping, watchdog, and reset behavior on aCube.
+4. Validate localization and sensor timing on the Jetson.
+5. Run BodyPolicy/ArmPolicy only after their required inputs pass freshness gates.
+6. Run the independent operator UI and record an acceptance rosbag.

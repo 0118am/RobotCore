@@ -2,7 +2,7 @@
 
 ## Trust zones
 
-1. **Browser zone (`eup_ui`)**: untrusted network clients.  It may observe ROS
+1. **Browser zone (`control_interface`)**: untrusted network clients.  It may observe ROS
    state and call the existing, safety-reviewed ROS interfaces.  It has no
    Unix-socket access and no credentials for Linux service management.
 2. **Robot service zone (`robotcore.service`)**: the `robotcore` account owns the
@@ -19,8 +19,11 @@
 
 - Bind the web UI to `127.0.0.1` by default.  If remote access is needed, use
   an authenticated TLS reverse proxy or VPN; do not expose port 8080 directly.
-- Set `manual_thruster_serial_port` to an empty value in the web service.  Only
-  the A-board bridge may write the serial device in normal operation.
+- The browser service must have no serial-device parameter, UART framing code,
+  or normalized-command-to-PWM mapping. It publishes a ROS manual candidate
+  only. The production A-board bridge is the sole Jetson serial writer, and the
+  browser unit must remain outside the `dialout` group. An empty serial setting
+  is not an acceptable substitute for deleting the capability.
 - `/etc/robotcore/host-manager.json` must be `root:root`, mode `0640`; only root may
   change service names, device paths, and maintenance flags.
 - `/etc/robotcore/apriltag_map.json` is `root:robotops`, mode `0640`; approved
