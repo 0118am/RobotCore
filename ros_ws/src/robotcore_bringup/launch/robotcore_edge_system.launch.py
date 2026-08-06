@@ -4,7 +4,11 @@ import os
 from pathlib import Path
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, SetEnvironmentVariable
+from launch.actions import (
+    DeclareLaunchArgument,
+    ExecuteProcess,
+    SetEnvironmentVariable,
+)
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import ComposableNodeContainer, Node
@@ -31,10 +35,6 @@ def generate_launch_description():
             DeclareLaunchArgument("zed_imu_topic", default_value="/zedx/zed_node/imu/data"),
             DeclareLaunchArgument("imu_raw_topic", default_value="/hardware/aboard_imu_raw"),
             DeclareLaunchArgument("external_imu_topic", default_value="/sensors/external_imu"),
-            DeclareLaunchArgument(
-                "external_imu_fusion_topic",
-                default_value="/sensors/external_imu_specific_force",
-            ),
             DeclareLaunchArgument("front_camera_raw_topic", default_value="/zedx/zed_node/rgb/color/rect/image"),
             DeclareLaunchArgument(
                 "front_camera_compressed_topic",
@@ -44,9 +44,19 @@ def generate_launch_description():
                 "front_camera_info_topic", default_value="/zedx/zed_node/rgb/color/rect/camera_info"
             ),
             DeclareLaunchArgument("enable_apriltag_localization", default_value="true"),
+            # The real-pool PID configs are intentionally fail-closed until
+            # measured. Do not burn timer/DDS CPU on the automatic tracking
+            # graph during the normal manual/sensor edge workflow.
+            DeclareLaunchArgument("enable_pool_tracking", default_value="false"),
             DeclareLaunchArgument(
                 "apriltag_detections_topic",
                 default_value="/localization/apriltag/detections",
+            ),
+            DeclareLaunchArgument(
+                "apriltag_cuda_input_topic",
+                # This is a one-way GPU/NITROS intermediate: the converter
+                # publishes RGB8 and the CUDA detector consumes it.
+                default_value="/localization/apriltag/cuda_input_rgb",
             ),
             # AprilTag calibrates map->odom. ZED VIO already fuses the camera
             # IMU and continuously propagates odom->base_link between tags.
@@ -87,9 +97,10 @@ def generate_launch_description():
             # Production systemd units set this false and run control_interface as the
             # separate, least-privileged control-interface.service.
             DeclareLaunchArgument("enable_web_ui", default_value="true"),
-            # Constrain every source (web, policy, and gamepad) to
-            # 1400–1600 us around a 1500 us neutral command.
-            DeclareLaunchArgument("manual_thruster_span_us", default_value="100"),
+            # The authority command is normalized against the ESC's complete
+            # 1000–2000 us range around the 1500 us neutral command. Browser
+            # manual control applies its own operator-selected 0–500 us limit.
+            DeclareLaunchArgument("manual_thruster_span_us", default_value="500"),
             DeclareLaunchArgument("thruster_command_timeout_ms", default_value="150"),
             DeclareLaunchArgument(
                 "pool_control_config",
@@ -128,27 +139,6 @@ def generate_launch_description():
                     "--frame-id", "base_link", "--child-frame-id", "zedx_camera_link",
                 ],
             ),
-            Node(
-                package="tf2_ros",
-                executable="static_transform_publisher",
-                name="base_to_aboard_imu",
-                output="screen",
-                arguments=[
-                    "--x", "0.018", "--z", "0.076",
-                    "--frame-id", "base_link", "--child-frame-id", "aboard_imu_link",
-                ],
-            ),
-            Node(
-                package="tf2_ros",
-                executable="static_transform_publisher",
-                name="base_to_front_camera_optical",
-                output="screen",
-                arguments=[
-                    "--x", "0.236", "--y", "0.027", "--z", "0.016",
-                    "--roll", "-1.5707963267948966", "--yaw", "-1.5707963267948966",
-                    "--frame-id", "base_link", "--child-frame-id", "front_camera_optical_frame",
-                ],
-            ),
             ExecuteProcess(
                 cmd=[
                     "/usr/bin/bash",
@@ -170,6 +160,9 @@ def generate_launch_description():
             # pose and TF outputs are not authoritative because the managed
             # map contains both 0.4 m and 0.2 m Tags. The downstream map node
             # consumes ID/corners and performs one joint, per-Tag-size PnP.
+            # Negotiated subscriptions advertise transient-local capabilities,
+            # so discovery remains correct regardless of whether the ZED
+            # managed publisher or this container appears first.
             ComposableNodeContainer(
                 package="rclcpp_components",
                 executable="component_container_mt",
@@ -186,7 +179,7 @@ def generate_launch_description():
                     ComposableNode(
                         package="isaac_ros_image_proc",
                         plugin="nvidia::isaac_ros::image_proc::ImageFormatConverterNode",
-                        name="apriltag_bgr_to_rgb",
+                        name="apriltag_cuda_rgb_converter",
                         parameters=[{
                             "encoding_desired": "rgb8",
                             # Explicitly pin both ends. Without the input
@@ -200,7 +193,7 @@ def generate_launch_description():
                         }],
                         remappings=[
                             ("image_raw", LaunchConfiguration("front_camera_raw_topic")),
-                            ("image", "/localization/apriltag/image_rgb"),
+                            ("image", LaunchConfiguration("apriltag_cuda_input_topic")),
                         ],
                     ),
                     ComposableNode(
@@ -224,7 +217,7 @@ def generate_launch_description():
                         remappings=[
                             # The CUDA converter resolves ZED BGR8 to the RGB8
                             # format required by AprilTag entirely in NITROS.
-                            ("image", "/localization/apriltag/image_rgb"),
+                            ("image", LaunchConfiguration("apriltag_cuda_input_topic")),
                             ("camera_info", LaunchConfiguration("front_camera_info_topic")),
                             (
                                 "tag_detections",
@@ -244,7 +237,6 @@ def generate_launch_description():
                             "detections_topic": LaunchConfiguration("apriltag_detections_topic"),
                             "tag_map_file": LaunchConfiguration("apriltag_tag_map_file"),
                             "detected_count_topic": LaunchConfiguration("apriltag_detected_count_topic"),
-                            "pose_status_topic": "/localization/apriltag/pose_status",
                             "base_frame": "base_link",
                             "map_frame": "map",
                             "enforce_cuboid_pool_geometry": True,
@@ -255,9 +247,7 @@ def generate_launch_description():
                             "minimum_pose_tag_count": 3,
                             "minimum_inlier_corners_per_tag": 3,
                             "max_reprojection_rms_px": 3.0,
-                            "max_translation_jump_m": 0.05,
                             "multi_tag_position_stddev_m": 0.05,
-                            "base_to_camera_translation_m": [0.236, 0.027, 0.016],
                         }],
                         extra_arguments=[{"use_intra_process_comms": True}],
                     ),
@@ -279,9 +269,6 @@ def generate_launch_description():
                         parameters=[LaunchConfiguration("external_imu_config"), {
                             "input_topic": LaunchConfiguration("imu_raw_topic"),
                             "output_topic": LaunchConfiguration("external_imu_topic"),
-                            "fusion_output_topic": LaunchConfiguration(
-                                "external_imu_fusion_topic"
-                            ),
                             "calibration_sample_count": 250,
                             "calibration_timeout_s": 10.0,
                         }],
@@ -303,14 +290,11 @@ def generate_launch_description():
                         plugin="robotcore_sensors::FixedLagEskfComponent",
                         name="fixed_lag_eskf",
                         parameters=[{
-                            "imu_topic": LaunchConfiguration("external_imu_fusion_topic"),
+                            "imu_topic": LaunchConfiguration("external_imu_topic"),
                             "vio_topic": "/localization/zed_odom",
                             "tag_topic": "/localization/apriltag_pose",
                             "output_rate_hz": 60.0,
                             "history_duration_s": 3.0,
-                            "alignment_correction_alpha": 0.25,
-                            "alignment_max_correction_m": 0.75,
-                            "alignment_max_correction_angle_deg": 20.0,
                         }],
                         extra_arguments=[{"use_intra_process_comms": True}],
                     ),
@@ -321,6 +305,7 @@ def generate_launch_description():
                 executable="trajectory_command_node",
                 name="trajectory_command",
                 output="screen",
+                condition=IfCondition(LaunchConfiguration("enable_pool_tracking")),
                 parameters=[LaunchConfiguration("pool_control_config")],
             ),
             Node(
@@ -328,6 +313,7 @@ def generate_launch_description():
                 executable="tracking_monitor_node",
                 name="tracking_monitor",
                 output="screen",
+                condition=IfCondition(LaunchConfiguration("enable_pool_tracking")),
                 parameters=[{"publish_rate_hz": 20.0}],
             ),
             Node(
@@ -335,6 +321,7 @@ def generate_launch_description():
                 executable="pid_controller",
                 name="pid_controller",
                 output="screen",
+                condition=IfCondition(LaunchConfiguration("enable_pool_tracking")),
                 parameters=[
                     {
                         "pid_config_path": LaunchConfiguration("pid_config_path"),
@@ -346,7 +333,7 @@ def generate_launch_description():
                 ],
             ),
             Node(
-                package="robotcore_control",
+                package="robotcore_control_cpp",
                 executable="command_authority",
                 name="command_authority",
                 output="screen",
@@ -357,6 +344,7 @@ def generate_launch_description():
                 executable="tracking_experiment_node",
                 name="tracking_experiment",
                 output="screen",
+                condition=IfCondition(LaunchConfiguration("enable_pool_tracking")),
                 parameters=[
                     {
                         "scenario_config_path": LaunchConfiguration(

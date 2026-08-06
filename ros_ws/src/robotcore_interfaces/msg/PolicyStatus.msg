@@ -1,6 +1,6 @@
-# Runtime status for BodyPolicy and ArmPolicy nodes.
+# Runtime status for the body policy node.
 std_msgs/Header header
-# Expected values: "body" or "arm".
+# Expected value: "body".
 string policy_role
 string policy_name
 # Runner type from policy.yaml, such as dummy, onnx, pth, or mmn.

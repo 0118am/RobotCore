@@ -1,17 +1,19 @@
 imu_conditioning:
   ros__parameters:
     input_topic: /hardware/aboard_imu_raw
-    # Startup-flat zero-referenced acceleration for UI, logging, and inspection.
+    # Single corrected ROS-standard stream shared by the ESKF and web UI.
+    # Specific force retains gravity; vectors/covariances are in base_link.
     output_topic: /sensors/external_imu
-    # ROS-standard specific force (gravity preserved) exclusively for the ESKF.
-    fusion_output_topic: /sensors/external_imu_specific_force
     status_topic: /localization/external_imu_ready
-    # Calibration starts only from the ControlInterface Status action.
-    # Six-face calibration is persistent; the operator-triggered calibration
-    # estimates zero-rate gyro bias and a flat, stationary acceleration baseline.
+    # The persistent six-face file is reloaded once on every service start.
+    # Startup never redefines zero. The ControlInterface action can explicitly
+    # refresh stationary gyro bias and acceleration residual whenever needed.
     calibration_file: /etc/robotcore/external_imu_calibration.yaml
     calibration_sample_count: 250
     calibration_timeout_s: 10.0
+    # Reject the operator action instead of reporting "started" when the raw
+    # A-board IMU stream is absent or stale.
+    input_freshness_timeout_s: 0.5
     stationary_gyro_limit_rps: 0.04
     stationary_acceleration_tolerance_mps2: 1.0
     gyro_noise_floor_rps: 0.01

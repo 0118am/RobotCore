@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>robotcore_control_cpp</name>
+  <version>0.1.0</version>
+  <description>Low-overhead RobotCore control-path nodes.</description>
+  <maintainer email="maintainer@example.com">RobotCore Team</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>rclcpp</depend>
+  <depend>robotcore_interfaces</depend>
+
+  <export><build_type>ament_cmake</build_type></export>
+</package>

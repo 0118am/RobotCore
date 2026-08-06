@@ -62,7 +62,7 @@ def generate_launch_description():
                 ],
             ),
             Node(
-                package="robotcore_control",
+                package="robotcore_control_cpp",
                 executable="command_authority",
                 name="command_authority",
                 output="screen",

@@ -39,7 +39,7 @@ Design rules:
 | `robotcore_bringup` | launch files and system configuration |
 | `robotcore_runtime` | task manager, blackboard, safety events, run logging orchestration |
 | `robotcore_policy` | policy registry, model runners, observation builder, action decoder |
-| `robotcore_control` | thruster allocation, PWM mapping, arm command routing, safety filtering |
+| `robotcore_control` | thruster allocation, PWM mapping, vehicle control, safety filtering |
 | `robotcore_sensors` | AprilTag/ZED/external-IMU localisation, sensor conditioning, and fixed transforms |
 | `robotcore_hardware` | ros2_control hardware interface, serial/CAN/Aboard packet boundary |
 | `control_interface` | browser project in `../ControlInterface`; its ROS-to-web bridge consumes installed interfaces |
@@ -61,35 +61,32 @@ Core topics:
   used because `/etc/robotcore/apriltag_map.json` contains mixed Tag sizes.
 - `/zedx/zed_node/rgb/color/rect/image/compressed`: native compressed operator
   video; localisation does not copy or encode display frames.
-- `/localization/apriltag_pose`: absolute mapped AprilTag pose measurement.
-  The map localizer jointly solves all visible mapped corners using each
-  Tag's `size_m` and surveyed pose from `/etc/robotcore/apriltag_map.json`.
+- `/localization/apriltag_pose`: the single `AprilTagPoseEstimate` input to the
+  ESKF. The map localizer jointly solves all visible mapped corners using the
+  calibrated CameraInfo plus each Tag's `size_m` and surveyed pose from
+  `/etc/robotcore/apriltag_map.json`. Pose, covariance, quality/rejection fields,
+  and `map_generation` travel together; map reload does not create a separate
+  relocalization topic.
 - `/localization/zed_odom`: ZED VIO local `odom -> base_link` pose and
   base-frame twist, adapted from the camera-local odometry message.
 - `/hardware/aboard_imu_raw`: valid external UART8 gyro and acceleration
   samples forwarded by the A-board. No sample is published for an invalid
   frame-3 payload.
-- `/sensors/external_imu`: stationary-bias-corrected gyro plus acceleration
-  referenced to the level, stationary startup pose. It is the UI/logging topic,
-  so stationary acceleration is approximately `0, 0, 0` after calibration.
-- `/sensors/external_imu_specific_force`: calibrated ESKF input retaining the
-  ROS specific-force convention (`+g` on Z at rest for a level FLU mounting).
-- `/localization/aligned_vio_odom`: event-driven map-frame pose from AprilTag
-  map-to-odom alignment plus ZED VIO, retaining the ZED base-frame twist.
-- `/localization/fused_odom`: canonical 30 Hz map-frame estimate. It uses the
-  aligned AprilTag/ZED pose and linear velocity plus calibrated UART8 angular
-  velocity.
-- `/robot/body_state`: 30 Hz fused base pose, body-frame velocity, and
+- `/sensors/external_imu`: the single calibrated external-IMU stream shared by
+  the ESKF and browser. It uses `base_link` and retains the ROS specific-force
+  convention (`+g` on Z at rest for a level FLU mounting).
+- `/localization/fused_odom`: canonical 60 Hz position/velocity estimate and
+  the only downstream odometry publisher. The ESKF fuses Tag pose, ZED VIO
+  pose/velocity and calibrated UART8 IMU on one fixed-lag timeline.
+- `/robot/body_state`: 60 Hz view of the same fused base pose, body-frame velocity, and
   validity. Velocity is estimated by ZED VIO and the EKF, not by finite
   differencing AprilTag poses.
 - `/localization/status`: quantitative source ages, measured rates, transport
   delays, detected/mapped/inlier Tag counts, reprojection RMS, Tag/VIO
   innovation, rejection reasons, and fused covariance. The run logger persists
   this status at 1 Hz.
-- `/robot/arm_state`: arm joint state and validity.
 - `/control/thruster_cmd`: 8 normalized thruster commands.
-- `/control/arm_cmd`: arm joint or end-effector command.
-- `/policy/body/status`, `/policy/arm/status`: readiness and missing inputs.
+- `/policy/body/status`: readiness and missing inputs.
 - `/safety/events`: aborts, failsafe transitions, limits, and warnings.
 - `/hardware/board_status`: Aboard link safety state and MCU-latched PWM
   command echoes; it is not motor/ESC feedback.
@@ -103,7 +100,6 @@ Core services:
 
 - `/safety/abort`: trigger an abort and force zero thruster output.
 - `/policy/body/set_policy`: switch the active body policy.
-- `/policy/arm/set_policy`: switch the active arm policy.
 
 Core action:
 
@@ -163,11 +159,16 @@ The run folder must include enough information to replay the experiment:
 rosbag2 data, safety/runtime events, policy I/O records, captured UI/sensor
 artifacts, and config snapshots.
 
+`event_log.jsonl` is a bounded operator-readable summary. High-rate repeated
+streams are sampled and written through a buffered best-effort subscriber so
+logging cannot backpressure control. Lossless full-rate capture, when required,
+belongs in `rosbag2/`; an empty directory is not acceptance evidence.
+
 ## 8. Development Order
 
 1. Confirm hardware mapping, sensor frames, and operating limits.
 2. Validate the fail-closed ROS 2 command-authority graph.
 3. Validate UART protocol, PWM mapping, watchdog, and reset behavior on aCube.
 4. Validate localization and sensor timing on the Jetson.
-5. Run BodyPolicy/ArmPolicy only after their required inputs pass freshness gates.
+5. Run BodyPolicy only after its required inputs pass freshness gates.
 6. Run the independent operator UI and record an acceptance rosbag.

@@ -12,7 +12,7 @@ aboard:
   logical_thruster_channels: 8
   physical_pwm_first_index: 8
   pwm_neutral_us: 1500
-  pwm_span_us: 100
+  pwm_span_us: 500
   fixed_command_rate_hz: 50
   status_rate_hz: 20
   external_imu_rate_hz: 100

@@ -26,6 +26,9 @@ constexpr std::size_t kThrusterChannels = 8;
 constexpr std::size_t kCommandV2FrameSize = 34;
 constexpr std::size_t kStatusV2FrameSize = 48;
 constexpr std::size_t kImuV1FrameSize = 27;
+constexpr std::uint8_t kImuFrameNumber = 0x04U;
+constexpr std::uint8_t kRuntimeFrameNumber = 0x05U;
+constexpr std::size_t kRuntimeV1FrameSize = 37;
 
 struct CommandFrame
 {
@@ -62,6 +65,22 @@ struct ImuFrame
   std::array<double, 3> accel_m_s2{};
 };
 
+struct RuntimeFrame
+{
+  std::uint32_t board_tick_ms{};
+  std::uint16_t cpu_idle_permille{};
+  std::uint16_t control_wcet_us{};
+  std::uint16_t uart_wcet_us{};
+  std::uint32_t control_deadline_misses{};
+  std::uint32_t uart_deadline_misses{};
+  std::uint16_t control_min_stack_words{};
+  std::uint16_t uart_min_stack_words{};
+  std::uint16_t stack_overflow_count{};
+  std::uint16_t watchdog_missed_windows{};
+  std::uint16_t uart_rx_dma_errors{};
+  std::uint16_t uart_tx_drops{};
+};
+
 std::uint16_t crc16_ccitt(const std::uint8_t * data, std::size_t size);
 std::array<std::uint8_t, kCommandV2FrameSize> build_command_v2(
   std::uint32_t boot_id, std::uint32_t session_id, std::uint32_t sequence, bool enable,
@@ -73,21 +92,28 @@ bool board_status_matches_applied_command(
   const BoardStatusFrame & status, const CommandFrame & command);
 bool board_status_reason_flags_consistent(const BoardStatusFrame & status);
 std::optional<ImuFrame> parse_imu_v1(const std::uint8_t * data, std::size_t size);
+std::optional<RuntimeFrame> parse_runtime_v1(const std::uint8_t * data, std::size_t size);
 
 class McuClockMapper
 {
 public:
-  std::optional<std::int64_t> map(std::uint32_t tick_ms, std::int64_t arrival_ros_ns);
+  std::optional<std::int64_t> map(
+    std::uint32_t tick_ms, std::int64_t arrival_ros_ns,
+    std::int64_t arrival_steady_ns);
+  bool take_ros_clock_discontinuity();
   void reset();
 
 private:
   bool initialized_{false};
+  bool ros_clock_discontinuity_{false};
   std::uint32_t last_raw_tick_{};
   std::uint64_t wrap_epoch_{};
   std::uint64_t reference_tick_{};
-  std::int64_t reference_arrival_ns_{};
+  std::int64_t reference_arrival_steady_ns_{};
+  std::int64_t last_arrival_ros_ns_{};
+  std::int64_t last_arrival_steady_ns_{};
   double ns_per_tick_{1000000.0};
-  double minimum_intercept_ns_{};
+  double minimum_steady_intercept_ns_{};
   std::int64_t last_stamp_ns_{};
 };
 }  // namespace robotcore_hardware

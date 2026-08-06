@@ -1,8 +1,8 @@
 [Unit]
 Description=RobotCore ROS 2 robot graph
-After=network-online.target dev-robotcore-aboard.device nvargus-daemon.service robotcore-performance.service
+After=network-online.target dev-robotcore-aboard.device nvargus-daemon.service robotcore-camera-ipc-ready.service robotcore-performance.service
 Wants=network-online.target nvargus-daemon.service robotcore-performance.service
-Requires=dev-robotcore-aboard.device
+Requires=dev-robotcore-aboard.device robotcore-camera-ipc-ready.service
 PartOf=robotcore-stack.target
 StartLimitIntervalSec=60
 StartLimitBurst=10
@@ -30,6 +30,7 @@ ExecStartPre=/usr/bin/test -r /etc/robotcore/cyclonedds.xml
 ExecStartPre=/usr/bin/test -r /opt/ros/humble/lib/librmw_cyclonedds_cpp.so
 ExecStartPre=/usr/bin/test -r ${ROBOTCORE_WORKSPACE}/install/setup.bash
 ExecStartPre=/usr/bin/test -x ${ROBOTCORE_WORKSPACE}/install/robotcore_sensors/lib/robotcore_sensors/fixed_lag_eskf_node
+ExecStartPre=/usr/bin/test -x ${ROBOTCORE_WORKSPACE}/install/robotcore_control_cpp/lib/robotcore_control_cpp/command_authority
 ExecStartPre=/usr/bin/test -r ${ZED_WORKSPACE}/install/setup.bash
 # ROS/colcon setup scripts are not nounset-safe. Enable -u only after every
 # overlay has been sourced so the launched graph still gets strict handling.

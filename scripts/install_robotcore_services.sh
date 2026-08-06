@@ -9,6 +9,7 @@ fi
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 unit_root=/etc/systemd/system
 config_root=/etc/robotcore
+libexec_root=/usr/local/libexec
 edge_env=${config_root}/edge.env
 
 robot_workspace=${repo_root}/ros_ws
@@ -80,6 +81,10 @@ test -x "${robot_workspace}/install/robotcore_sensors/lib/robotcore_sensors/fixe
   echo "C++ fixed_lag_eskf_node is missing from ${robot_workspace}" >&2
   exit 1
 }
+test -x "${robot_workspace}/install/robotcore_control_cpp/lib/robotcore_control_cpp/command_authority" || {
+  echo "C++ command_authority is missing from ${robot_workspace}" >&2
+  exit 1
+}
 test -r "${web_workspace}/install/setup.bash" || {
   echo "ControlInterface workspace is not built: ${web_workspace}" >&2
   exit 1
@@ -120,9 +125,13 @@ apt-get install -y ros-humble-rmw-cyclonedds-cpp
 
 install -d -m 0750 "${config_root}"
 install -d -m 0755 "${unit_root}/robotcore.service.d"
+install -d -m 0755 "${libexec_root}"
+install -m 0755 "${repo_root}/host_manager/bin/robotcore-camera-ipc-ready" \
+  "${libexec_root}/robotcore-camera-ipc-ready"
 install -m 0644 "${repo_root}/host_manager/systemd/robotcore.service" "${unit_root}/robotcore.service"
 install -m 0644 "${repo_root}/host_manager/systemd/control-interface.service" "${unit_root}/control-interface.service"
 install -m 0644 "${repo_root}/host_manager/systemd/robotcore-host-manager.service" "${unit_root}/robotcore-host-manager.service"
+install -m 0644 "${repo_root}/host_manager/systemd/robotcore-camera-ipc-ready.service" "${unit_root}/robotcore-camera-ipc-ready.service"
 install -m 0644 "${repo_root}/host_manager/systemd/robotcore-performance.service" "${unit_root}/robotcore-performance.service"
 install -m 0644 "${repo_root}/host_manager/systemd/robotcore-stack.target" "${unit_root}/robotcore-stack.target"
 install -m 0644 "${repo_root}/host_manager/systemd/robotcore-argus.conf" \
@@ -167,6 +176,7 @@ install -d -o robotcore -g robotcore -m 0750 /var/lib/robotcore/runs
 sysctl -p /etc/sysctl.d/99-robotcore-dds.conf
 systemd-analyze verify \
   "${unit_root}/robotcore-performance.service" \
+  "${unit_root}/robotcore-camera-ipc-ready.service" \
   "${unit_root}/robotcore-host-manager.service" \
   "${unit_root}/robotcore.service" \
   "${unit_root}/control-interface.service" \

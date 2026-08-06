@@ -18,6 +18,7 @@ def test_robot_core_owns_all_robot_and_host_components():
         "ros_ws/src/robotcore_hardware/package.xml",
         "host_manager/robotcore_host_manager/daemon.py",
         "host_manager/systemd/robotcore.service",
+        "host_manager/systemd/robotcore-camera-ipc-ready.service",
         "host_manager/systemd/control-interface.service",
         "scripts/robotcore_topic_check.sh",
     ]:
@@ -48,7 +49,7 @@ def test_apriltag_map_has_one_json_authority():
     assert "YAML" not in parser
 
 
-def test_apriltag_pose_separates_trusted_alignment_from_two_tag_validation():
+def test_apriltag_localizer_publishes_one_quality_gated_absolute_measurement():
     localization = (CORE_ROOT / "ros_ws/src/robotcore_sensors/src/apriltag_map_localizer_component.cpp").read_text()
     fusion = (CORE_ROOT / "ros_ws/src/robotcore_sensors/src/fixed_lag_eskf_component.cpp").read_text()
     edge_launch = (
@@ -57,16 +58,18 @@ def test_apriltag_pose_separates_trusted_alignment_from_two_tag_validation():
 
     assert '"minimum_pose_tag_count", 3' in localization
     assert '"minimum_inlier_corners_per_tag", 3' in localization
-    assert '"/localization/apriltag_pose_degraded"' in localization
-    assert '"/localization/apriltag_pose_degraded"' not in fusion
-    assert "const bool degraded = seen_ids.size() == 2U" in localization
-    assert "degraded_consistent" in localization
     assert '"minimum_pose_tag_count": 3' in edge_launch
-    assert "(degraded ? degraded_pub_ : pose_pub_)->publish(pose)" in localization
+    assert "estimate_pub_->publish(estimate)" in localization
+    assert "solvePnPRansac" in localization
+    assert '"/localization/apriltag_pose_degraded"' not in localization
+    assert "aligned_vio" not in localization
+    assert "MeasurementSource::Tag" in fusion
+    assert "filter_.update_pose(" in fusion
 
 
-def test_apriltag_reprojection_and_transition_gates_are_explicit_in_cpp():
+def test_apriltag_reprojection_and_eskf_innovation_gates_are_explicit_in_cpp():
     localization = (CORE_ROOT / "ros_ws/src/robotcore_sensors/src/apriltag_map_localizer_component.cpp").read_text()
+    fusion = (CORE_ROOT / "ros_ws/src/robotcore_sensors/src/fixed_lag_eskf_component.cpp").read_text()
     edge_launch = (
         CORE_ROOT / "ros_ws/src/robotcore_bringup/launch/robotcore_edge_system.launch.py"
     ).read_text(encoding="utf-8")
@@ -74,20 +77,49 @@ def test_apriltag_reprojection_and_transition_gates_are_explicit_in_cpp():
     assert '"max_reprojection_rms_px", 3.0' in localization
     assert '"max_reprojection_rms_px": 3.0' in edge_launch
     assert "solvePnPRansac" in localization
-    assert '"max_translation_jump_m", 0.05' in localization
-    assert '"max_translation_jump_m": 0.05' in edge_launch
     assert '"multi_tag_position_stddev_m", 0.05' in localization
     assert '"multi_tag_position_stddev_m": 0.05' in edge_launch
+    assert "max_translation_jump_m" not in localization
+    assert "max_translation_jump_m" not in edge_launch
+    assert "measurement.source == MeasurementSource::Vio" in fusion
+    assert "++tag_gate_rejections_" in fusion
 
 
-def test_apriltag_relocalize_bypasses_the_old_pose_jump_gate_once():
+def test_apriltag_relocalize_is_folded_into_the_single_estimate_stream():
     localization = (
         CORE_ROOT / "ros_ws/src/robotcore_sensors/src/apriltag_map_localizer_component.cpp"
     ).read_text(encoding="utf-8")
+    fusion = (
+        CORE_ROOT / "ros_ws/src/robotcore_sensors/src/fixed_lag_eskf_component.cpp"
+    ).read_text(encoding="utf-8")
 
-    assert "have_last_pose_ = false; relocalization_pending_ = true" in localization
-    assert "have_last_pose_ && !relocalization_pending_" in localization
-    assert "relocalization_pending_ = false" in localization
+    assert localization.count("++map_generation_") == 1
+    assert "estimate.relocalization_requested = true" in localization
+    assert '"/localization/relocalize_event"' not in localization
+    assert "estimator_relocalize_client_" not in localization
+    assert "relocalize_event_sub_" not in localization
+    assert '"/localization/tag_vio/relocalize"' not in localization
+    assert '"/localization/relocalize_event"' not in fusion
+    assert "relocalize_event_sub_" not in fusion
+    assert "relocalize_event_pub_" not in fusion
+    assert "message->map_generation > last_tag_map_generation_" in fusion
+    assert "message->relocalization_requested || map_changed" in fusion
+    assert fusion.count("tag_sub_ = create_subscription") == 1
+
+
+def test_camera_extrinsic_has_one_tf_authority():
+    localization = (
+        CORE_ROOT / "ros_ws/src/robotcore_sensors/src/apriltag_map_localizer_component.cpp"
+    ).read_text(encoding="utf-8")
+    edge_launch = (
+        CORE_ROOT / "ros_ws/src/robotcore_bringup/launch/robotcore_edge_system.launch.py"
+    ).read_text(encoding="utf-8")
+
+    assert "lookupTransform(base_frame_, camera_frame_, tf2::TimePointZero)" in localization
+    assert "base_to_camera_translation_m" not in localization
+    assert "base_to_camera_optical_rpy_rad" not in localization
+    assert "base_to_front_camera_optical" not in edge_launch
+    assert "front_camera_optical_frame" not in edge_launch
 
 
 def test_apriltag_image_path_is_bounded_and_localizer_consumes_only_detections():
@@ -110,10 +142,12 @@ def test_apriltag_image_path_is_bounded_and_localizer_consumes_only_detections()
     assert 'default_value="/zedx/zed_node/rgb/color/rect/image"' in edge_launch
     assert 'default_value="/zedx/zed_node/rgb/color/rect/image/compressed"' in edge_launch
     assert '("image_raw", LaunchConfiguration("front_camera_raw_topic"))' in edge_launch
-    assert '("image", "/localization/apriltag/image_rgb")' in edge_launch
+    assert edge_launch.count(
+        '("image", LaunchConfiguration("apriltag_cuda_input_topic"))'
+    ) == 2
     assert '"front_camera_compressed_topic": LaunchConfiguration(' in edge_launch
     assert '".zed_node":' in camera_config
-    assert "jpeg_quality: 30" in camera_config
+    assert "jpeg_quality: 80" in camera_config
 
 
 def test_web_workspace_keeps_only_web_package_and_ros_state_bridge():
@@ -200,16 +234,18 @@ def test_only_production_aboard_bridge_uses_protocol_v2():
     assert "MessageInfo" not in bridge
     assert "command_authority freshness timeout" in bridge
     assert "kCommandPeriod = 20ms" in bridge
+    assert "declare_parameter<std::int64_t>(\"span_us\", 500)" in bridge
+    assert "requested_span_us, 1, 500" in bridge
+    assert "kMinimumReportedPwmUs = 1000U" in bridge
+    assert "kMaximumReportedPwmUs = 2000U" in bridge
+    assert "message->normalized[i]) * span_us_" in bridge
 
 
 def test_pool_bottom_frame_has_no_unvalidated_depth_sensor_path():
     body_state = (CORE_ROOT / "ros_ws/src/robotcore_interfaces/msg/BodyState.msg").read_text(
         encoding="utf-8"
     )
-    fusion = (
-        CORE_ROOT / "ros_ws/src/robotcore_sensors/robotcore_sensors/sensor_fusion_node.py"
-    ).read_text(encoding="utf-8")
-    sensor_config = (CORE_ROOT / "ros_ws/src/robotcore_sensors/config/sensors.yaml").read_text(
+    fusion = (CORE_ROOT / "ros_ws/src/robotcore_sensors/src/fixed_lag_eskf_component.cpp").read_text(
         encoding="utf-8"
     )
 
@@ -217,4 +253,11 @@ def test_pool_bottom_frame_has_no_unvalidated_depth_sensor_path():
     assert "altitude_m" not in body_state
     assert "depth_input_topic" not in fusion
     assert "altitude_input_topic" not in fusion
-    assert "aboard_depth" not in sensor_config
+
+
+def test_cpp_localization_has_no_uninstalled_python_shadow_implementation():
+    legacy_package = CORE_ROOT / "ros_ws/src/robotcore_sensors/robotcore_sensors"
+    legacy_config = CORE_ROOT / "ros_ws/src/robotcore_sensors/config/sensors.yaml"
+
+    assert not any(legacy_package.glob("*.py"))
+    assert not legacy_config.exists()

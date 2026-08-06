@@ -15,12 +15,3 @@ def clamp_normalized(values, size):
 
 def decode_thruster_action(action):
     return clamp_normalized(action, 8)
-
-
-def decode_arm_joint_targets(action, joint_count):
-    # Missing joints default to zero so dummy and partially implemented runners
-    # can still exercise the arm command path.
-    output = [0.0] * joint_count
-    for index, value in enumerate(list(action)[:joint_count]):
-        output[index] = float(value)
-    return output

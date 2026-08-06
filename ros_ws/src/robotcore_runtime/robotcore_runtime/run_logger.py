@@ -10,15 +10,16 @@ import hashlib
 import math
 import os
 import shutil
+import time
 from datetime import datetime
 from pathlib import Path
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
 
 from robotcore_interfaces.msg import (
-    ArmCommand,
     ControlAuthorityStatus,
     LocalizationStatus,
     PidStatus,
@@ -51,45 +52,70 @@ class RunLogger(Node):
         self.declare_parameter(
             "safety_config_path", "src/robotcore_control/config/real_pool_safety.yaml"
         )
+        # JSONL is an operator-readable summary, not the full-rate transport
+        # recording.  Bound repeated status streams here and leave lossless
+        # capture to rosbag2 so logging cannot compete with control callbacks.
+        self.declare_parameter("thruster_log_rate_hz", 20.0)
+        self.declare_parameter("trajectory_log_rate_hz", 20.0)
+        self.declare_parameter("tracking_log_rate_hz", 20.0)
+        self.declare_parameter("authority_log_rate_hz", 10.0)
+        self.declare_parameter("pid_log_rate_hz", 10.0)
+        self.declare_parameter("flush_interval_s", 0.25)
         root = Path(self.get_parameter("run_root").value)
         self.run_dir = self.create_run_dir(root)
         self.event_log_path = self.run_dir / "event_log.jsonl"
+        self.event_log_handle = self.event_log_path.open(
+            "a", encoding="utf-8", buffering=64 * 1024
+        )
+        self.last_stream_log_ns = {}
+        self.stream_log_rates = {
+            "thruster_cmd": float(self.get_parameter("thruster_log_rate_hz").value),
+            "trajectory_target": float(
+                self.get_parameter("trajectory_log_rate_hz").value
+            ),
+            "tracking_status": float(self.get_parameter("tracking_log_rate_hz").value),
+            "control_authority_status": float(
+                self.get_parameter("authority_log_rate_hz").value
+            ),
+            "pid_status": float(self.get_parameter("pid_log_rate_hz").value),
+        }
         self.last_safety_signature = None
         self.last_safety_log_ns = 0
         self.last_localization_log_ns = 0
         # Policy nodes subscribe to this topic so all policy_io files land in
         # the same run folder without sharing process-local state.
         self.run_dir_pub = self.create_publisher(String, "/runtime/run_dir", 10)
+        summary_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+        )
 
         self.create_subscription(SafetyEvent, "/safety/events", self.on_safety_event, 20)
         self.create_subscription(
             PolicyStatus, "/policy/body/status", self.on_policy_status, 20
         )
         self.create_subscription(
-            PolicyStatus, "/policy/arm/status", self.on_policy_status, 20
+            ThrusterCommand, "/control/thruster_cmd", self.on_thruster_cmd, summary_qos
         )
         self.create_subscription(
-            ThrusterCommand, "/control/thruster_cmd", self.on_thruster_cmd, 20
-        )
-        self.create_subscription(ArmCommand, "/control/arm_cmd", self.on_arm_cmd, 20)
-        self.create_subscription(
-            TrajectoryTarget, "/runtime/trajectory_target", self.on_trajectory_target, 20
+            TrajectoryTarget, "/runtime/trajectory_target", self.on_trajectory_target, summary_qos
         )
         self.create_subscription(
-            TrackingStatus, "/runtime/tracking_status", self.on_tracking_status, 20
+            TrackingStatus, "/runtime/tracking_status", self.on_tracking_status, summary_qos
         )
         self.create_subscription(
             ControlAuthorityStatus,
             "/control/authority/status",
             self.on_authority_status,
-            20,
+            summary_qos,
         )
-        self.create_subscription(PidStatus, "/control/pid/status", self.on_pid_status, 20)
+        self.create_subscription(PidStatus, "/control/pid/status", self.on_pid_status, summary_qos)
         self.create_subscription(
             LocalizationStatus,
             "/localization/status",
             self.on_localization_status,
-            20,
+            summary_qos,
         )
         self.create_subscription(
             String,
@@ -108,6 +134,10 @@ class RunLogger(Node):
         )
         self.get_logger().info(f"Run folder: {self.run_dir}")
         self.timer = self.create_timer(1.0, self.publish_run_dir)
+        flush_interval = max(
+            0.05, float(self.get_parameter("flush_interval_s").value)
+        )
+        self.flush_timer = self.create_timer(flush_interval, self.flush_event_log)
 
     def create_run_dir(self, root):
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -128,7 +158,7 @@ class RunLogger(Node):
         )
         return run_dir
 
-    def write_event(self, event_type, payload):
+    def write_event(self, event_type, payload, *, flush=False):
         # JSONL gives append-only logs that are easy to inspect during early
         # integration and easy to replay into richer tooling later.
         record = {
@@ -136,8 +166,28 @@ class RunLogger(Node):
             "type": event_type,
             "payload": payload,
         }
-        with self.event_log_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, sort_keys=True) + "\n")
+        self.event_log_handle.write(
+            json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+        )
+        if flush:
+            self.event_log_handle.flush()
+
+    def stream_log_due(self, event_type):
+        """Use monotonic time to bound repeated summaries across ROS clock jumps."""
+
+        rate_hz = self.stream_log_rates[event_type]
+        if rate_hz <= 0.0:
+            return False
+        now_ns = time.monotonic_ns()
+        previous_ns = self.last_stream_log_ns.get(event_type)
+        period_ns = max(1, int(1e9 / rate_hz))
+        if previous_ns is not None and 0 <= now_ns - previous_ns < period_ns:
+            return False
+        self.last_stream_log_ns[event_type] = now_ns
+        return True
+
+    def flush_event_log(self):
+        self.event_log_handle.flush()
 
     def snapshot_control_configs(self):
         """Copy exact control inputs into the immutable run snapshot folder."""
@@ -183,6 +233,7 @@ class RunLogger(Node):
                 "abort_active": bool(msg.abort_active),
                 "source": msg.source,
             },
+            flush=bool(msg.abort_active),
         )
 
     def on_policy_status(self, msg):
@@ -203,9 +254,11 @@ class RunLogger(Node):
             payload = json.loads(msg.data)
         except (json.JSONDecodeError, TypeError):
             payload = {"phase": "invalid", "message": str(msg.data)}
-        self.write_event("tracking_experiment", payload)
+        self.write_event("tracking_experiment", payload, flush=True)
 
     def on_thruster_cmd(self, msg):
+        if not self.stream_log_due("thruster_cmd"):
+            return
         self.write_event(
             "thruster_cmd",
             {
@@ -215,19 +268,9 @@ class RunLogger(Node):
             },
         )
 
-    def on_arm_cmd(self, msg):
-        self.write_event(
-            "arm_cmd",
-            {
-                "source": msg.source,
-                "enable": bool(msg.enable),
-                "command_type": int(msg.command_type),
-                "joint_names": list(msg.joint_names),
-                "joint_targets": [float(v) for v in msg.joint_targets],
-            },
-        )
-
     def on_trajectory_target(self, msg):
+        if not self.stream_log_due("trajectory_target"):
+            return
         self.write_event(
             "trajectory_target",
             {
@@ -269,6 +312,8 @@ class RunLogger(Node):
         )
 
     def on_tracking_status(self, msg):
+        if not self.stream_log_due("tracking_status"):
+            return
         self.write_event(
             "tracking_status",
             {
@@ -347,6 +392,8 @@ class RunLogger(Node):
         )
 
     def on_authority_status(self, msg):
+        if not self.stream_log_due("control_authority_status"):
+            return
         self.write_event(
             "control_authority_status",
             {
@@ -366,6 +413,8 @@ class RunLogger(Node):
         )
 
     def on_pid_status(self, msg):
+        if not self.stream_log_due("pid_status"):
+            return
         self.write_event(
             "pid_status",
             {
@@ -437,6 +486,12 @@ class RunLogger(Node):
                 "twist_covariance_diagonal": twist_diagonal,
             },
         )
+
+    def destroy_node(self):
+        handle = getattr(self, "event_log_handle", None)
+        if handle is not None and not handle.closed:
+            handle.close()
+        return super().destroy_node()
 
 
 def main(args=None):

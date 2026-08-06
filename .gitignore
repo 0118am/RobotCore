@@ -1,11 +1,65 @@
+# ROS 2 / colcon build output (also matches ros_ws/)
 build/
 install/
 log/
-.pytest_cache/
+symlink_install_manifest.txt
+compile_commands.json
+
+# Python bytecode and tool caches
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.pytype/
+.hypothesis/
+.tox/
+.nox/
+
+# Test and coverage output
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+pytestdebug.log
+
+# Python packaging and virtual environments
 *.egg-info/
-data/robotcore_runs/run_*/
+.eggs/
+dist/
+.venv/
+venv/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# RobotCore run captures and ROS bag data
+/data/robotcore_runs/run_*/
+/ros_ws/data/robotcore_runs/run_*/
 *.bag
+*.bag.active
 *.db3
+*.db3-shm
+*.db3-wal
 *.mcap
+*.mcap.active
+
+# Runtime output
+*.log
+*.pid
+*.sock
+
+# IDE and editor-local files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS metadata
+.DS_Store
+Thumbs.db

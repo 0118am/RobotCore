@@ -90,22 +90,28 @@ P^+=(I-KH)P(I-KH)^T+KRK^T.
 
 ## 固定延迟与 AprilTag
 
-估计器保存 3 秒 IMU 状态/增量和按时间排序的 VIO 事件。历史项分别保留传播后、
-视觉更新前的状态以及视觉更新后的状态。延迟或乱序 VIO 到达后选择时间上最近且
-误差不超过 120 ms 的历史状态，在该点按时间顺序重新执行 VIO 更新，再重放其后
-全部 IMU 和 VIO；窗口外数据丢弃并计数。60 Hz 发布时只在最新 IMU 不超过
-50 ms 时前推至当前时间。
+估计器保存 3 秒 IMU 状态/增量，以及一个按时间排序的 VIO/AprilTag 位姿观测队列。
+历史项保留传播后的预测状态和该时刻全部视觉更新后的状态。延迟观测到达后选择
+时间上最近且误差不超过 120 ms 的历史状态，从该点按时间顺序重做 Tag/VIO 更新，
+再重放其后全部 IMU 和视觉观测；窗口外数据丢弃并计数。60 Hz 发布时只在最新
+IMU 不超过 50 ms 时前推至当前时间。
 
-AprilTag 不再作为第二份局部运动观测注入 ESKF。地图 PnP 在图像时间找到历史
-`odom -> base_link`，仅计算
+AprilTag 初次出现时，在对应历史状态计算
 
 \[
 T_{map,odom}=T_{map,base}^{tag}(T_{odom,base}^{eskf})^{-1}.
 \]
 
-四帧一致候选才确认。0.05 m/2° 以上的正常修正使用 0.25 插值；超过
-0.75 m/20° 自动拒绝，必须 Relocalize。这样保持 `odom -> base_link` 连续，
-也避免同一幅图像既经 ZED VIO 又经 Tag 被当成两份独立局部运动信息。
+四帧一致候选只用于建立一次 `map -> odom` 坐标变换。建立后该变换保持固定，
+每个通过 PnP 几何门的 `map -> base_link` 观测及其 6x6 协方差被转换到 ESKF 的
+`odom` 坐标，和 VIO 一起进入同一固定延迟队列、NIS 门控和 15 维状态更新。
+因此不存在隐藏在 `map -> odom` 中的第二套平滑器；Tag 是绝对位姿约束，VIO 是
+局部位姿/速度约束，IMU 负责传播。
+
+ESKF 只订阅 `/localization/apriltag_pose` 一条 AprilTag 输入。其
+`AprilTagPoseEstimate` 同时携带位姿、协方差、质量/拒绝原因和
+`map_generation`；地图重载时定位器在同一消息中递增代次并请求重新对齐，
+不再使用独立的 `pose_status` 或 `relocalize_event` 话题。
 
 ## 数据来源与实际作用
 
@@ -113,11 +119,13 @@ T_{map,odom}=T_{map,base}^{tag}(T_{odom,base}^{eskf})^{-1}.
 |---|---:|---|---|
 | A-board UART8 外置 IMU | 100 Hz | 角速度、标定后比力、MCU 时间 | 50 ms 后转 VIO-only；无可信六面标定时禁用加速度 |
 | ZED VIO | 30 Hz | `odom` 位姿和 base 速度及协方差 | 最多 0.5 s 惯性外推，之后位置无效 |
-| Isaac ROS AprilTag CUDA | 30 Hz | ID 与像素角点 | 不直接进 ESKF；经联合 PnP 更新 `map -> odom` |
+| Isaac ROS AprilTag CUDA | 30 Hz | 联合 PnP 绝对位姿及 6x6 协方差 | 与 VIO 一起在历史时刻直接更新 ESKF；失效时保持局部惯性/VIO 估计 |
 | CameraInfo | 启动/低频 | 投影内参 | 无有效内参不发布 Tag 位姿 |
 | Tag map | 启动/重定位 | 每个 Tag 的尺寸、地图位姿 | 文件无效时保持旧地图或拒绝定位 |
 | 静态 TF/安装标定 | 启动 | 传感器到 `base_link` 外参 | 错误外参产生系统偏差，滤波无法自行消除 |
-输出位姿为 map/FLU，线速度和角速度为 base_link/FLU。Tag 新鲜且通过质量门时
+唯一位姿/速度输出是 `/localization/fused_odom` 和由它同次生成的
+`/robot/body_state`。建立绝对对齐后位姿为 map/FLU；此前为 odom/FLU；线速度和
+角速度始终为 base_link/FLU。Tag 新鲜且通过质量门时
 `state_valid=true`；Tag 遮挡但 VIO/ESKF 仍可用时
 `position_estimated=true`。水池底为 `map` 原点时，垂向位置统一使用
 `pose.position.z`（FLU，向上为正），不再维护方向相反且未标定的深度字段，
@@ -150,9 +158,10 @@ T_{map,odom}=T_{map,base}^{tag}(T_{odom,base}^{eskf})^{-1}.
 
 当前实现仍把 VIO pose 和 velocity 分两次更新，未使用两者之间的完整交叉协方差；
 历史观测也按最近 100 Hz IMU 状态对齐。这两点是下一轮数学一致性改进的最高优先级。
-此外，frame 4 没有传感器硬件序列号字段：节点会严格检查标定文件中的
-`sensor_serial` 和 SHA-256 格式 `config_hash`，也可与部署参数比对，但“文件标签
-对应当前物理 IMU”仍必须由制造/装配记录保证，协议自身无法独立证明。
+此外，frame 4 没有传感器硬件序列号字段。部署采用一台设备对应
+`/etc/robotcore/external_imu_calibration.yaml` 一个文件的约定；节点在每次服务启动时
+重新读取它，只检查矩阵、偏置的维度、有限性和非奇异性，不维护无法由协议验证的
+序列号或配置哈希副本。文件与物理 IMU 的对应关系由设备部署目录保证。
 
 ## 如何判断“准确”
 

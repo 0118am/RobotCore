@@ -1,31 +1,20 @@
-"""ROS-environment tests for the direct ZED launcher."""
+"""Static checks for the single production ZED launch path."""
 
-import sys
 from pathlib import Path
 
-import pytest
-
-
 CORE_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(CORE_ROOT / "ros_ws/src/robotcore_runtime"))
-rclpy = pytest.importorskip("rclpy")
-
-from robotcore_runtime.zed_camera_launcher import zed_launch_command
+LAUNCH = CORE_ROOT / "ros_ws/src/robotcore_bringup/launch/robotcore_edge_system.launch.py"
 
 
-def test_zed_command_sources_only_the_configured_zed_workspace():
-    command = zed_launch_command(
-        workspace="/tmp/zed workspace",
-        params_file="/tmp/zed params.yaml",
-        serial_number="50649148",
-        camera_id="-1",
-    )
+def test_edge_launch_owns_the_only_zed_subprocess_command():
+    launch = LAUNCH.read_text(encoding="utf-8")
+    legacy = CORE_ROOT / "ros_ws/src/robotcore_runtime/robotcore_runtime/zed_camera_launcher.py"
 
-    assert command[:2] == ["/usr/bin/bash", "-c"]
-    script = command[2]
-    assert "source '/tmp/zed workspace/install/setup.bash'" in script
-    assert "ros2 launch zed_wrapper zed_camera.launch.py" in script
-    assert "serial_number:=50649148" in script
-    assert "camera_id:=-1" in script
-    assert "publish_tf:=false" in script
-    assert "'ros_params_override_path:=/tmp/zed params.yaml'" in script
+    assert not legacy.exists()
+    assert "exec ros2 launch zed_wrapper zed_camera.launch.py" in launch
+    assert 'LaunchConfiguration("zed_workspace")' in launch
+    assert 'LaunchConfiguration("zed_serial_number")' in launch
+    assert 'LaunchConfiguration("zed_camera_id")' in launch
+    assert "publish_tf:=false" in launch
+    assert "enable_ipc:=false" in launch
+    assert 'LaunchConfiguration("zed_params_file")' in launch

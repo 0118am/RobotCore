@@ -20,12 +20,10 @@ setup(
     zip_safe=True,
     maintainer="RobotCore Team",
     maintainer_email="maintainer@example.com",
-    description="Thruster allocation, arm command routing, and safety filters.",
+    description="Thruster allocation, vehicle control, and safety filters.",
     license="MIT",
     entry_points={
         "console_scripts": [
-            "arm_controller = robotcore_control.arm_controller:main",
-            "command_authority = robotcore_control.command_authority_node:main",
             "pid_controller = robotcore_control.six_dof_pid_node:main",
             "rl_action_adapter = robotcore_control.rl_action_adapter:main",
             "thruster_allocator = robotcore_control.thruster_allocator:main",

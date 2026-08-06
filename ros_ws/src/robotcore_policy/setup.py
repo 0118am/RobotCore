@@ -23,7 +23,6 @@ setup(
     license="MIT",
     entry_points={
         "console_scripts": [
-            "arm_policy_node = robotcore_policy.arm_policy_node:main",
             "body_policy_node = robotcore_policy.body_policy_node:main",
         ],
     },

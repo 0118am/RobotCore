@@ -14,8 +14,13 @@ def text(name: str) -> str:
 def test_robot_service_owns_latency_cores_and_maximum_jetson_profile():
     robot = text("robotcore.service")
     performance = text("robotcore-performance.service")
+    camera_ready = text("robotcore-camera-ipc-ready.service")
+    camera_helper = (
+        ROOT / "host_manager/bin/robotcore-camera-ipc-ready"
+    ).read_text(encoding="utf-8")
 
     assert "PartOf=robotcore-stack.target" in robot
+    assert "robotcore-camera-ipc-ready.service" in robot
     assert "CPUAffinity=2 3 4 5 6 7" in robot
     assert "CPUWeight=10000" in robot
     assert "Nice=-10" in robot
@@ -29,8 +34,13 @@ def test_robot_service_owns_latency_cores_and_maximum_jetson_profile():
     assert "set -eo pipefail; source /opt/ros/humble/setup.bash" in robot
     assert 'setup.bash"; set -u; exec ros2 launch' in robot
     assert "set -euo pipefail; source /opt/ros/humble/setup.bash" not in robot
+    assert "After=nvfancontrol.service" in performance
     assert "ExecStart=/usr/sbin/nvpmodel -m 0" in performance
-    assert "ExecStart=/usr/bin/jetson_clocks" in performance
+    assert "ExecStart=/usr/bin/jetson_clocks --fan" in performance
+    assert "ExecStart=/usr/local/libexec/robotcore-camera-ipc-ready" in camera_ready
+    assert "stable_samples >= 30" in camera_helper
+    assert "MainPID" in camera_helper
+    assert "\nRemainAfterExit=" not in camera_ready
 
 
 def test_web_service_is_supervised_on_non_localization_cores():
@@ -76,6 +86,7 @@ def test_component_executor_thread_counts_are_bounded():
     assert 'parameters=[{"thread_num": 2}]' in launch
     assert 'parameters=[{"thread_num": 3}]' in launch
     assert 'os.environ.get(\n        "ROBOTCORE_RUN_ROOT"' in launch
+    assert 'DeclareLaunchArgument("enable_pool_tracking", default_value="false")' in launch
 
 
 def test_installer_pins_and_validates_the_cpp_workspaces():
@@ -90,6 +101,9 @@ def test_installer_pins_and_validates_the_cpp_workspaces():
     assert 'set_env_value ZED_WORKSPACE "${zed_workspace}"' in installer
     assert "set_env_value RMW_IMPLEMENTATION rmw_cyclonedds_cpp" in installer
     assert "install -d -o robotcore -g robotcore" in installer
+    assert "robotcore-camera-ipc-ready.service" in installer
+    assert "host_manager/bin/robotcore-camera-ipc-ready" in installer
+    assert '"${libexec_root}/robotcore-camera-ipc-ready"' in installer
     assert "setfacl -m u:robotcore:--x /home/nvidia" in installer
     assert 'runuser -u robotcore -- test -r "${robot_workspace}' in installer
     assert "sysctl -p /etc/sysctl.d/99-robotcore-dds.conf" in installer

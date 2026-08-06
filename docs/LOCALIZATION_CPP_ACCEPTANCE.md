@@ -7,12 +7,13 @@
 | 项目 | 结果 | 证据/命令 |
 |---|---|---|
 | A-board 固件 Release 编译 | PASS | `cmake -S . -B /tmp/acube-cpp-rewrite-build -DCMAKE_TOOLCHAIN_FILE=cmake/arm-none-eabi-gcc.cmake -DCMAKE_BUILD_TYPE=Release`；`-O3 + LTO`，ELF/HEX/BIN 生成，Flash 39,292 B，RAM 22,344 B |
-| ROS C++ Release + LTO 构建 | PASS | `colcon build --packages-select robotcore_interfaces robotcore_hardware robotcore_sensors robotcore_bringup --cmake-args -DCMAKE_BUILD_TYPE=Release` |
+| ROS C++ Release + LTO 构建 | PASS | `colcon build --packages-select robotcore_interfaces robotcore_control robotcore_control_cpp robotcore_hardware robotcore_sensors robotcore_bringup --cmake-args -DCMAKE_BUILD_TYPE=Release` |
 | launch 静态解析 | PASS | `ros2 launch robotcore_bringup robotcore_edge_system.launch.py --show-args` |
 | C++ 协议/时钟单元测试 | PASS | CRC golden vector、frame 4、坏 CRC、倒退时钟 |
 | C++ ESKF 单元测试 | PASS | 静止传播、Joseph/PSD、NIS 离群拒绝 |
 | 数据链运行语言 | PASS（静态） | UART、IMU 条件化、ZED 适配、Tag 地图 PnP、ESKF、BodyState 均为 C++；launch Python 只做进程编排 |
 | 旧 `robot_localization` | PASS（静态） | edge launch 不再启动或依赖该节点，旧 YAML 不参与安装后的运行图 |
+| 隔离域合成 ESKF 频率 | PASS（本机动态） | VIO 30 Hz、specific-force IMU 100 Hz、Tag 锚点输入；6 s 内 fused/body 各 336 条、59.998 Hz、时间戳严格递增、速度 0.2500 m/s |
 
 编译器选项为 C++17、Release `-O3` 和可用时 LTO；没有启用
 `-ffast-math`。

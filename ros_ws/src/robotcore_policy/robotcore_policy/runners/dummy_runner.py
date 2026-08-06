@@ -9,9 +9,4 @@ class DummyRunner(PolicyRunner):
     def run(self, observation):
         # Keep outputs neutral so integration tests validate plumbing without
         # accidentally moving simulated or real actuators.
-        if self.manifest.role == "body":
-            return [0.0] * 8
-        if self.manifest.role == "arm":
-            joint_count = int(self.manifest.output_schema.get("joint_count", 6))
-            return [0.0] * joint_count
-        return []
+        return [0.0] * 8 if self.manifest.role == "body" else []

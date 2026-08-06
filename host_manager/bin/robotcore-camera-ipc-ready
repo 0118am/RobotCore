@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -u
+
+# Argus can be reported active while its sockets are not ready, and stale
+# socket paths can survive a client-triggered daemon restart.  Require the same
+# live daemon PID and both sockets for three continuous seconds.
+stable_pid=
+stable_samples=0
+
+for ((attempt = 0; attempt < 150; attempt++)); do
+  pid=$(/usr/bin/systemctl show \
+    --property=MainPID --value nvargus-daemon.service 2>/dev/null || true)
+  if [[ ${pid} =~ ^[1-9][0-9]*$ &&
+        -d /proc/${pid} &&
+        -S /tmp/argus_socket &&
+        -S /tmp/imu_daemon.sock ]]; then
+    if [[ ${pid} == "${stable_pid}" ]]; then
+      ((stable_samples += 1))
+    else
+      stable_pid=${pid}
+      stable_samples=1
+    fi
+    if ((stable_samples >= 30)); then
+      exit 0
+    fi
+  else
+    stable_pid=
+    stable_samples=0
+  fi
+  sleep 0.1
+done
+
+echo "NVIDIA camera IPC daemon and sockets did not become stable" >&2
+exit 1

@@ -114,14 +114,62 @@ TEST(AboardProtocol, V2FitsThe115200BaudJitterBudget)
   constexpr double serial_bytes_per_second = baud / 10.0;  // 8N1
   constexpr double command_bytes_per_second = robotcore_hardware::kCommandV2FrameSize * 50.0;
   constexpr double telemetry_bytes_per_second =
-    robotcore_hardware::kImuV1FrameSize * 100.0 + robotcore_hardware::kStatusV2FrameSize * 20.0;
+    robotcore_hardware::kImuV1FrameSize * 100.0 +
+    robotcore_hardware::kStatusV2FrameSize * 20.0 +
+    robotcore_hardware::kRuntimeV1FrameSize * 2.0;
   constexpr double coincident_telemetry_burst_ms =
     (robotcore_hardware::kImuV1FrameSize + robotcore_hardware::kStatusV2FrameSize) * 10.0 * 1000.0 /
     baud;
 
   EXPECT_LT(command_bytes_per_second / serial_bytes_per_second, 0.15);
-  EXPECT_LT(telemetry_bytes_per_second / serial_bytes_per_second, 0.32);
+  EXPECT_LT(telemetry_bytes_per_second / serial_bytes_per_second, 0.33);
+  EXPECT_LT(
+    (telemetry_bytes_per_second + command_bytes_per_second) / serial_bytes_per_second,
+    0.50);
   EXPECT_LT(coincident_telemetry_burst_ms, 7.0);
+}
+
+TEST(AboardProtocol, ParsesRuntimeFrame5)
+{
+  std::array<std::uint8_t, robotcore_hardware::kRuntimeV1FrameSize> frame{};
+  frame[0] = robotcore_hardware::kFrameHead;
+  frame[1] = 0xF8U;
+  frame[2] = robotcore_hardware::kRuntimeFrameNumber;
+  frame[3] = 1U;
+  frame[4] = 1U;
+  put_u32(frame.data() + 5U, 123456U);
+  put_u16(frame.data() + 9U, 875U);
+  put_u16(frame.data() + 11U, 420U);
+  put_u16(frame.data() + 13U, 95U);
+  put_u32(frame.data() + 15U, 2U);
+  put_u32(frame.data() + 19U, 3U);
+  put_u16(frame.data() + 23U, 180U);
+  put_u16(frame.data() + 25U, 160U);
+  put_u16(frame.data() + 27U, 1U);
+  put_u16(frame.data() + 29U, 4U);
+  put_u16(frame.data() + 31U, 5U);
+  put_u16(frame.data() + 33U, 6U);
+  put_u16(
+    frame.data() + frame.size() - 2U,
+    robotcore_hardware::crc16_ccitt(frame.data(), frame.size() - 2U));
+
+  const auto parsed = robotcore_hardware::parse_runtime_v1(frame.data(), frame.size());
+  ASSERT_TRUE(parsed);
+  EXPECT_EQ(parsed->board_tick_ms, 123456U);
+  EXPECT_EQ(parsed->cpu_idle_permille, 875U);
+  EXPECT_EQ(parsed->control_wcet_us, 420U);
+  EXPECT_EQ(parsed->uart_wcet_us, 95U);
+  EXPECT_EQ(parsed->control_deadline_misses, 2U);
+  EXPECT_EQ(parsed->uart_deadline_misses, 3U);
+  EXPECT_EQ(parsed->control_min_stack_words, 180U);
+  EXPECT_EQ(parsed->uart_min_stack_words, 160U);
+  EXPECT_EQ(parsed->stack_overflow_count, 1U);
+  EXPECT_EQ(parsed->watchdog_missed_windows, 4U);
+  EXPECT_EQ(parsed->uart_rx_dma_errors, 5U);
+  EXPECT_EQ(parsed->uart_tx_drops, 6U);
+
+  frame[10] ^= 1U;
+  EXPECT_FALSE(robotcore_hardware::parse_runtime_v1(frame.data(), frame.size()));
 }
 
 TEST(AboardProtocol, SafetyReasonAndFlagsMustDescribeOneState)
@@ -173,15 +221,15 @@ TEST(AboardProtocol, RejectsBadCrcAndBackwardsClock)
   frame[0] = 0xFF; frame[1] = 0xF8; frame[2] = 4; frame[3] = 1; frame[4] = 1;
   EXPECT_FALSE(robotcore_hardware::parse_imu_v1(frame.data(), frame.size()));
   robotcore_hardware::McuClockMapper mapper;
-  ASSERT_TRUE(mapper.map(100, 1000000000LL));
-  EXPECT_FALSE(mapper.map(99, 1010000000LL));
+  ASSERT_TRUE(mapper.map(100, 1000000000LL, 500000000LL));
+  EXPECT_FALSE(mapper.map(99, 1010000000LL, 510000000LL));
 }
 
 TEST(AboardProtocol, ExtendsThirtyTwoBitMcuClockWrap)
 {
   robotcore_hardware::McuClockMapper mapper;
-  const auto before = mapper.map(0xFFFFFFF0U, 1000000000LL);
-  const auto after = mapper.map(5U, 1021000000LL);
+  const auto before = mapper.map(0xFFFFFFF0U, 1000000000LL, 500000000LL);
+  const auto after = mapper.map(5U, 1021000000LL, 521000000LL);
   ASSERT_TRUE(before);
   ASSERT_TRUE(after);
   EXPECT_EQ(*after - *before, 21000000LL);
@@ -199,13 +247,45 @@ TEST(AboardProtocol, RejectsUnsupportedFrameVersion)
 TEST(AboardProtocol, AffineClockMappingRejectsPositiveArrivalJitter)
 {
   robotcore_hardware::McuClockMapper mapper;
-  const auto first = mapper.map(1000U, 2000000000LL);
-  const auto delayed = mapper.map(2000U, 3005000000LL);
-  const auto low_delay = mapper.map(3000U, 4001000000LL);
+  const auto first = mapper.map(1000U, 2000000000LL, 1000000000LL);
+  const auto delayed = mapper.map(2000U, 3005000000LL, 2005000000LL);
+  const auto low_delay = mapper.map(3000U, 4001000000LL, 3001000000LL);
   ASSERT_TRUE(first);
   ASSERT_TRUE(delayed);
   ASSERT_TRUE(low_delay);
   EXPECT_LE(*delayed, 3005000000LL);
   EXPECT_LE(*low_delay, 4001000000LL);
   EXPECT_GT(*low_delay, *delayed);
+}
+
+TEST(AboardProtocol, FollowsForwardRosClockStepWithoutCorruptingMcuSlope)
+{
+  robotcore_hardware::McuClockMapper mapper;
+  const auto first = mapper.map(1000U, 2000000000LL, 1000000000LL);
+  const auto before_jump = mapper.map(2000U, 3000000000LL, 2000000000LL);
+  const auto after_jump = mapper.map(2010U, 6603010000000LL, 2010000000LL);
+  const auto next = mapper.map(2020U, 6603020000000LL, 2020000000LL);
+  ASSERT_TRUE(first);
+  ASSERT_TRUE(before_jump);
+  ASSERT_TRUE(after_jump);
+  ASSERT_TRUE(next);
+  EXPECT_TRUE(mapper.take_ros_clock_discontinuity());
+  EXPECT_FALSE(mapper.take_ros_clock_discontinuity());
+  EXPECT_NEAR(static_cast<double>(6603010000000LL - *after_jump), 0.0, 1000000.0);
+  EXPECT_NEAR(static_cast<double>(*next - *after_jump), 10000000.0, 1000000.0);
+}
+
+TEST(AboardProtocol, FollowsBackwardRosClockStepAsANewTimestampEpoch)
+{
+  robotcore_hardware::McuClockMapper mapper;
+  ASSERT_TRUE(mapper.map(1000U, 5000000000LL, 1000000000LL));
+  const auto before_jump = mapper.map(2000U, 6000000000LL, 2000000000LL);
+  const auto after_jump = mapper.map(2010U, 1010000000LL, 2010000000LL);
+  const auto next = mapper.map(2020U, 1020000000LL, 2020000000LL);
+  ASSERT_TRUE(before_jump);
+  ASSERT_TRUE(after_jump);
+  ASSERT_TRUE(next);
+  EXPECT_LT(*after_jump, *before_jump);
+  EXPECT_TRUE(mapper.take_ros_clock_discontinuity());
+  EXPECT_NEAR(static_cast<double>(*next - *after_jump), 10000000.0, 1000000.0);
 }

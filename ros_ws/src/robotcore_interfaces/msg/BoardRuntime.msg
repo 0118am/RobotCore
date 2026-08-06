@@ -1,0 +1,14 @@
+# Runtime-budget telemetry emitted by Aquaboard at 2 Hz.
+std_msgs/Header header
+uint32 board_tick_ms
+uint16 cpu_idle_permille
+uint16 control_wcet_us
+uint16 uart_wcet_us
+uint32 control_deadline_misses
+uint32 uart_deadline_misses
+uint16 control_min_stack_words
+uint16 uart_min_stack_words
+uint16 stack_overflow_count
+uint16 watchdog_missed_windows
+uint16 uart_rx_dma_errors
+uint16 uart_tx_drops

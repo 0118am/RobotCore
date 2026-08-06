@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 
 namespace robotcore_hardware
 {
@@ -168,15 +169,43 @@ std::optional<ImuFrame> parse_imu_v1(const std::uint8_t * data, std::size_t size
   return (result.flags & 0x01U) != 0U ? std::optional<ImuFrame>(result) : std::nullopt;
 }
 
-std::optional<std::int64_t> McuClockMapper::map(
-  std::uint32_t tick_ms, std::int64_t arrival_ros_ns)
+std::optional<RuntimeFrame> parse_runtime_v1(const std::uint8_t * data, std::size_t size)
 {
+  if (size != kRuntimeV1FrameSize || data[0] != kFrameHead || data[1] != 0xF8U ||
+    data[2] != kRuntimeFrameNumber || data[3] != 0x01U || (data[4] & 0x01U) == 0U ||
+    read_u16(data + size - 2U) != crc16_ccitt(data, size - 2U))
+  {
+    return std::nullopt;
+  }
+  RuntimeFrame result;
+  result.board_tick_ms = read_u32(data + 5U);
+  result.cpu_idle_permille = read_u16(data + 9U);
+  result.control_wcet_us = read_u16(data + 11U);
+  result.uart_wcet_us = read_u16(data + 13U);
+  result.control_deadline_misses = read_u32(data + 15U);
+  result.uart_deadline_misses = read_u32(data + 19U);
+  result.control_min_stack_words = read_u16(data + 23U);
+  result.uart_min_stack_words = read_u16(data + 25U);
+  result.stack_overflow_count = read_u16(data + 27U);
+  result.watchdog_missed_windows = read_u16(data + 29U);
+  result.uart_rx_dma_errors = read_u16(data + 31U);
+  result.uart_tx_drops = read_u16(data + 33U);
+  return result;
+}
+
+std::optional<std::int64_t> McuClockMapper::map(
+  std::uint32_t tick_ms, std::int64_t arrival_ros_ns,
+  std::int64_t arrival_steady_ns)
+{
+  constexpr std::int64_t kRosClockJumpThresholdNs = 100000000LL;
   if (!initialized_) {
     initialized_ = true;
     last_raw_tick_ = tick_ms;
     reference_tick_ = tick_ms;
-    reference_arrival_ns_ = arrival_ros_ns;
-    minimum_intercept_ns_ = static_cast<double>(arrival_ros_ns);
+    reference_arrival_steady_ns_ = arrival_steady_ns;
+    last_arrival_ros_ns_ = arrival_ros_ns;
+    last_arrival_steady_ns_ = arrival_steady_ns;
+    minimum_steady_intercept_ns_ = static_cast<double>(arrival_steady_ns);
     last_stamp_ns_ = arrival_ros_ns;
     return arrival_ros_ns;
   }
@@ -188,25 +217,50 @@ std::optional<std::int64_t> McuClockMapper::map(
   last_raw_tick_ = tick_ms;
   const std::uint64_t extended = wrap_epoch_ + tick_ms;
   const double elapsed_ticks = static_cast<double>(extended - reference_tick_);
-  // Arrival time is the affine MCU clock plus a non-negative, varying queue
-  // delay. Estimate its slope only over a long baseline, reject oscillator
-  // outliers, and use a slow update so one delayed packet cannot move time.
+  const auto ros_delta = arrival_ros_ns - last_arrival_ros_ns_;
+  const auto steady_delta = arrival_steady_ns - last_arrival_steady_ns_;
+  const bool ros_clock_jump =
+    std::llabs(ros_delta - steady_delta) > kRosClockJumpThresholdNs;
+  last_arrival_ros_ns_ = arrival_ros_ns;
+  last_arrival_steady_ns_ = arrival_steady_ns;
+
+  // Estimate oscillator slope exclusively against a monotonic clock. NTP or
+  // an operator may step CLOCK_REALTIME while the bridge is running; using
+  // ROS/system time here would turn that step into a permanent IMU age error.
   if (elapsed_ticks >= 1000.0) {
     const double observed_slope =
-      static_cast<double>(arrival_ros_ns - reference_arrival_ns_) / elapsed_ticks;
+      static_cast<double>(arrival_steady_ns - reference_arrival_steady_ns_) /
+      elapsed_ticks;
     const double bounded_slope = std::clamp(observed_slope, 995000.0, 1005000.0);
     ns_per_tick_ = 0.98 * ns_per_tick_ + 0.02 * bounded_slope;
   }
-  // The lower envelope rejects positive serial/executor delay and supplies the
-  // intercept of the robust affine map t_ros = alpha + beta * t_mcu.
-  const double candidate_intercept = static_cast<double>(arrival_ros_ns) - ns_per_tick_ * elapsed_ticks;
-  minimum_intercept_ns_ = std::min(minimum_intercept_ns_, candidate_intercept);
+
+  // Find sample time in the monotonic domain using the lower arrival envelope,
+  // then translate it with the current ROS-minus-monotonic offset. This keeps
+  // serial/executor delay out of the stamp while allowing a legitimate wall
+  // clock correction to take effect immediately.
+  const double candidate_intercept =
+    static_cast<double>(arrival_steady_ns) - ns_per_tick_ * elapsed_ticks;
+  minimum_steady_intercept_ns_ =
+    std::min(minimum_steady_intercept_ns_, candidate_intercept);
+  const double ros_minus_steady =
+    static_cast<double>(arrival_ros_ns - arrival_steady_ns);
   std::int64_t stamp = static_cast<std::int64_t>(
-    std::llround(minimum_intercept_ns_ + ns_per_tick_ * elapsed_ticks));
+    std::llround(
+      minimum_steady_intercept_ns_ + ns_per_tick_ * elapsed_ticks +
+      ros_minus_steady));
   stamp = std::min(stamp, arrival_ros_ns);
-  if (stamp <= last_stamp_ns_) {return std::nullopt;}
+  if (!ros_clock_jump && stamp <= last_stamp_ns_) {return std::nullopt;}
+  ros_clock_discontinuity_ = ros_clock_discontinuity_ || ros_clock_jump;
   last_stamp_ns_ = stamp;
   return stamp;
+}
+
+bool McuClockMapper::take_ros_clock_discontinuity()
+{
+  const bool result = ros_clock_discontinuity_;
+  ros_clock_discontinuity_ = false;
+  return result;
 }
 
 void McuClockMapper::reset() {*this = McuClockMapper{};}

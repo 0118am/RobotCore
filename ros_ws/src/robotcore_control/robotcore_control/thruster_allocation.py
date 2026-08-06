@@ -5,10 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import math
 from pathlib import Path
 from typing import Iterable
 
 import numpy as np
+from scipy.optimize import lsq_linear
 import yaml
 
 from .control_math import vec
@@ -82,6 +84,32 @@ class ThrusterAllocator:
         if not np.isfinite(self.condition):
             raise ValueError("thruster allocation matrix condition is not finite")
 
+        # The geometry and limits never change after configuration is loaded.
+        # Precompute the bounded, damped least-squares system so the 60 Hz
+        # control loop only updates its six-element target vector.
+        self.weighted_matrix = self.axis_weights[:, np.newaxis] * self.matrix
+        self.lower_bounds = np.asarray(
+            [item.minimum_force for item in self.thrusters], dtype=np.float64
+        )
+        self.upper_bounds = np.asarray(
+            [item.maximum_force for item in self.thrusters], dtype=np.float64
+        )
+        regularized_normal = (
+            self.weighted_matrix @ self.weighted_matrix.T
+            + self.damping * np.eye(6)
+        )
+        self.unconstrained_gain = np.linalg.solve(
+            regularized_normal, self.weighted_matrix
+        ).T
+        if self.damping > 0.0:
+            self.solver_matrix = np.vstack(
+                [self.weighted_matrix, math.sqrt(self.damping) * np.eye(8)]
+            )
+            self.regularization_target = np.zeros(8, dtype=np.float64)
+        else:
+            self.solver_matrix = self.weighted_matrix
+            self.regularization_target = np.empty(0, dtype=np.float64)
+
     @classmethod
     def from_yaml(cls, path: str | Path) -> "ThrusterAllocator":
         config_path = Path(path)
@@ -123,49 +151,35 @@ class ThrusterAllocator:
 
     def allocate(self, wrench: Iterable[float]) -> AllocationResult:
         target = vec(wrench, 6)
-        weights = np.diag(self.axis_weights)
-        weighted_matrix = weights @ self.matrix
-        weighted_target = weights @ target
-        lower = np.asarray([item.minimum_force for item in self.thrusters])
-        upper = np.asarray([item.maximum_force for item in self.thrusters])
-        forces = np.zeros(8, dtype=np.float64)
-        free = list(range(8))
-        fixed: list[int] = []
-
-        for _ in range(8):
-            residual_target = weighted_target.copy()
-            if fixed:
-                residual_target -= weighted_matrix[:, fixed] @ forces[fixed]
-            if free:
-                active = weighted_matrix[:, free]
-                regularized = active @ active.T + self.damping * np.eye(6)
-                solved = active.T @ np.linalg.solve(regularized, residual_target)
-                forces[free] = solved
-
-            violations = [
-                index
-                for index in free
-                if forces[index] < lower[index] or forces[index] > upper[index]
-            ]
-            if not violations:
-                break
-            # Clamp the worst normalized violation first, then recompute the
-            # remaining free thrusters against the residual wrench.
-            def violation_size(index):
-                span = max(upper[index] - lower[index], 1e-9)
-                return max(lower[index] - forces[index], forces[index] - upper[index], 0.0) / span
-
-            index = max(violations, key=violation_size)
-            forces[index] = float(np.clip(forces[index], lower[index], upper[index]))
-            free.remove(index)
-            fixed.append(index)
-
-        forces = np.clip(forces, lower, upper)
+        weighted_target = self.axis_weights * target
+        forces = self.unconstrained_gain @ weighted_target
+        if not np.all(
+            (forces >= self.lower_bounds) & (forces <= self.upper_bounds)
+        ):
+            # Saturation is uncommon in tuned operation but it must be solved
+            # globally when it occurs. SciPy's bounded-variable least-squares
+            # implementation replaces the previous one-way clamp heuristic.
+            solver_target = np.concatenate(
+                [weighted_target, self.regularization_target]
+            )
+            solution = lsq_linear(
+                self.solver_matrix,
+                solver_target,
+                bounds=(self.lower_bounds, self.upper_bounds),
+                method="bvls",
+                tol=1e-8,
+                max_iter=16,
+            )
+            if not solution.success or not np.all(np.isfinite(solution.x)):
+                raise RuntimeError(
+                    f"bounded thruster allocation failed: {solution.message}"
+                )
+            forces = solution.x
         achieved = self.matrix @ forces
         residual = float(np.linalg.norm(self.axis_weights * (target - achieved)))
         at_limit = np.logical_or(
-            np.isclose(forces, lower, atol=1e-6),
-            np.isclose(forces, upper, atol=1e-6),
+            np.isclose(forces, self.lower_bounds, atol=1e-6),
+            np.isclose(forces, self.upper_bounds, atol=1e-6),
         )
         commands = tuple(
             item.force_to_command(float(forces[index]))
@@ -177,4 +191,3 @@ class ThrusterAllocator:
             residual=residual,
             saturation_fraction=float(np.mean(at_limit)),
         )
-

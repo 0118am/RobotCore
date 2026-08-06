@@ -9,6 +9,7 @@
   <buildtool_depend>ament_python</buildtool_depend>
 
   <exec_depend>robotcore_control</exec_depend>
+  <exec_depend>robotcore_control_cpp</exec_depend>
   <exec_depend>robotcore_hardware</exec_depend>
   <exec_depend>robotcore_interfaces</exec_depend>
   <exec_depend>robotcore_policy</exec_depend>

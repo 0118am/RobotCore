@@ -6,6 +6,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVICE = ROOT / "host_manager" / "systemd" / "robotcore.service"
+CAMERA_IPC_READY = ROOT / "host_manager" / "systemd" / "robotcore-camera-ipc-ready.service"
+CAMERA_IPC_HELPER = ROOT / "host_manager" / "bin" / "robotcore-camera-ipc-ready"
 ARGUS_DROP_IN = ROOT / "host_manager" / "systemd" / "robotcore-argus.conf"
 EDGE_ENV = ROOT / "host_manager" / "systemd" / "edge.env.example"
 HOST_MANAGER_CONFIG = ROOT / "host_manager" / "config" / "host-manager.example.json"
@@ -21,12 +23,19 @@ def test_robot_service_requires_and_passes_the_managed_apriltag_map():
 
 def test_robot_service_exposes_only_the_argus_socket_to_the_zed_runtime():
     service = SERVICE.read_text(encoding="utf-8")
+    readiness = CAMERA_IPC_READY.read_text(encoding="utf-8")
+    helper = CAMERA_IPC_HELPER.read_text(encoding="utf-8")
 
     assert "PrivateTmp=true" in service
     assert "BindReadOnlyPaths=/tmp/argus_socket" in service
     assert "BindReadOnlyPaths=/tmp/imu_daemon.sock" in service
     assert "After=network-online.target dev-robotcore-aboard.device nvargus-daemon.service" in service
     assert "Wants=network-online.target nvargus-daemon.service" in service
+    assert "Requires=dev-robotcore-aboard.device robotcore-camera-ipc-ready.service" in service
+    assert "Before=robotcore.service" in readiness
+    assert "ExecStart=/usr/local/libexec/robotcore-camera-ipc-ready" in readiness
+    assert "-S /tmp/argus_socket" in helper
+    assert "-S /tmp/imu_daemon.sock" in helper
 
 
 def test_argus_drop_in_preserves_tmp_isolation_except_for_the_ipc_socket():

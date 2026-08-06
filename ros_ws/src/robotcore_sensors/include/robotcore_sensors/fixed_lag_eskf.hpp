@@ -49,6 +49,60 @@ struct AcceptedMeasurementFreshness
   std::int64_t arrival_ns{};
 };
 
+inline bool timestamp_in_current_epoch(
+  std::int64_t stamp_ns, std::int64_t arrival_ns,
+  std::int64_t maximum_absolute_age_ns = 1000000000LL)
+{
+  return stamp_ns > 0 && arrival_ns > 0 && maximum_absolute_age_ns >= 0 &&
+         stamp_ns >= arrival_ns - maximum_absolute_age_ns &&
+         stamp_ns <= arrival_ns + maximum_absolute_age_ns;
+}
+
+inline bool vio_bridge_required(
+  bool imu_fresh, std::int64_t measurement_stamp_ns,
+  std::int64_t filter_stamp_ns,
+  std::int64_t maximum_direct_imu_gap_ns = 200000000LL)
+{
+  if (measurement_stamp_ns <= filter_stamp_ns) {return false;}
+  return !imu_fresh ||
+         measurement_stamp_ns - filter_stamp_ns > maximum_direct_imu_gap_ns;
+}
+
+class RosClockOffsetJumpDetector
+{
+public:
+  explicit RosClockOffsetJumpDetector(std::int64_t threshold_ns = 100000000LL)
+  : threshold_ns_(threshold_ns) {}
+
+  bool update(std::int64_t ros_ns, std::int64_t steady_ns)
+  {
+    if (!initialized_) {
+      initialized_ = true;
+      last_ros_ns_ = ros_ns;
+      last_steady_ns_ = steady_ns;
+      return false;
+    }
+    const auto offset_change =
+      (ros_ns - last_ros_ns_) - (steady_ns - last_steady_ns_);
+    last_ros_ns_ = ros_ns;
+    last_steady_ns_ = steady_ns;
+    return offset_change > threshold_ns_ || offset_change < -threshold_ns_;
+  }
+
+  void reset()
+  {
+    initialized_ = false;
+    last_ros_ns_ = 0;
+    last_steady_ns_ = 0;
+  }
+
+private:
+  std::int64_t threshold_ns_;
+  std::int64_t last_ros_ns_{};
+  std::int64_t last_steady_ns_{};
+  bool initialized_{false};
+};
+
 class FixedLagEskf
 {
 public:

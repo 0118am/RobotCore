@@ -6,7 +6,6 @@ packages.
 Current contents:
 
 - `policies/dummy_body_policy`: deterministic 8-thruster dummy policy.
-- `policies/dummy_arm_policy`: deterministic 6-joint arm dummy policy.
 
 Real ONNX, PTH, or MMN files should be added only after Phase 0 validates the
 target runtime path and records the required versions.

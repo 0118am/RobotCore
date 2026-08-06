@@ -1,13 +1,19 @@
 [Unit]
 Description=Jetson maximum-performance profile for RobotCore
 Before=robotcore.service
+# nvfancontrol starts after nvpower and may otherwise race this oneshot at boot,
+# restoring dynamic clocks/fan control after jetson_clocks has already exited.
+After=nvfancontrol.service
 ConditionFileIsExecutable=/usr/sbin/nvpmodel
 ConditionFileIsExecutable=/usr/bin/jetson_clocks
 
 [Service]
 Type=oneshot
 ExecStart=/usr/sbin/nvpmodel -m 0
-ExecStart=/usr/bin/jetson_clocks
+# The measured production stack reached Tj 98 C while nvfancontrol's quiet
+# profile held PWM near 71%. Lock the fan at 255 together with maximum clocks
+# so thermal control cannot introduce latency spikes near the 99 C passive trip.
+ExecStart=/usr/bin/jetson_clocks --fan
 RemainAfterExit=yes
 TimeoutStartSec=30
 

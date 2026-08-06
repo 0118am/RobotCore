@@ -1,6 +1,11 @@
 command_authority:
   ros__parameters:
-    publish_rate_hz: 100.0
+    # Safety/freshness gates are evaluated independently at 100 Hz; the UART
+    # bridge only needs a 50 Hz command heartbeat and receives neutral edges immediately.
+    evaluation_rate_hz: 100.0
+    publish_rate_hz: 50.0
+    # UI/diagnostic state does not need to duplicate the safety command rate.
+    status_publish_rate_hz: 10.0
     candidate_timeout_s: 0.10
     state_timeout_s: 0.15
     target_timeout_s: 0.15

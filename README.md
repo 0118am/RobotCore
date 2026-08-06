@@ -73,6 +73,13 @@ stale-prone install space that the manual launch does not use. The ZED launcher
 starts the fixed camera directly; no second camera command or A-board IMU gate
 is required.
 
+The normal edge launch keeps the fail-closed pool PID/tracking graph disabled.
+Use the dedicated `robotcore_pool_pid_control.launch.py` workflow, or pass
+`enable_pool_tracking:=true` only after the measured pool/PID configurations
+have been approved.
+
 Detailed operating contracts are in [docs/PROJECT_GUIDE.md](docs/PROJECT_GUIDE.md).
+The measured architecture/performance review and C++ rewrite thresholds are in
+[docs/PERFORMANCE_ARCHITECTURE.md](docs/PERFORMANCE_ARCHITECTURE.md).
 The fail-closed real-pool PID workflow is documented in
 [docs/PID_POOL_TRACKING.md](docs/PID_POOL_TRACKING.md).

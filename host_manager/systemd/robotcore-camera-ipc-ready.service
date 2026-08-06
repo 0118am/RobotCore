@@ -1,0 +1,22 @@
+[Unit]
+Description=Wait for NVIDIA camera IPC sockets required by RobotCore
+After=nvargus-daemon.service
+Requires=nvargus-daemon.service
+Before=robotcore.service
+PartOf=robotcore-stack.target
+
+[Service]
+Type=oneshot
+# nvargus-daemon is considered active before its two /tmp sockets necessarily
+# exist.  A ZED client can also make Argus crash during shutdown; its stale
+# socket paths then survive briefly while systemd starts a replacement daemon.
+# Require one live daemon PID and both sockets to remain stable for three
+# seconds.  Do not use RemainAfterExit: this gate must run for every RobotCore
+# restart, not only once at boot.  robotcore.service cannot perform the initial
+# wait itself because systemd resolves BindReadOnlyPaths before ExecStartPre.
+ExecStart=/usr/local/libexec/robotcore-camera-ipc-ready
+TimeoutStartSec=18
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=strict
+PrivateDevices=true

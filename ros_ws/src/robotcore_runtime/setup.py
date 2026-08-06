@@ -31,7 +31,6 @@ setup(
             "trajectory_command_node = robotcore_runtime.trajectory_command_node:main",
             "tracking_monitor_node = robotcore_runtime.tracking_monitor_node:main",
             "tracking_experiment_node = robotcore_runtime.tracking_experiment_node:main",
-            "zed_camera_launcher = robotcore_runtime.zed_camera_launcher:main",
         ],
     },
 )

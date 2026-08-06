@@ -5,6 +5,7 @@
 #include <diagnostic_msgs/msg/diagnostic_status.hpp>
 #include <diagnostic_updater/diagnostic_updater.hpp>
 #include <robotcore_interfaces/msg/board_status.hpp>
+#include <robotcore_interfaces/msg/board_runtime.hpp>
 #include <robotcore_interfaces/msg/thruster_command.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/imu.hpp>
@@ -18,6 +19,7 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -43,8 +45,8 @@ namespace
 constexpr std::uint8_t kKnownStatusFlags =
   kStatusFlagSessionEstablished | kStatusFlagOutputsEnabled |
   kStatusFlagFailsafe;
-constexpr std::uint16_t kMinimumReportedPwmUs = 1300U;
-constexpr std::uint16_t kMaximumReportedPwmUs = 1700U;
+constexpr std::uint16_t kMinimumReportedPwmUs = 1000U;
+constexpr std::uint16_t kMaximumReportedPwmUs = 2000U;
 constexpr std::uint32_t kMaximumAckSequenceLag = 8U;
 constexpr std::size_t kDispatchHistoryDepth = 16U;
 constexpr auto kCommandPeriod = 20ms;
@@ -115,11 +117,11 @@ public:
       "serial_port", "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B7A033320-if00");
     const auto requested_baud = declare_parameter<std::int64_t>("baud", 115200);
     baud_ = static_cast<int>(std::clamp<std::int64_t>(requested_baud, 1, 4000000));
-    const auto requested_span_us = declare_parameter<std::int64_t>("span_us", 100);
-    span_us_ = static_cast<int>(std::clamp<std::int64_t>(requested_span_us, 1, 200));
+    const auto requested_span_us = declare_parameter<std::int64_t>("span_us", 500);
+    span_us_ = static_cast<int>(std::clamp<std::int64_t>(requested_span_us, 1, 500));
     if (span_us_ != requested_span_us) {
       RCLCPP_WARN(
-        get_logger(), "span_us %ld clamped to the firmware-safe range [1, 200]",
+        get_logger(), "span_us %ld clamped to the firmware-safe range [1, 500]",
         requested_span_us);
     }
     command_timeout_ms_ = static_cast<int>(std::max<std::int64_t>(
@@ -138,6 +140,8 @@ public:
     imu_pub_ = create_publisher<sensor_msgs::msg::Imu>(
       imu_topic_, rclcpp::SensorDataQoS().keep_last(8));
     status_pub_ = create_publisher<robotcore_interfaces::msg::BoardStatus>("/hardware/board_status", 10);
+    runtime_pub_ = create_publisher<robotcore_interfaces::msg::BoardRuntime>(
+      "/hardware/board_runtime", 10);
     command_sub_ = create_subscription<robotcore_interfaces::msg::ThrusterCommand>(
       "/control/thruster_cmd", rclcpp::QoS(rclcpp::KeepLast(1)).reliable(),
       [this](const robotcore_interfaces::msg::ThrusterCommand::SharedPtr message)
@@ -146,7 +150,6 @@ public:
       });
     command_timer_ = create_wall_timer(kCommandPeriod, std::bind(&AboardBridgeNode::write_command, this));
     status_timer_ = create_wall_timer(100ms, std::bind(&AboardBridgeNode::publish_status, this));
-    imu_drain_timer_ = create_wall_timer(1ms, std::bind(&AboardBridgeNode::drain_imu_queue, this));
     updater_.setHardwareID("aboard-uart6");
     updater_.add("A-board serial and IMU", this, &AboardBridgeNode::diagnose);
 
@@ -155,6 +158,7 @@ public:
       session_id_ = make_session_id();
       transition_reason_ = "process start";
     }
+    imu_publish_thread_ = std::thread([this]() {imu_publish_loop();});
     io_thread_ = std::thread([this]() {io_.run();});
     boost::asio::post(io_, [this]() {open_serial_io();});
     RCLCPP_INFO(
@@ -167,7 +171,6 @@ public:
     shutting_down_.store(true);
     if (command_timer_) {command_timer_->cancel();}
     if (status_timer_) {status_timer_->cancel();}
-    if (imu_drain_timer_) {imu_drain_timer_->cancel();}
 
     shutdown_promise_ = std::make_shared<std::promise<void>>();
     auto complete = shutdown_promise_->get_future();
@@ -178,6 +181,12 @@ public:
     work_.reset();
     io_.stop();
     if (io_thread_.joinable()) {io_thread_.join();}
+    {
+      std::lock_guard<std::mutex> lock(imu_queue_wait_mutex_);
+      imu_publish_stop_.store(true);
+    }
+    imu_queue_cv_.notify_one();
+    if (imu_publish_thread_.joinable()) {imu_publish_thread_.join();}
   }
 
 private:
@@ -186,6 +195,7 @@ private:
     ImuFrame sample;
     std::int64_t stamp_ns{};
     std::int64_t arrival_ns{};
+    std::int64_t steady_arrival_ns{};
     std::uint64_t link_generation{};
   };
 
@@ -203,7 +213,9 @@ private:
   struct StateSnapshot
   {
     BoardStatusFrame board{};
+    RuntimeFrame runtime{};
     bool have_status{false};
+    bool have_runtime{false};
     bool semantic_fault{false};
     bool session_acknowledged{false};
     bool ack_fault{false};
@@ -227,6 +239,8 @@ private:
     std::uint32_t last_ack_received{};
     std::uint32_t last_ack_applied{};
     std::int64_t last_status_ns{};
+    std::int64_t last_runtime_ns{};
+    std::uint64_t runtime_generation{};
     std::int64_t last_command_ns{};
     std::string command_source;
     std::string transition_reason;
@@ -508,12 +522,15 @@ private:
       if (rx_buffer_[1] == kStatusV2Type) {
         length = kStatusV2FrameSize;
       } else if (rx_buffer_[1] == 0xF8U) {
-        if (rx_buffer_[2] != 0x04U) {
+        if (rx_buffer_[2] == kImuFrameNumber) {
+          length = kImuV1FrameSize;
+        } else if (rx_buffer_[2] == kRuntimeFrameNumber) {
+          length = kRuntimeV1FrameSize;
+        } else {
           ++imu_version_errors_;
           rx_buffer_.erase(rx_buffer_.begin());
           continue;
         }
-        length = kImuV1FrameSize;
       } else {
         rx_buffer_.erase(rx_buffer_.begin());
         continue;
@@ -528,6 +545,18 @@ private:
           accepted = true;
         } else {
           ++status_crc_errors_;
+        }
+      } else if (rx_buffer_[2] == kRuntimeFrameNumber) {
+        const auto runtime = parse_runtime_v1(rx_buffer_.data(), length);
+        if (runtime) {
+          std::lock_guard<std::mutex> lock(state_mutex_);
+          latest_runtime_ = *runtime;
+          have_runtime_ = true;
+          last_runtime_ns_ = steady_now_ns();
+          ++runtime_generation_;
+          accepted = true;
+        } else {
+          ++runtime_crc_errors_;
         }
       } else if (rx_buffer_[3] != 0x01U) {
         ++imu_version_errors_;
@@ -752,30 +781,55 @@ private:
     have_counter_ = true;
     last_counter_ = sample.sample_counter;
     const auto arrival = get_clock()->now().nanoseconds();
-    const auto stamp = clock_mapper_.map(sample.sample_tick_ms, arrival);
+    const auto steady_arrival = steady_now_ns();
+    const auto stamp = clock_mapper_.map(
+      sample.sample_tick_ms, arrival, steady_arrival);
+    if (clock_mapper_.take_ros_clock_discontinuity()) {
+      ++ros_clock_discontinuities_;
+      RCLCPP_WARN(
+        get_logger(),
+        "ROS/system clock discontinuity detected; IMU timestamps re-anchored");
+    }
     if (!stamp) {
       ++imu_time_errors_;
       return true;
     }
-    QueuedImu queued{sample, *stamp, arrival, link_generation_io_};
-    if (!imu_queue_.push(queued)) {
-      ++imu_queue_overflows_;
-      return true;
+    QueuedImu queued{
+      sample, *stamp, arrival, steady_arrival, link_generation_io_};
+    {
+      // Pair the queue predicate update with the condition-variable mutex so
+      // a notify cannot be lost between the consumer's predicate check and
+      // its atomic transition into wait().
+      std::lock_guard<std::mutex> lock(imu_queue_wait_mutex_);
+      if (!imu_queue_.push(queued)) {
+        ++imu_queue_overflows_;
+        return true;
+      }
+      queue_high_water_.store(std::max(queue_high_water_.load(), imu_queue_.read_available()));
     }
-    queue_high_water_.store(std::max(queue_high_water_.load(), imu_queue_.read_available()));
+    imu_queue_cv_.notify_one();
     return true;
   }
 
-  void drain_imu_queue()
+  void imu_publish_loop()
   {
-    QueuedImu queued;
-    const auto generation = link_generation_.load();
-    while (imu_queue_.pop(queued)) {
-      if (queued.link_generation != generation) {
-        ++imu_stale_generation_drops_;
-        continue;
+    for (;;) {
+      {
+        std::unique_lock<std::mutex> lock(imu_queue_wait_mutex_);
+        imu_queue_cv_.wait(lock, [this]() {
+          return imu_publish_stop_.load() || imu_queue_.read_available() != 0U;
+        });
       }
-      publish_imu(queued);
+      QueuedImu queued;
+      const auto generation = link_generation_.load();
+      while (imu_queue_.pop(queued)) {
+        if (queued.link_generation != generation) {
+          ++imu_stale_generation_drops_;
+          continue;
+        }
+        publish_imu(queued);
+      }
+      if (imu_publish_stop_.load() && imu_queue_.read_available() == 0U) {return;}
     }
   }
 
@@ -800,12 +854,15 @@ private:
     message.linear_acceleration_covariance[8] = accel_stddev_ * accel_stddev_;
     imu_pub_->publish(message);
     const auto published_at = get_clock()->now().nanoseconds();
-    last_imu_arrival_ros_ns_.store(queued.arrival_ns);
+    last_imu_arrival_steady_ns_.store(queued.steady_arrival_ns);
     last_imu_stamp_ros_ns_.store(queued.stamp_ns);
-    imu_publish_times_.push_back(published_at);
-    imu_transport_ms_.push_back((published_at - queued.stamp_ns) * 1e-6);
-    while (imu_publish_times_.size() > 500U) {imu_publish_times_.pop_front();}
-    while (imu_transport_ms_.size() > 500U) {imu_transport_ms_.pop_front();}
+    {
+      std::lock_guard<std::mutex> lock(imu_statistics_mutex_);
+      imu_publish_times_.push_back(published_at);
+      imu_transport_ms_.push_back((published_at - queued.stamp_ns) * 1e-6);
+      while (imu_publish_times_.size() > 500U) {imu_publish_times_.pop_front();}
+      while (imu_transport_ms_.size() > 500U) {imu_transport_ms_.pop_front();}
+    }
     ++imu_frames_;
   }
 
@@ -1205,7 +1262,9 @@ private:
     std::lock_guard<std::mutex> lock(state_mutex_);
     StateSnapshot snapshot;
     snapshot.board = latest_status_;
+    snapshot.runtime = latest_runtime_;
     snapshot.have_status = have_status_;
+    snapshot.have_runtime = have_runtime_;
     snapshot.semantic_fault = status_semantic_fault_;
     snapshot.session_acknowledged = session_acknowledged_;
     snapshot.ack_fault = ack_fault_latched_;
@@ -1229,6 +1288,8 @@ private:
     snapshot.last_ack_received = last_ack_received_;
     snapshot.last_ack_applied = last_ack_applied_;
     snapshot.last_status_ns = last_status_ns_;
+    snapshot.last_runtime_ns = last_runtime_ns_;
+    snapshot.runtime_generation = runtime_generation_;
     snapshot.last_command_ns = last_command_ns_;
     snapshot.command_source = command_source_;
     snapshot.transition_reason = transition_reason_;
@@ -1287,6 +1348,25 @@ private:
     }
     status_pub_->publish(status);
 
+    if (snapshot.have_runtime && snapshot.runtime_generation != published_runtime_generation_) {
+      robotcore_interfaces::msg::BoardRuntime runtime;
+      runtime.header.stamp = now;
+      runtime.board_tick_ms = snapshot.runtime.board_tick_ms;
+      runtime.cpu_idle_permille = snapshot.runtime.cpu_idle_permille;
+      runtime.control_wcet_us = snapshot.runtime.control_wcet_us;
+      runtime.uart_wcet_us = snapshot.runtime.uart_wcet_us;
+      runtime.control_deadline_misses = snapshot.runtime.control_deadline_misses;
+      runtime.uart_deadline_misses = snapshot.runtime.uart_deadline_misses;
+      runtime.control_min_stack_words = snapshot.runtime.control_min_stack_words;
+      runtime.uart_min_stack_words = snapshot.runtime.uart_min_stack_words;
+      runtime.stack_overflow_count = snapshot.runtime.stack_overflow_count;
+      runtime.watchdog_missed_windows = snapshot.runtime.watchdog_missed_windows;
+      runtime.uart_rx_dma_errors = snapshot.runtime.uart_rx_dma_errors;
+      runtime.uart_tx_drops = snapshot.runtime.uart_tx_drops;
+      runtime_pub_->publish(runtime);
+      published_runtime_generation_ = snapshot.runtime_generation;
+    }
+
     updater_.force_update();
   }
 
@@ -1295,12 +1375,17 @@ private:
     const auto now = get_clock()->now().nanoseconds();
     const auto steady = steady_now_ns();
     const auto snapshot = snapshot_state();
-    const auto last_arrival = last_imu_arrival_ros_ns_.load();
-    const double imu_age_ms = last_arrival > 0 ? (now - last_arrival) * 1e-6 : INFINITY;
+    const auto last_arrival = last_imu_arrival_steady_ns_.load();
+    const double imu_age_ms = last_arrival > 0 ?
+      (steady - last_arrival) * 1e-6 : INFINITY;
+    const auto stamp = last_imu_stamp_ros_ns_.load();
+    const double imu_transport_ms = stamp > 0 ? (now - stamp) * 1e-6 : INFINITY;
     const double board_status_age_ms = snapshot.last_status_ns > 0 ?
       (steady - snapshot.last_status_ns) * 1e-6 : INFINITY;
     const bool connected = connected_.load();
     const bool imu_fresh = imu_age_ms <= 50.0;
+    const bool imu_timestamp_valid =
+      imu_transport_ms >= 0.0 && imu_transport_ms <= 50.0;
     const bool status_fresh = connected && snapshot.have_status && !snapshot.semantic_fault &&
       board_status_age_ms <= heartbeat_timeout_ms_;
     const double command_age_ms = snapshot.last_command_ns > 0 ?
@@ -1315,7 +1400,7 @@ private:
       (snapshot.board.flags & kStatusFlagFailsafe) != 0U;
     const bool rearm_required =
       snapshot.command_valid && snapshot.command_armed && !snapshot.arm_authorized;
-    const bool healthy = connected && imu_fresh && status_fresh && session_ok &&
+    const bool healthy = connected && imu_fresh && imu_timestamp_valid && status_fresh && session_ok &&
       !board_failsafe && snapshot.publisher_gate && snapshot.command_valid && command_fresh &&
       !rearm_required;
 
@@ -1329,7 +1414,9 @@ private:
       (!session_ok ? "disabled handshake has not been applied by this session" :
       (rearm_required ? "fresh disarm and newer arm generation required" :
       (board_failsafe ? "board reports failsafe" :
-      (!imu_fresh ? "no fresh frame-4 IMU" : "command ACK and IMU healthy"))))))))));
+      (!imu_fresh ? "no fresh frame-4 IMU" :
+      (!imu_timestamp_valid ? "IMU timestamp is outside the current ROS clock epoch" :
+      "command ACK and IMU healthy")))))))))));
     status.summary(
       healthy ? diagnostic_msgs::msg::DiagnosticStatus::OK :
       diagnostic_msgs::msg::DiagnosticStatus::WARN,
@@ -1342,20 +1429,24 @@ private:
     status.add("imu_invalid_flags", imu_invalid_flags_.load());
     status.add("imu_duplicate_or_backwards", imu_duplicate_or_backwards_.load());
     status.add("imu_time_errors", imu_time_errors_.load());
+    status.add("ros_clock_discontinuities", ros_clock_discontinuities_.load());
     status.add("imu_age_ms", imu_age_ms);
-    const auto stamp = last_imu_stamp_ros_ns_.load();
-    status.add("imu_transport_ms", stamp > 0 ? (now - stamp) * 1e-6 : INFINITY);
+    status.add("imu_timestamp_valid", imu_timestamp_valid);
+    status.add("imu_transport_ms", imu_transport_ms);
     double imu_rate_hz = 0.0;
-    if (imu_publish_times_.size() >= 2U) {
-      imu_rate_hz = static_cast<double>(imu_publish_times_.size() - 1U) * 1e9 /
-        static_cast<double>(imu_publish_times_.back() - imu_publish_times_.front());
-    }
     double p95_ms = INFINITY;
-    if (!imu_transport_ms_.empty()) {
-      auto sorted = std::vector<double>(imu_transport_ms_.begin(), imu_transport_ms_.end());
-      const auto index = static_cast<std::size_t>(std::ceil(0.95 * sorted.size())) - 1U;
-      std::nth_element(sorted.begin(), sorted.begin() + index, sorted.end());
-      p95_ms = sorted[index];
+    {
+      std::lock_guard<std::mutex> lock(imu_statistics_mutex_);
+      if (imu_publish_times_.size() >= 2U) {
+        imu_rate_hz = static_cast<double>(imu_publish_times_.size() - 1U) * 1e9 /
+          static_cast<double>(imu_publish_times_.back() - imu_publish_times_.front());
+      }
+      if (!imu_transport_ms_.empty()) {
+        auto sorted = std::vector<double>(imu_transport_ms_.begin(), imu_transport_ms_.end());
+        const auto index = static_cast<std::size_t>(std::ceil(0.95 * sorted.size())) - 1U;
+        std::nth_element(sorted.begin(), sorted.begin() + index, sorted.end());
+        p95_ms = sorted[index];
+      }
     }
     status.add("imu_rate_hz", imu_rate_hz);
     status.add("imu_transport_p95_ms", p95_ms);
@@ -1366,6 +1457,13 @@ private:
     status.add("board_status_crc_errors", status_crc_errors_.load());
     status.add("board_status_semantic_errors", status_semantic_errors_.load());
     status.add("board_status_age_ms", board_status_age_ms);
+    status.add("board_runtime_frames", snapshot.runtime_generation);
+    status.add("board_runtime_crc_errors", runtime_crc_errors_.load());
+    status.add("board_cpu_idle_permille", snapshot.runtime.cpu_idle_permille);
+    status.add("board_control_wcet_us", snapshot.runtime.control_wcet_us);
+    status.add("board_uart_wcet_us", snapshot.runtime.uart_wcet_us);
+    status.add("board_control_deadline_misses", snapshot.runtime.control_deadline_misses);
+    status.add("board_uart_deadline_misses", snapshot.runtime.uart_deadline_misses);
     status.add("board_reset_events", board_reset_events_.load());
     status.add("session_rotations", session_rotations_.load());
     status.add("ack_fault_events", ack_fault_events_.load());
@@ -1433,8 +1531,10 @@ private:
 
   mutable std::mutex state_mutex_;
   BoardStatusFrame latest_status_{};
+  RuntimeFrame latest_runtime_{};
   std::array<std::int16_t, kThrusterChannels> command_offsets_{};
   bool have_status_{false};
+  bool have_runtime_{false};
   bool status_semantic_fault_{false};
   bool heartbeat_timeout_latched_{false};
   bool have_boot_identity_{false};
@@ -1444,6 +1544,9 @@ private:
   std::uint32_t last_identity_tick_{0U};
   std::uint32_t link_boot_id_{0U};
   std::int64_t last_status_ns_{0};
+  std::int64_t last_runtime_ns_{0};
+  std::uint64_t runtime_generation_{0U};
+  std::uint64_t published_runtime_generation_{0U};
 
   std::uint32_t session_id_{0U};
   std::uint32_t command_sequence_{0U};
@@ -1480,18 +1583,25 @@ private:
   bool outbound_notification_posted_{false};
 
   boost::lockfree::spsc_queue<QueuedImu, boost::lockfree::capacity<256>> imu_queue_;
+  std::thread imu_publish_thread_;
+  std::mutex imu_queue_wait_mutex_;
+  std::condition_variable imu_queue_cv_;
+  std::mutex imu_statistics_mutex_;
   std::deque<std::int64_t> imu_publish_times_;
   std::deque<double> imu_transport_ms_;
   std::atomic<bool> connected_{false};
   std::atomic<bool> shutting_down_{false};
+  std::atomic<bool> imu_publish_stop_{false};
   std::atomic<bool> authority_refresh_requested_{true};
   std::atomic<std::uint64_t> link_generation_{0U};
-  std::atomic<std::int64_t> last_imu_arrival_ros_ns_{0}, last_imu_stamp_ros_ns_{0};
+  std::atomic<std::int64_t> last_imu_arrival_steady_ns_{0}, last_imu_stamp_ros_ns_{0};
   std::atomic<std::uint64_t> imu_frames_{0U}, imu_sequence_gaps_{0U}, imu_crc_errors_{0U};
   std::atomic<std::uint64_t> imu_duplicate_or_backwards_{0U}, imu_time_errors_{0U};
+  std::atomic<std::uint64_t> ros_clock_discontinuities_{0U};
   std::atomic<std::uint64_t> imu_version_errors_{0U}, imu_invalid_flags_{0U};
   std::atomic<std::uint64_t> imu_queue_overflows_{0U}, imu_stale_generation_drops_{0U};
   std::atomic<std::uint64_t> status_frames_{0U}, status_crc_errors_{0U};
+  std::atomic<std::uint64_t> runtime_crc_errors_{0U};
   std::atomic<std::uint64_t> status_semantic_errors_{0U}, board_reset_events_{0U};
   std::atomic<std::uint64_t> session_rotations_{0U}, ack_fault_events_{0U};
   std::atomic<std::uint64_t> invalid_command_events_{0U}, command_timeout_events_{0U};
@@ -1499,8 +1609,9 @@ private:
 
   rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_pub_;
   rclcpp::Publisher<robotcore_interfaces::msg::BoardStatus>::SharedPtr status_pub_;
+  rclcpp::Publisher<robotcore_interfaces::msg::BoardRuntime>::SharedPtr runtime_pub_;
   rclcpp::Subscription<robotcore_interfaces::msg::ThrusterCommand>::SharedPtr command_sub_;
-  rclcpp::TimerBase::SharedPtr command_timer_, status_timer_, imu_drain_timer_;
+  rclcpp::TimerBase::SharedPtr command_timer_, status_timer_;
   diagnostic_updater::Updater updater_;
 };
 }  // namespace robotcore_hardware

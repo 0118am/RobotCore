@@ -10,11 +10,8 @@ required_topics=(
   "${imu_topic}"
   "${front_camera_topic}"
   /robot/body_state
-  /robot/arm_state
   /control/thruster_cmd
-  /control/arm_cmd
   /policy/body/status
-  /policy/arm/status
   /safety/events
 )
 

@@ -50,23 +50,28 @@ acceleration, and a validity flag. The bridge publishes only valid samples as
 `/hardware/aboard_imu_raw`; invalid or stale values are not fabricated into a
 60 Hz stream.
 
-The Status panel's **IMU Calibration** action is the only trigger for the
-conditioning node's stationary gyro-bias calibration; the node then publishes
-`/sensors/external_imu`, whose acceleration is referenced to the level,
-stationary startup mean for operator display and logging. The parallel
-`/sensors/external_imu_specific_force` topic preserves the expected gravity
-vector for the ESKF. This startup calibration uses the configured rigid IMU
-mounting and does not require VIO, a camera, or AprilTags.
+Frame 5 is a separate 2 Hz runtime-budget channel. The bridge publishes it as
+`/hardware/board_runtime`, including MCU CPU idle, control/UART WCET and
+deadline misses, stack margins, watchdog misses, and UART error/drop counters.
+It is diagnostic-only and cannot alter command or safety state.
+
+The conditioning node reloads the persistent file once on every service start
+without redefining zero. The Status panel's **IMU Calibration** action can
+repeat a stationary bias reset whenever drift is observed. During collection
+the previous correction remains active and IMU publication continues.
+`/sensors/external_imu` is the only corrected output: it preserves the expected
+gravity vector, uses `base_link`, and is shared by the ESKF and browser. The
+reset uses the configured rigid IMU mounting and does not require VIO, a camera,
+or AprilTags.
 
 The fixed-rate state chain is:
 
 ```text
-AprilTag absolute map pose
-             + ZED VIO pose and linear velocity
-             -> /localization/aligned_vio_odom
-             + calibrated UART8 angular velocity
-             -> 30 Hz /localization/fused_odom
-             -> 30 Hz /robot/body_state
+AprilTag absolute pose ----\
+ZED VIO pose + velocity ----> fixed-lag ESKF
+external IMU 100 Hz -------/       |
+                             60 Hz /localization/fused_odom
+                             60 Hz /robot/body_state
 ```
 
 ZED X Mini uses one fixed 30 Hz clock for camera grab/VIO and AprilTag image
@@ -120,19 +125,16 @@ The normal edge command needs no IMU argument:
 ```bash
 ros2 launch robotcore_bringup robotcore_edge_system.launch.py \
   serial_port:=/dev/ttyACM0 \
-  manual_thruster_span_us:=100
+  manual_thruster_span_us:=500
 ```
 
 Validate all estimator inputs after launch:
 
 ```bash
-ros2 topic info /zedx/zed_node/imu/data -v
-ros2 topic echo /zedx/zed_node/imu/data --once
 ros2 topic hz /zedx/zed_node/odom
 ros2 topic echo /localization/external_imu_ready --once
 ros2 topic hz /hardware/aboard_imu_raw
 ros2 topic hz /sensors/external_imu
-ros2 topic hz /sensors/external_imu_specific_force
 ros2 topic hz /localization/fused_odom
 ros2 topic hz /robot/body_state
 ros2 topic echo /localization/status --once
@@ -140,7 +142,7 @@ ros2 topic delay /localization/zed_odom
 ros2 topic delay /localization/apriltag/detections
 ```
 
-Record the startup-zeroed IMU stream directly with rosbag:
+Record the corrected stream directly with rosbag:
 
 ```bash
 ros2 bag record -o calibrated_imu_bag \
@@ -148,9 +150,9 @@ ros2 bag record -o calibrated_imu_bag \
   /localization/external_imu_ready
 ```
 
-Start recording before or after pressing **Calibrate**. The conditioner does
-not publish `/sensors/external_imu` until calibration succeeds, so all IMU
-messages in this bag use the calibrated startup baseline.
+Recording can start before or after pressing **Calibrate**. IMU publication
+continues during manual reset with the previous correction, then atomically
+switches to the newly measured bias after the stationary sample gate succeeds.
 
 ## Aboard Confirmation Items
 

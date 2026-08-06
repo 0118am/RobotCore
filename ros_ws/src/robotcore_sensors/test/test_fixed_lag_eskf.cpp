@@ -117,3 +117,44 @@ TEST(FixedLagEskf, FreshnessAdvancesOnlyForAcceptedNewerMeasurements)
   EXPECT_EQ(freshness.stamp_ns, 1000);
   EXPECT_EQ(freshness.arrival_ns, 1100);
 }
+
+TEST(FixedLagEskf, DetectsWallClockStepsButNotNormalElapsedTime)
+{
+  robotcore_sensors::RosClockOffsetJumpDetector detector;
+  EXPECT_FALSE(detector.update(2000000000LL, 1000000000LL));
+  EXPECT_FALSE(detector.update(2010000000LL, 1010000000LL));
+  EXPECT_TRUE(detector.update(5602010000000LL, 1020000000LL));
+  EXPECT_FALSE(detector.update(5602020000000LL, 1030000000LL));
+  EXPECT_TRUE(detector.update(1040000000LL, 1040000000LL));
+}
+
+TEST(FixedLagEskf, IgnoresSmallClockSlewBelowJumpThreshold)
+{
+  robotcore_sensors::RosClockOffsetJumpDetector detector;
+  EXPECT_FALSE(detector.update(2000000000LL, 1000000000LL));
+  EXPECT_FALSE(detector.update(2060000000LL, 1010000000LL));
+  EXPECT_FALSE(detector.update(2120000000LL, 1020000000LL));
+}
+
+TEST(FixedLagEskf, RejectsMeasurementsFromAnotherWallClockEpoch)
+{
+  EXPECT_TRUE(robotcore_sensors::timestamp_in_current_epoch(
+    10000000000LL, 10050000000LL));
+  EXPECT_FALSE(robotcore_sensors::timestamp_in_current_epoch(
+    10000000000LL, 1340600000000LL));
+  EXPECT_FALSE(robotcore_sensors::timestamp_in_current_epoch(
+    1340600000000LL, 10000000000LL));
+}
+
+TEST(FixedLagEskf, VioBridgeRecoversAStaleFilterEvenWhenImuArrivalsAreFresh)
+{
+  constexpr std::int64_t state_stamp = 1000000000LL;
+  EXPECT_FALSE(robotcore_sensors::vio_bridge_required(
+    true, state_stamp + 200000000LL, state_stamp));
+  EXPECT_TRUE(robotcore_sensors::vio_bridge_required(
+    true, state_stamp + 200000001LL, state_stamp));
+  EXPECT_TRUE(robotcore_sensors::vio_bridge_required(
+    false, state_stamp + 10000000LL, state_stamp));
+  EXPECT_FALSE(robotcore_sensors::vio_bridge_required(
+    false, state_stamp, state_stamp));
+}
