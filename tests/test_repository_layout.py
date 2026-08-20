@@ -51,25 +51,35 @@ def test_apriltag_map_has_one_json_authority():
 
 def test_apriltag_localizer_publishes_one_quality_gated_absolute_measurement():
     localization = (CORE_ROOT / "ros_ws/src/robotcore_sensors/src/apriltag_map_localizer_component.cpp").read_text()
-    fusion = (CORE_ROOT / "ros_ws/src/robotcore_sensors/src/fixed_lag_eskf_component.cpp").read_text()
+    fusion = (CORE_ROOT / "ros_ws/src/robotcore_sensors/src/vio_tag_fusion_component.cpp").read_text()
     edge_launch = (
         CORE_ROOT / "ros_ws/src/robotcore_bringup/launch/robotcore_edge_system.launch.py"
     ).read_text(encoding="utf-8")
 
-    assert '"minimum_pose_tag_count", 3' in localization
+    assert '"minimum_pose_tag_count", 1' in localization
     assert '"minimum_inlier_corners_per_tag", 3' in localization
-    assert '"minimum_pose_tag_count": 3' in edge_launch
+    assert '"minimum_pose_tag_count": 1' in edge_launch
+    assert '"single_tag_max_reprojection_rms_px", 1.5' in localization
+    assert '"single_tag_max_reprojection_rms_px": 1.5' in edge_launch
+    assert "inliers = (cv::Mat_<int>(4, 1) << 0, 1, 2, 3)" in localization
+    assert "independently_supported_tag_indices(" in localization
+    assert "estimate.inlier_tag_count < min_tags_" in localization
+    assert "cv::solvePnPRefineLM" in localization
+    assert "single_tag_reference_edge_px_ / minimum_edge" in localization
     assert "estimate_pub_->publish(estimate)" in localization
     assert "solvePnPRansac" in localization
+    assert "cv::SOLVEPNP_IPPE" in localization
+    assert "empty_map_state_published_" not in localization
+    assert "if (tags_.empty())" not in localization
     assert '"/localization/apriltag_pose_degraded"' not in localization
     assert "aligned_vio" not in localization
-    assert "MeasurementSource::Tag" in fusion
-    assert "filter_.update_pose(" in fusion
+    assert "sample_at(tag_stamp_ns)" in fusion
+    assert "update_alignment(candidate" in fusion
 
 
-def test_apriltag_reprojection_and_eskf_innovation_gates_are_explicit_in_cpp():
+def test_apriltag_reprojection_and_alignment_innovation_gates_are_explicit_in_cpp():
     localization = (CORE_ROOT / "ros_ws/src/robotcore_sensors/src/apriltag_map_localizer_component.cpp").read_text()
-    fusion = (CORE_ROOT / "ros_ws/src/robotcore_sensors/src/fixed_lag_eskf_component.cpp").read_text()
+    fusion = (CORE_ROOT / "ros_ws/src/robotcore_sensors/src/vio_tag_fusion_component.cpp").read_text()
     edge_launch = (
         CORE_ROOT / "ros_ws/src/robotcore_bringup/launch/robotcore_edge_system.launch.py"
     ).read_text(encoding="utf-8")
@@ -81,8 +91,16 @@ def test_apriltag_reprojection_and_eskf_innovation_gates_are_explicit_in_cpp():
     assert '"multi_tag_position_stddev_m": 0.05' in edge_launch
     assert "max_translation_jump_m" not in localization
     assert "max_translation_jump_m" not in edge_launch
-    assert "measurement.source == MeasurementSource::Vio" in fusion
+    assert '"tag_innovation_gate_m", 0.50' in fusion
+    assert "last_tag_translation_residual_ > tag_innovation_gate_m_" in fusion
     assert "++tag_gate_rejections_" in fusion
+    assert '"use_vio"' not in edge_launch
+    assert '"vio_arrival_timeout_s": 0.30' in edge_launch
+    assert '"vio_prediction_horizon_s": 0.50' in edge_launch
+    assert 'plugin="robotcore_sensors::VioTagFusionComponent"' in edge_launch
+    assert "continuous_rejection_reanchor_required(" not in fusion
+    assert "replay_from(" not in fusion
+    assert "vio_reanchors" not in fusion
 
 
 def test_apriltag_relocalize_is_folded_into_the_single_estimate_stream():
@@ -90,7 +108,7 @@ def test_apriltag_relocalize_is_folded_into_the_single_estimate_stream():
         CORE_ROOT / "ros_ws/src/robotcore_sensors/src/apriltag_map_localizer_component.cpp"
     ).read_text(encoding="utf-8")
     fusion = (
-        CORE_ROOT / "ros_ws/src/robotcore_sensors/src/fixed_lag_eskf_component.cpp"
+        CORE_ROOT / "ros_ws/src/robotcore_sensors/src/vio_tag_fusion_component.cpp"
     ).read_text(encoding="utf-8")
 
     assert localization.count("++map_generation_") == 1
@@ -116,6 +134,7 @@ def test_camera_extrinsic_has_one_tf_authority():
     ).read_text(encoding="utf-8")
 
     assert "lookupTransform(base_frame_, camera_frame_, tf2::TimePointZero)" in localization
+    assert "camera_ready_ && camera_extrinsic_ready_" in localization
     assert "base_to_camera_translation_m" not in localization
     assert "base_to_camera_optical_rpy_rad" not in localization
     assert "base_to_front_camera_optical" not in edge_launch
@@ -137,7 +156,9 @@ def test_apriltag_image_path_is_bounded_and_localizer_consumes_only_detections()
     assert "sensor_msgs/msg/image" not in localization
     assert "SensorDataQoS().keep_last(1)" in localization
     assert "pub_resolution: CUSTOM" in camera_config
-    assert "pub_downscale_factor: 2.0" in camera_config
+    assert "grab_resolution: SVGA" in camera_config
+    assert "pub_downscale_factor: 1.0" in camera_config
+    assert "publish_imu: false" in camera_config
     assert "enable_24bit_output: true" in camera_config
     assert 'default_value="/zedx/zed_node/rgb/color/rect/image"' in edge_launch
     assert 'default_value="/zedx/zed_node/rgb/color/rect/image/compressed"' in edge_launch
@@ -181,7 +202,7 @@ def test_web_bridge_consumes_robot_core_contract_without_owning_devices_or_maps(
     assert "ROBOTCORE_WORKSPACE" in robot_unit
     assert "SupplementaryGroups=robotops video render dialout" in robot_unit
     assert "CONTROL_INTERFACE_WORKSPACE" in web_unit
-    assert "imu_topic:=/sensors/external_imu" in web_unit
+    assert "imu_topic:=" not in web_unit
     assert "dialout" not in web_unit
     assert "exec ros2 launch zed_wrapper zed_camera.launch.py" in edge_launch
     assert 'LaunchConfiguration("zed_serial_number")' in edge_launch
@@ -225,6 +246,13 @@ def test_only_production_aboard_bridge_uses_protocol_v2():
     assert "build_command_v2" in bridge
     assert "parse_board_status_v2" in bridge
     assert "uint8 protocol_version" in board_status
+    assert "bool imu_gyro_calibration_active" in board_status
+    assert "bool imu_gyro_calibration_succeeded" in board_status
+    assert "bool imu_gyro_calibration_failed" in board_status
+    assert "status.imu_gyro_calibration_active" in bridge
+    assert "status.imu_gyro_calibration_succeeded" in bridge
+    assert "status.imu_gyro_calibration_failed" in bridge
+    assert '"/hardware/aboard/calibrate_gyro"' in bridge
     assert "forced_stop" not in board_status
     assert "estop_active" not in board_status
     assert "firmware_version" not in board_status
@@ -239,13 +267,15 @@ def test_only_production_aboard_bridge_uses_protocol_v2():
     assert "kMinimumReportedPwmUs = 1000U" in bridge
     assert "kMaximumReportedPwmUs = 2000U" in bridge
     assert "message->normalized[i]) * span_us_" in bridge
+    assert "diagnostic_timer_ = create_wall_timer(1s" in bridge
+    assert bridge.count("updater_.force_update()") == 1
 
 
 def test_pool_bottom_frame_has_no_unvalidated_depth_sensor_path():
     body_state = (CORE_ROOT / "ros_ws/src/robotcore_interfaces/msg/BodyState.msg").read_text(
         encoding="utf-8"
     )
-    fusion = (CORE_ROOT / "ros_ws/src/robotcore_sensors/src/fixed_lag_eskf_component.cpp").read_text(
+    fusion = (CORE_ROOT / "ros_ws/src/robotcore_sensors/src/vio_tag_fusion_component.cpp").read_text(
         encoding="utf-8"
     )
 
@@ -253,6 +283,28 @@ def test_pool_bottom_frame_has_no_unvalidated_depth_sensor_path():
     assert "altitude_m" not in body_state
     assert "depth_input_topic" not in fusion
     assert "altitude_input_topic" not in fusion
+
+
+def test_operator_telemetry_uses_canonical_body_and_imu_topics():
+    conditioner = (
+        CORE_ROOT / "ros_ws/src/robotcore_sensors/src/imu_conditioner_component.cpp"
+    ).read_text(encoding="utf-8")
+    fusion = (
+        CORE_ROOT / "ros_ws/src/robotcore_sensors/src/vio_tag_fusion_component.cpp"
+    ).read_text(encoding="utf-8")
+    authority = (
+        CORE_ROOT / "ros_ws/src/robotcore_control_cpp/src/command_authority_node.cpp"
+    ).read_text(encoding="utf-8")
+    web = (
+        WEB_ROOT / "control_interface/control_interface/web_operator_node.py"
+    ).read_text(encoding="utf-8")
+
+    assert '"/ui/external_imu"' not in conditioner
+    assert '"/ui/body_state"' not in fusion
+    assert '"ui_command_topic", "/ui/thruster_cmd"' in authority
+    assert 'self.declare_parameter("body_topic", "/robot/body_state")' in web
+    assert 'self.declare_parameter("imu_topic", "/sensors/external_imu")' in web
+    assert 'self.declare_parameter("thruster_command_topic", "/ui/thruster_cmd")' in web
 
 
 def test_cpp_localization_has_no_uninstalled_python_shadow_implementation():

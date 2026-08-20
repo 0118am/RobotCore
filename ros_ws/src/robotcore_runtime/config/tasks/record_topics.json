@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "topics": [
+    "/robot/body_state",
+    "/runtime/trajectory_target",
+    "/runtime/tracking_status",
+    "/control/pid/wrench",
+    "/control/candidates/pid",
+    "/control/pid/status",
+    "/control/authority/status",
+    "/control/thruster_cmd",
+    "/hardware/board_status",
+    "/hardware/board_runtime",
+    "/localization/apriltag_pose",
+    "/localization/fused_odom",
+    "/localization/status",
+    "/safety/events",
+    "/sensors/external_imu",
+    "/tf",
+    "/tf_static"
+  ]
+}

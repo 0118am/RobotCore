@@ -4,8 +4,15 @@
 runtime, sensors, localization, control, hardware transport, models,
 host operations, diagnostics, and AprilTag configuration.
 The browser project lives separately in [`../ControlInterface`](../ControlInterface/README.md).
-The sole A-board firmware source is the sibling `../aquaboard` repository; this
+The sole Aquaboard firmware source is the sibling `../aquaboard` repository; this
 repository intentionally contains no second actuator protocol implementation.
+
+Naming and ownership are authoritative: `Aboard` is the hardware brand,
+`Aquaboard` is the embedded controller product, and stable ROS identifiers use
+the `aboard` brand prefix. AprilTag map parsing, joint PnP, quality gating, pose
+publication, and VIO/AprilTag map-alignment fusion are built and launched from this repository.
+Only the upstream GPU image conversion and tag detection stages come from
+Isaac ROS.
 
 ## Layout
 
@@ -70,13 +77,14 @@ ros2 launch robotcore_bringup robotcore_edge_system.launch.py \
 Build and source only `RobotCore/ros_ws/{build,install,log}` for this workflow.
 Running `colcon build` from the `RobotCore` repository root creates a second,
 stale-prone install space that the manual launch does not use. The ZED launcher
-starts the fixed camera directly; no second camera command or A-board IMU gate
+starts the fixed camera directly; no second camera command or Aquaboard IMU gate
 is required.
 
-The normal edge launch keeps the fail-closed pool PID/tracking graph disabled.
-Use the dedicated `robotcore_pool_pid_control.launch.py` workflow, or pass
-`enable_pool_tracking:=true` only after the measured pool/PID configurations
-have been approved.
+The normal validation-vehicle edge launch starts the PID/tracking processes
+against the confirmed thruster model and pool envelope. Authority,
+localisation freshness, target validity and explicit operator Arm remain
+independent fail-closed gates. Pass `enable_pool_tracking:=false` for a
+sensor/manual-only deployment.
 
 Detailed operating contracts are in [docs/PROJECT_GUIDE.md](docs/PROJECT_GUIDE.md).
 The measured architecture/performance review and C++ rewrite thresholds are in

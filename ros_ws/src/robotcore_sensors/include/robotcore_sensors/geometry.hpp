@@ -56,4 +56,5 @@ inline Eigen::Isometry3d blend_transform(
   output.linear() = Eigen::Quaterniond(a.linear()).slerp(alpha, Eigen::Quaterniond(b.linear())).normalized().toRotationMatrix();
   return output;
 }
+
 }  // namespace robotcore_sensors

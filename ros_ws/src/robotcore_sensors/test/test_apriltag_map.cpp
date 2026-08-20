@@ -34,13 +34,6 @@ nlohmann::json synthetic_valid_map()
 }
 }  // namespace
 
-TEST(AprilTagMap, EmptyMeasuredMapIsAValidFailClosedState)
-{
-  const auto tags = robotcore_sensors::parse_apriltag_map(
-    empty_map(), "map", robotcore_sensors::CuboidPoolGeometry{});
-  EXPECT_TRUE(tags.empty());
-}
-
 TEST(AprilTagMap, ExplicitMeasuredSizesAndPoolSurfacesAreAccepted)
 {
   const auto tags = robotcore_sensors::parse_apriltag_map(
@@ -117,4 +110,60 @@ TEST(AprilTagMap, DeployedSurveyCanBeValidatedExplicitly)
   const auto tags = robotcore_sensors::parse_apriltag_map(
     document, "map", robotcore_sensors::CuboidPoolGeometry{});
   EXPECT_FALSE(tags.empty()) << "deployed survey must contain measured Tags";
+}
+
+TEST(AprilTagQuality, AcceptsLargeConvexObservationsAndRanksLessObliqueTagsFirst)
+{
+  const std::array<Eigen::Vector2d, 4> square{
+    Eigen::Vector2d(100.0, 100.0), Eigen::Vector2d(160.0, 100.0),
+    Eigen::Vector2d(160.0, 160.0), Eigen::Vector2d(100.0, 160.0)};
+  const std::array<Eigen::Vector2d, 4> oblique{
+    Eigen::Vector2d(100.0, 100.0), Eigen::Vector2d(160.0, 104.0),
+    Eigen::Vector2d(150.0, 132.0), Eigen::Vector2d(105.0, 130.0)};
+  const auto square_quality = robotcore_sensors::assess_tag_image_quality(
+    square, 960U, 600U, 20.0, 2.5);
+  const auto oblique_quality = robotcore_sensors::assess_tag_image_quality(
+    oblique, 960U, 600U, 20.0, 2.5);
+  ASSERT_TRUE(square_quality.accepted);
+  ASSERT_TRUE(oblique_quality.accepted);
+  EXPECT_GT(square_quality.score, oblique_quality.score);
+  EXPECT_DOUBLE_EQ(square_quality.minimum_edge_px, 60.0);
+}
+
+TEST(AprilTagQuality, RejectsSmallNonConvexAndOutOfFrameObservations)
+{
+  const std::array<Eigen::Vector2d, 4> small{
+    Eigen::Vector2d(100.0, 100.0), Eigen::Vector2d(110.0, 100.0),
+    Eigen::Vector2d(110.0, 110.0), Eigen::Vector2d(100.0, 110.0)};
+  const std::array<Eigen::Vector2d, 4> nonconvex{
+    Eigen::Vector2d(100.0, 100.0), Eigen::Vector2d(160.0, 100.0),
+    Eigen::Vector2d(120.0, 120.0), Eigen::Vector2d(100.0, 160.0)};
+  auto out_of_frame = small;
+  out_of_frame[0].x() = -1.0;
+  EXPECT_FALSE(robotcore_sensors::assess_tag_image_quality(
+    small, 960U, 600U, 20.0, 2.5).accepted);
+  EXPECT_FALSE(robotcore_sensors::assess_tag_image_quality(
+    nonconvex, 960U, 600U, 20.0, 2.5).accepted);
+  EXPECT_FALSE(robotcore_sensors::assess_tag_image_quality(
+    out_of_frame, 960U, 600U, 5.0, 2.5).accepted);
+}
+
+TEST(AprilTagInliers, KeepsEveryTagWithIndependentCornerSupport)
+{
+  const std::vector<int> point_inliers{
+    0, 1, 2, 3,
+    4, 5, 6,
+    8, 9,
+  };
+  const auto supported = robotcore_sensors::independently_supported_tag_indices(
+    point_inliers, 3U, 4U, 3);
+  EXPECT_EQ(supported, (std::vector<std::size_t>{0U, 1U}));
+}
+
+TEST(AprilTagInliers, IgnoresDuplicateAndOutOfRangePointIndices)
+{
+  const std::vector<int> point_inliers{0, 1, 1, 2, -1, 12};
+  const auto supported = robotcore_sensors::independently_supported_tag_indices(
+    point_inliers, 3U, 4U, 3);
+  EXPECT_EQ(supported, (std::vector<std::size_t>{0U}));
 }

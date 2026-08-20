@@ -11,20 +11,20 @@ ZED 960x600@30
   -> NITROS GPU BGR/RGB 转换
   -> Isaac ROS CUDA AprilTag
   -> C++ 多 Tag 地图 PnP
-  -> C++ fixed-lag ESKF @60 Hz
+  -> C++ map->odom 对齐更新
 
-A-board IMU @100 Hz -> C++ 条件化 ---------^
-ZED VIO @30 Hz      -> C++ 坐标适配 -------^
+ZED VIO @30 Hz -> C++ VIO/Tag fusion @60 Hz
+Aquaboard IMU @100 Hz -> C++ 条件化 -> 遥测
 
 BodyState @60 Hz
   -> Python 六自由度 PID/推进器分配 @60 Hz（显式启用 pool tracking 时）
   -> Python 单写者命令仲裁 @100 Hz
-  -> C++ A-board bridge @50 Hz
+  -> C++ Aquaboard bridge @50 Hz
   -> MCU PWM/watchdog
 ```
 
-图像格式转换和 AprilTag 检测留在 GPU；15 维 ESKF、6x8 推进器分配及安全状态机留在
-CPU。对这些小矩阵使用 GPU 会增加传输、同步和 kernel launch 延迟，不能提高实时性。
+图像格式转换和 AprilTag 检测留在 GPU；6 自由度地图对齐、6x8 推进器分配及安全状态机
+留在 CPU。对这些小矩阵使用 GPU 会增加传输、同步和 kernel launch 延迟。
 
 ## 理论吞吐与延迟下限
 
@@ -37,12 +37,12 @@ CPU。对这些小矩阵使用 GPU 会增加传输、同步和 kernel launch 延
 | IMU+状态同批上行 | 27 B + 48 B | 最坏连续串行时间 6.51 ms |
 | 上行 UART 占用 | IMU 100 Hz + 状态 20 Hz | 3660 B/s，占单向 11520 B/s 的 31.8% |
 | 下行 UART 占用 | 34 B 命令，50 Hz | 1700 B/s，占 14.8%；单帧串行时间 2.95 ms |
-| ESKF/BodyState | 60 Hz | 输出周期 16.67 ms |
+| VIO/Tag fusion、BodyState | 60 Hz | 输出周期 16.67 ms |
 | PID | 60 Hz | 调度相位最多 16.67 ms |
 | 命令仲裁 | 100 Hz | 调度相位最多 10 ms |
-| A-board 发送 | 50 Hz | 调度相位最多 20 ms |
+| Aquaboard 发送 | 50 Hz | 调度相位最多 20 ms |
 
-因此最高“有用”执行器命令频率是 50 Hz。提高 Python PID 或仲裁频率不能越过 A-board
+因此最高“有用”执行器命令频率是 50 Hz。提高 Python PID 或仲裁频率不能越过 Aquaboard
 50 Hz 边界；仲裁保持 100 Hz 的价值是每个硬件发送周期至少检查两次新鲜度和安全状态。
 
 从一条已经发布的 `BodyState` 到命令完成串行发送，理想相位约为计算时间加 2.95 ms；
@@ -62,8 +62,7 @@ Python ZED 子进程启动器。连同只验证旧实现的测试，共减少约
 
 - `apriltag_localization_node`
 - `imu_conditioning_node`
-- `zed_odometry_adapter_node`
-- `fixed_lag_eskf_node`
+- `vio_tag_fusion_node`
 
 注意：colcon 增量安装不会自动删除已经取消的 console script。部署升级必须使用干净的
 包安装空间或显式核对 `ros2 pkg executables robotcore_runtime`，不能继续使用仓库根目录下
@@ -87,10 +86,10 @@ Python ZED 子进程启动器。连同只验证旧实现的测试，共减少约
 
 现场逐进程采样显示，在 PID/池边界配置仍为 fail-closed 时，四个无法产生控制输出的节点
 仍合计占约 52% 单核：PID 22.7%、tracking experiment 11.1%、trajectory 9.3%、tracking
-monitor 8.8%。edge launch 现增加 `enable_pool_tracking:=false` 默认门；手动控制、定位、安全
-和 A-board 保持运行，只有完成池参数测量后才显式启动自动跟踪图。
+monitor 8.8%。该门在未完成池参数测量时使用 `enable_pool_tracking:=false`；验证机的推进器
+模型与池边界确认后默认启动自动跟踪进程，但仲裁、定位和目标新鲜度门仍保持 fail-closed。
 
-`command_authority` 的命令/安全检查保持 100 Hz，A-board 命令心跳为 50 Hz，
+`command_authority` 的命令/安全检查保持 100 Hz，Aquaboard 命令心跳为 50 Hz，
 重复 UI 状态独立降至 10 Hz。中位边沿立即发布；新鲜度、dead-man 和
 150 ms bridge timeout 保持不变。
 
@@ -154,18 +153,18 @@ launch Python。
 
 - 7 个 ROS 包 Release 构建成功，C++ 使用 `-O3` 和可用时 LTO。
 - Python/静态回归 95 项通过。
-- C++ 协议、IMU、地图、ESKF 共 31 项通过，无失败。
-- 隔离 CycloneDDS 域内的合成 VIO+100 Hz specific-force IMU+Tag 锚点闭环：
+- C++ 协议、IMU、地图与定位组件测试通过，无失败。
+- 隔离 CycloneDDS 域内的合成 VIO+Tag 锚点闭环：
   `fused_odom` 与 `BodyState` 各 336 条、59.998 Hz、时间戳严格递增、速度中值
   0.2500 m/s。
-- 生产 raw A-board IMU：100.00 Hz，累计 192,242 帧时序号缺口、CRC、版本、重复、
+- 生产 raw Aquaboard IMU：100.00 Hz，累计 192,242 帧时序号缺口、CRC、版本、重复、
   队列溢出均为 0，传输 p95 1.94 ms。
 - 生产 ZED odometry 约 30.00 Hz，CUDA AprilTag detections 约 29.85–30.00 Hz。
 - 8 核 Cortex-A78AE、15 GiB RAM；`nvpmodel -q` 显示 `MAXN_SUPER`。
 
 受执行沙箱限制，本次不能连接 systemd、ROS DDS 图或 NVIDIA 设备节点，也不能代替真机
 满载验收。以下仍以 `LOCALIZATION_CPP_ACCEPTANCE.md` 为准：IMU p95、Tag 融合 p95、
-60 Hz 持续频率、CUDA/ZED 满载、故障注入、绝对精度、漂移和 NIS/NEES。
+60 Hz 持续频率、CUDA/ZED 满载、故障注入、绝对精度和漂移。
 
 真机验证应同时记录：
 
@@ -175,18 +174,16 @@ ros2 topic hz /robot/body_state --window 200
 ros2 topic hz /control/thruster_cmd --window 200
 ```
 
-`robotcore_estimator_rate_check.py` 会主动发布合成 VIO/IMU/Tag，禁止在生产 DDS
-Domain 中运行。只能用隔离 Domain 配合 standalone ESKF 做逻辑回归，且必须使用
-与生产 launch 相同的唯一校正 IMU topic：
+`robotcore_estimator_rate_check.py` 会主动发布合成 VIO/Tag，禁止在生产 DDS
+Domain 中运行。只能用隔离 Domain 配合 standalone 融合节点做逻辑回归：
 
 ```bash
 export ROS_DOMAIN_ID=143 ROS_LOCALHOST_ONLY=1
-ros2 run robotcore_sensors fixed_lag_eskf_node --ros-args \
-  -p output_rate_hz:=60.0 \
-  -p imu_topic:=/sensors/external_imu
+ros2 run robotcore_sensors vio_tag_fusion_node --ros-args \
+  -p output_rate_hz:=60.0
 python3 scripts/robotcore_estimator_rate_check.py --duration 8
 ```
 
-再用 `ros2_tracing` 或等价时间戳探针测量：IMU采样→ESKF传播、图像时间戳→Tag融合、
+再用 `ros2_tracing` 或等价时间戳探针测量：VIO采样→融合发布、图像时间戳→Tag融合、
 BodyState→PID候选→仲裁→bridge dispatch。只有这些 p95/p99 数据能决定是否进入局部 C++
 迁移、事件驱动调度或 PREEMPT_RT/实时优先级阶段。

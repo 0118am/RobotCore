@@ -41,7 +41,7 @@ enables this by default). The daemon validates ranges, writes a temporary
 file, fsyncs it, and atomically replaces the managed map.
 `apriltag_localization_node` loads the map once at startup. Saved edits take
 effect only after the explicit Relocalize action reloads and validates the
-complete map; a failed reload preserves the last valid map.
+complete map.
 
 For a local maintenance entry, use:
 
@@ -56,18 +56,12 @@ To remove a definition, use the same managed path:
 robotcore-hostctl apriltag-delete --tag-id 12
 ```
 
-Deletion atomically writes the remaining map. An empty, valid map is also
-reloaded, so deleting the final tag removes it from
-localisation rather than retaining a stale layout.
-
-An empty map is a deliberate fail-closed state: the localizer clears the prior
-layout, resets map alignment, continues publishing detection counts/status, and
-publishes no absolute pose. A missing, malformed, wrong-frame, or geometrically
-invalid replacement is rejected and cannot overwrite the last valid in-memory
-revision.
+Deletion atomically writes the remaining map. A missing, malformed, wrong-frame,
+or geometrically invalid replacement is rejected and cannot overwrite the last
+valid in-memory revision.
 
 The repository does not provide a fallback map or synthesize coordinates. Each
-non-empty deployed revision must contain `schema_version: 1`, `frame: "map"`, a
+deployed revision must contain `schema_version: 1`, `frame: "map"`, a
 canonical unsigned ID, and an explicit measured `size_m` for every Tag. With
 cuboid validation enabled, every centre and black-square corner must lie on or
 inside the configured pool surfaces; face normals must point into the pool and

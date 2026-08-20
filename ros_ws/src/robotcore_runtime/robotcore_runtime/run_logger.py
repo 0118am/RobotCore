@@ -1,8 +1,7 @@
 """Run logger node.
 
-This node creates the acceptance-test run folder and writes lightweight JSONL
-records for events and command/status streams. rosbag2 recording can be added
-around the same run directory in a later phase.
+Each tracking task gets one run folder, one configuration snapshot, a compact
+JSONL summary, and one full-rate rosbag2 recording.
 """
 
 import json
@@ -10,13 +9,15 @@ import hashlib
 import math
 import os
 import shutil
+import signal
+import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
 
 from robotcore_interfaces.msg import (
@@ -29,6 +30,7 @@ from robotcore_interfaces.msg import (
     TrackingStatus,
     TrajectoryTarget,
 )
+from robotcore_interfaces.srv import StartRun, StopRun
 
 
 def finite_or_none(value):
@@ -48,10 +50,16 @@ class RunLogger(Node):
         self.declare_parameter(
             "thruster_config_path", "src/robotcore_control/config/real_pool_thrusters.yaml"
         )
-        self.declare_parameter("scenario_config_path", "src/robotcore_runtime/config/tracking_scenarios.yaml")
         self.declare_parameter(
             "safety_config_path", "src/robotcore_control/config/real_pool_safety.yaml"
         )
+        self.declare_parameter(
+            "task_config_dir", "src/robotcore_runtime/config/tasks"
+        )
+        self.declare_parameter(
+            "record_topics_path", "src/robotcore_runtime/config/tasks/record_topics.json"
+        )
+        self.declare_parameter("rosbag_executable", "/opt/ros/humble/bin/ros2")
         # JSONL is an operator-readable summary, not the full-rate transport
         # recording.  Bound repeated status streams here and leave lossless
         # capture to rosbag2 so logging cannot compete with control callbacks.
@@ -61,12 +69,11 @@ class RunLogger(Node):
         self.declare_parameter("authority_log_rate_hz", 10.0)
         self.declare_parameter("pid_log_rate_hz", 10.0)
         self.declare_parameter("flush_interval_s", 0.25)
-        root = Path(self.get_parameter("run_root").value)
-        self.run_dir = self.create_run_dir(root)
-        self.event_log_path = self.run_dir / "event_log.jsonl"
-        self.event_log_handle = self.event_log_path.open(
-            "a", encoding="utf-8", buffering=64 * 1024
-        )
+        self.run_root = Path(self.get_parameter("run_root").value)
+        self.run_dir: Path | None = None
+        self.event_log_handle = None
+        self.rosbag_process = None
+        self.rosbag_output_handle = None
         self.last_stream_log_ns = {}
         self.stream_log_rates = {
             "thruster_cmd": float(self.get_parameter("thruster_log_rate_hz").value),
@@ -84,7 +91,13 @@ class RunLogger(Node):
         self.last_localization_log_ns = 0
         # Policy nodes subscribe to this topic so all policy_io files land in
         # the same run folder without sharing process-local state.
-        self.run_dir_pub = self.create_publisher(String, "/runtime/run_dir", 10)
+        run_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.run_dir_pub = self.create_publisher(String, "/runtime/run_dir", run_qos)
         summary_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
@@ -117,31 +130,17 @@ class RunLogger(Node):
             self.on_localization_status,
             summary_qos,
         )
-        self.create_subscription(
-            String,
-            "/runtime/tracking_experiment/event",
-            self.on_tracking_experiment_event,
-            10,
-        )
-        self.snapshot_control_configs()
-
-        self.write_event(
-            "run_started",
-            {
-                "run_dir": str(self.run_dir),
-                "rosbag2_dir": str(self.run_dir / "rosbag2"),
-            },
-        )
-        self.get_logger().info(f"Run folder: {self.run_dir}")
+        self.create_service(StartRun, "/runtime/run/start", self.on_start_run)
+        self.create_service(StopRun, "/runtime/run/stop", self.on_stop_run)
         self.timer = self.create_timer(1.0, self.publish_run_dir)
         flush_interval = max(
             0.05, float(self.get_parameter("flush_interval_s").value)
         )
         self.flush_timer = self.create_timer(flush_interval, self.flush_event_log)
 
-    def create_run_dir(self, root):
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_dir = root / f"run_{stamp}"
+    def create_run_dir(self, root, task_name):
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        run_dir = root / f"run_{stamp}_{task_name}"
         # Keep the directory shape aligned with ACCEPTANCE.md from the first
         # commit so future tooling can rely on stable paths.
         for subdir in ["rosbag2", "policy_io", "captures", "configs"]:
@@ -158,9 +157,108 @@ class RunLogger(Node):
         )
         return run_dir
 
+    def on_start_run(self, request, response):
+        if self.event_log_handle is not None:
+            response.success = False
+            response.run_dir = str(self.run_dir)
+            response.message = "a tracking run is already active"
+            return response
+
+        self.run_dir = self.create_run_dir(self.run_root, request.task_name)
+        self.event_log_handle = (self.run_dir / "event_log.jsonl").open(
+            "a", encoding="utf-8", buffering=64 * 1024
+        )
+        self.snapshot_control_configs(request.task_name)
+        self.start_rosbag()
+        self.write_event(
+            "run_started",
+            {
+                "run_dir": str(self.run_dir),
+                "rosbag2_dir": str(self.run_dir / "rosbag2" / "tracking"),
+            },
+            flush=True,
+        )
+        self.write_event(
+            "tracking_experiment",
+            {
+                "phase": "start",
+                "scenario": request.task_name,
+                "controller": request.controller,
+                "duration_s": float(request.duration_s),
+                "success": True,
+                "message": "started",
+            },
+            flush=True,
+        )
+        self.publish_run_dir()
+        response.success = True
+        response.run_dir = str(self.run_dir)
+        response.message = "run directory and rosbag recording started"
+        self.get_logger().info(f"Run folder: {self.run_dir}")
+        return response
+
+    def on_stop_run(self, request, response):
+        run_dir = str(self.run_dir)
+        self.write_event(
+            "tracking_experiment",
+            {
+                "phase": "end",
+                "success": bool(request.success),
+                "message": request.message,
+            },
+            flush=True,
+        )
+        self.stop_rosbag()
+        self.event_log_handle.close()
+        self.event_log_handle = None
+        self.run_dir = None
+        response.accepted = True
+        response.run_dir = run_dir
+        response.message = "run log and rosbag recording stopped"
+        return response
+
+    def start_rosbag(self):
+        topic_document = json.loads(
+            Path(str(self.get_parameter("record_topics_path").value)).read_text(
+                encoding="utf-8"
+            )
+        )
+        output = self.run_dir / "rosbag2" / "tracking"
+        command = [
+            str(self.get_parameter("rosbag_executable").value),
+            "bag",
+            "record",
+            "--storage",
+            "sqlite3",
+            "--output",
+            str(output),
+            *[str(topic) for topic in topic_document["topics"]],
+        ]
+        self.rosbag_output_handle = (self.run_dir / "rosbag2.log").open(
+            "w", encoding="utf-8"
+        )
+        self.rosbag_process = subprocess.Popen(
+            command,
+            stdout=self.rosbag_output_handle,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        time.sleep(0.5)
+        if self.rosbag_process.poll() is not None:
+            raise RuntimeError("rosbag2 recorder exited during startup")
+
+    def stop_rosbag(self):
+        self.rosbag_process.send_signal(signal.SIGINT)
+        self.rosbag_process.wait(timeout=10.0)
+        self.rosbag_process = None
+        self.rosbag_output_handle.close()
+        self.rosbag_output_handle = None
+
     def write_event(self, event_type, payload, *, flush=False):
         # JSONL gives append-only logs that are easy to inspect during early
         # integration and easy to replay into richer tooling later.
+        if self.event_log_handle is None:
+            return
         record = {
             "time": self.get_clock().now().nanoseconds,
             "type": event_type,
@@ -187,9 +285,10 @@ class RunLogger(Node):
         return True
 
     def flush_event_log(self):
-        self.event_log_handle.flush()
+        if self.event_log_handle is not None:
+            self.event_log_handle.flush()
 
-    def snapshot_control_configs(self):
+    def snapshot_control_configs(self, task_name):
         """Copy exact control inputs into the immutable run snapshot folder."""
 
         destination = self.run_dir / "configs"
@@ -197,19 +296,23 @@ class RunLogger(Node):
         for parameter in (
             "pid_config_path",
             "thruster_config_path",
-            "scenario_config_path",
             "safety_config_path",
         ):
             source = Path(str(self.get_parameter(parameter).value))
             if source.is_file():
                 shutil.copy2(source, destination / source.name)
                 hashes[source.name] = hashlib.sha256(source.read_bytes()).hexdigest()
+        task_path = Path(str(self.get_parameter("task_config_dir").value)) / f"{task_name}.json"
+        shutil.copy2(task_path, destination / task_path.name)
+        hashes[task_path.name] = hashlib.sha256(task_path.read_bytes()).hexdigest()
         (destination / "control_config_hashes.json").write_text(
             json.dumps(hashes, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
 
     def publish_run_dir(self):
+        if self.run_dir is None:
+            return
         msg = String()
         msg.data = str(self.run_dir)
         self.run_dir_pub.publish(msg)
@@ -248,13 +351,6 @@ class RunLogger(Node):
                 "latency_ms": float(msg.inference_latency_ms),
             },
         )
-
-    def on_tracking_experiment_event(self, msg):
-        try:
-            payload = json.loads(msg.data)
-        except (json.JSONDecodeError, TypeError):
-            payload = {"phase": "invalid", "message": str(msg.data)}
-        self.write_event("tracking_experiment", payload, flush=True)
 
     def on_thruster_cmd(self, msg):
         if not self.stream_log_due("thruster_cmd"):
@@ -489,6 +585,8 @@ class RunLogger(Node):
 
     def destroy_node(self):
         handle = getattr(self, "event_log_handle", None)
+        if getattr(self, "rosbag_process", None) is not None:
+            self.stop_rosbag()
         if handle is not None and not handle.closed:
             handle.close()
         return super().destroy_node()

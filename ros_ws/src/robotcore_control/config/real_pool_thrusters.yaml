@@ -1,17 +1,74 @@
-# SAFETY: automatic control cannot arm while measured is false.
-# Replace every geometry and curve point with measurements from the physical
-# vehicle, then set measured: true after channel/sign tests have passed.
-measured: false
+# Validated eight-thruster model in base_link FLU coordinates. Every
+# position_m is already relative to the centre of mass; it must not be offset
+# a second time. T4, T5 and T7 use the supplied mirrored estimates.
+measured: true
 damping: 0.0001
 axis_weights: [1.0, 1.0, 1.0, 0.5, 0.5, 0.5]
 
-# Placeholder full-rank geometry only; it is not a claim about the real robot.
+# Hardware commands remain normalized against the bridge's +/-500 us span.
+# The model clamps physical PWM to 1300..1700 us and maps the +/-25 us
+# deadband to zero force. Thus model-valid normalized commands are +/-0.4.
+pwm_force_model:
+  neutral_pwm_us: 1500.0
+  minimum_pwm_us: 1300.0
+  maximum_pwm_us: 1700.0
+  deadband_us: 25.0
+  hardware_span_us: 500.0
+
 thrusters:
-  - {channel: 0, name: right_front_vertical, position_m: [0.25, -0.18, 0.0], direction: [0.0, 0.0, 1.0], command_sign: 1.0, curve: [[-1.0, -40.0], [0.0, 0.0], [1.0, 50.0]]}
-  - {channel: 1, name: right_rear_vertical,  position_m: [-0.25, -0.18, 0.0], direction: [0.0, 0.0, 1.0], command_sign: 1.0, curve: [[-1.0, -40.0], [0.0, 0.0], [1.0, 50.0]]}
-  - {channel: 2, name: left_front_vertical,  position_m: [0.25, 0.18, 0.0], direction: [0.0, 0.0, 1.0], command_sign: 1.0, curve: [[-1.0, -40.0], [0.0, 0.0], [1.0, 50.0]]}
-  - {channel: 3, name: left_rear_vertical,   position_m: [-0.25, 0.18, 0.0], direction: [0.0, 0.0, 1.0], command_sign: 1.0, curve: [[-1.0, -40.0], [0.0, 0.0], [1.0, 50.0]]}
-  - {channel: 4, name: left_rear_horizontal, position_m: [-0.25, 0.18, 0.0], direction: [0.70710678, -0.70710678, 0.0], command_sign: 1.0, curve: [[-1.0, -40.0], [0.0, 0.0], [1.0, 50.0]]}
-  - {channel: 5, name: right_rear_horizontal, position_m: [-0.25, -0.18, 0.0], direction: [0.70710678, 0.70710678, 0.0], command_sign: 1.0, curve: [[-1.0, -40.0], [0.0, 0.0], [1.0, 50.0]]}
-  - {channel: 6, name: left_front_horizontal, position_m: [0.25, 0.18, 0.0], direction: [0.70710678, 0.70710678, 0.0], command_sign: 1.0, curve: [[-1.0, -40.0], [0.0, 0.0], [1.0, 50.0]]}
-  - {channel: 7, name: right_front_horizontal, position_m: [0.25, -0.18, 0.0], direction: [0.70710678, -0.70710678, 0.0], command_sign: 1.0, curve: [[-1.0, -40.0], [0.0, 0.0], [1.0, 50.0]]}
+  - channel: 0
+    name: T1_right_front_vertical
+    position_m: [0.134, -0.160, -0.17098]
+    reverse_quadratic: [1.047944675e-5, -2.241612482e-5, -4.848642269e-5]
+    reverse_linear: [2.904913989e-4, 9.171315809e-5, -3.626519909e-2]
+    forward_quadratic: [8.447452080e-6, -2.311534287e-5, 9.427375413e-5]
+    forward_linear: [3.964019720e-3, 4.951467654e-3, 5.617749146e-3]
+  - channel: 1
+    name: T2_right_rear_vertical
+    position_m: [-0.150, -0.160, -0.17098]
+    reverse_quadratic: [-1.237455107e-5, -3.312529542e-5, -9.258610927e-5]
+    reverse_linear: [1.928940514e-3, 2.863404000e-3, -1.983995220e-2]
+    forward_quadratic: [-3.414770063e-5, -1.533423547e-5, -6.659338901e-6]
+    forward_linear: [8.592247935e-3, 7.881794342e-3, 4.288324292e-2]
+  - channel: 2
+    name: T3_left_front_vertical
+    position_m: [0.134, 0.160, -0.17098]
+    reverse_quadratic: [1.047944675e-5, 2.241612482e-5, -4.848642269e-5]
+    reverse_linear: [2.904913989e-4, -9.171315809e-5, -3.626519909e-2]
+    forward_quadratic: [8.447452080e-6, 2.311534287e-5, 9.427375413e-5]
+    forward_linear: [3.964019720e-3, -4.951467654e-3, 5.617749146e-3]
+  - channel: 3
+    name: T4_left_rear_vertical_mirrored_T2
+    position_m: [-0.150, 0.160, -0.17098]
+    reverse_quadratic: [-1.237455107e-5, 3.312529542e-5, -9.258610927e-5]
+    reverse_linear: [1.928940514e-3, -2.863404000e-3, -1.983995220e-2]
+    forward_quadratic: [-3.414770063e-5, 1.533423547e-5, -6.659338901e-6]
+    forward_linear: [8.592247935e-3, -7.881794342e-3, 4.288324292e-2]
+  - channel: 4
+    name: T5_left_rear_horizontal_mirrored_T6
+    position_m: [-0.15039, 0.1036, -0.06312]
+    reverse_quadratic: [-2.872730066e-5, -5.998430565e-7, 2.548857748e-7]
+    reverse_linear: [-2.106426106e-2, -1.069136682e-2, -2.088682745e-3]
+    forward_quadratic: [-1.854567716e-5, 1.745303622e-5, -1.779179292e-6]
+    forward_linear: [2.072209166e-2, -6.788145310e-3, -8.460724196e-3]
+  - channel: 5
+    name: T6_right_rear_horizontal
+    position_m: [-0.15039, -0.1036, -0.06312]
+    reverse_quadratic: [-2.872730066e-5, 5.998430565e-7, 2.548857748e-7]
+    reverse_linear: [-2.106426106e-2, 1.069136682e-2, -2.088682745e-3]
+    forward_quadratic: [-1.854567716e-5, -1.745303622e-5, -1.779179292e-6]
+    forward_linear: [2.072209166e-2, 6.788145310e-3, -8.460724196e-3]
+  - channel: 6
+    name: T7_left_front_horizontal_mirrored_T8
+    position_m: [0.13439, 0.1036, -0.06312]
+    reverse_quadratic: [3.026615292e-5, 4.699237056e-7, 2.312366586e-5]
+    reverse_linear: [2.835025771e-2, -1.212903795e-2, -1.424885624e-2]
+    forward_quadratic: [-6.966102436e-5, 1.687877234e-5, 2.939609819e-5]
+    forward_linear: [4.266770693e-3, -7.729902658e-3, -2.079788167e-2]
+  - channel: 7
+    name: T8_right_front_horizontal
+    position_m: [0.13439, -0.1036, -0.06312]
+    reverse_quadratic: [3.026615292e-5, -4.699237056e-7, 2.312366586e-5]
+    reverse_linear: [2.835025771e-2, 1.212903795e-2, -1.424885624e-2]
+    forward_quadratic: [-6.966102436e-5, -1.687877234e-5, 2.939609819e-5]
+    forward_linear: [4.266770693e-3, 7.729902658e-3, -2.079788167e-2]

@@ -29,23 +29,23 @@ ControlInterface manual candidate
   -> command_authority
   -> /control/thruster_cmd
   -> aboard_bridge (normalized limit and UART-v2 framing)
-  -> aCube synchronized PWM latch (logical 0..7 -> physical PWM 8..15)
+  -> Aquaboard synchronized PWM latch (logical 0..7 -> physical PWM 8..15)
 ```
 
-The browser does not open an A-board device, construct UART frames, choose a
+The browser does not open an Aquaboard device, construct UART frames, choose a
 physical PWM channel offset, or map normalized commands to microseconds. The
 historically named `manual_thruster_span_us` launch argument is retained only
-as the A-board bridge's final `span_us` limit; it applies to every authority
+as the Aquaboard bridge's final `span_us` limit; it applies to every authority
 source and must not be passed to the web node. `BoardStatus.pwm_us` is the
 MCU-latched command echo at the timer update boundary, not ESC speed, current,
 or thrust feedback.
 
-## A-board UART8 inertial telemetry
+## Aquaboard UART8 inertial telemetry
 
-The IMU is wired to the A-board's UART8. Jetson does not access that UART
-directly and must not run a USB/CH340 IMU driver. The A-board samples UART8 and
+The IMU is wired to the Aquaboard's UART8. Jetson does not access that UART
+directly and must not run a USB/CH340 IMU driver. The Aquaboard samples UART8 and
 forwards its values in the `FF F8` telemetry stream carried over the shared
-A-board UART6/USB link. Frame 3 contains three-axis gyro, three-axis
+Aquaboard UART6/USB link. Frame 3 contains three-axis gyro, three-axis
 acceleration, and a validity flag. The bridge publishes only valid samples as
 `/hardware/aboard_imu_raw`; invalid or stale values are not fabricated into a
 60 Hz stream.
@@ -55,32 +55,30 @@ Frame 5 is a separate 2 Hz runtime-budget channel. The bridge publishes it as
 deadline misses, stack margins, watchdog misses, and UART error/drop counters.
 It is diagnostic-only and cannot alter command or safety state.
 
-The conditioning node reloads the persistent file once on every service start
-without redefining zero. The Status panel's **IMU Calibration** action can
-repeat a stationary bias reset whenever drift is observed. During collection
-the previous correction remains active and IMU publication continues.
+The conditioning node trusts the IMU's factory-calibrated physical-unit output.
+It performs only mounting rotation, timestamp-aware low-pass filtering and
+covariance flooring. The Status panel's **IMU Calibration** action executes the
+external IMU's own saved `0x5a` gyro calibration through Aquaboard. The action
+is rejected unless propulsion is disarmed and all PWM outputs report neutral.
 `/sensors/external_imu` is the only corrected output: it preserves the expected
-gravity vector, uses `base_link`, and is shared by the ESKF and browser. The
-reset uses the configured rigid IMU mounting and does not require VIO, a camera,
-or AprilTags.
+gravity vector, uses `base_link`, and is consumed as telemetry by the browser. The
+host does not load a calibration file, estimate bias, or disable acceleration.
 
 The fixed-rate state chain is:
 
 ```text
-AprilTag absolute pose ----\
-ZED VIO pose + velocity ----> fixed-lag ESKF
-external IMU 100 Hz -------/       |
-                             60 Hz /localization/fused_odom
-                             60 Hz /robot/body_state
+AprilTag absolute pose ----> map->odom alignment --\
+ZED VIO pose + velocity ---------------------------> 60 Hz fused_odom/BodyState
+external IMU 100 Hz ------------------------------> telemetry only
 ```
 
 ZED X Mini uses one fixed 30 Hz clock for camera grab/VIO and AprilTag image
-publication, and publishes its internal IMU at 10 Hz for the HUD. The external
+publication. Its ROS IMU publication is disabled; the external
 UART8 gyro is independent of the ZED's internally fused camera IMU.
 
 ### 2026-07-30 UART8 baseline
 
-A read-only probe of the connected A-board at 115200 baud observed frame-3
+A read-only probe of the connected Aquaboard at 115200 baud observed frame-3
 telemetry at approximately 19.3 Hz with `uart8_imu_valid == false` and all
 eight payload values equal to zero. No process held the serial endpoint and the
 RobotCore service was inactive. Therefore the current firmware/IMU path does
@@ -132,13 +130,12 @@ Validate all estimator inputs after launch:
 
 ```bash
 ros2 topic hz /zedx/zed_node/odom
-ros2 topic echo /localization/external_imu_ready --once
 ros2 topic hz /hardware/aboard_imu_raw
 ros2 topic hz /sensors/external_imu
 ros2 topic hz /localization/fused_odom
 ros2 topic hz /robot/body_state
 ros2 topic echo /localization/status --once
-ros2 topic delay /localization/zed_odom
+ros2 topic delay /zedx/zed_node/odom
 ros2 topic delay /localization/apriltag/detections
 ```
 
@@ -146,13 +143,66 @@ Record the corrected stream directly with rosbag:
 
 ```bash
 ros2 bag record -o calibrated_imu_bag \
-  /sensors/external_imu \
-  /localization/external_imu_ready
+  /sensors/external_imu
 ```
 
-Recording can start before or after pressing **Calibrate**. IMU publication
-continues during manual reset with the previous correction, then atomically
-switches to the newly measured bias after the stationary sample gate succeeds.
+The host applies no runtime calibration stage. If the device-side gyro action is
+used, keep the vehicle level and completely still until Aquaboard reports success.
+
+## Camera/external-IMU time synchronization
+
+The deployed RTSO-3002 DTB already configures the ZED Link MAX9296 with
+`sync_mode = "master"`.  This is the preferred direction for the first hardware
+integration: keep the ZED Link as trigger master and capture its frame-sync
+output on the Aquaboard.  Do not switch the daemon to slave mode merely to add
+a timestamp reference.
+
+For an official ZED Link Mono card, Stereolabs documents J4 pin 6 as
+`TRIG_OUT/MFP0` and J4 pin 1 as ground.  The rising edge marks the end of camera
+exposure; at the configured 30 FPS the signal is 30 Hz with an 8.33 ms high
+time.  Its documented 3.75 V +/- 12% level can reach 4.2 V.  Therefore:
+
+- connect ZED sync ground and Aquaboard ground (the shared supply does not
+  remove the need for an explicit signal return in the cable);
+- pass `TRIG_OUT` through a 3.3 V-compatible level shifter or a verified
+  divider/Schmitt input before the STM32; do not assume an arbitrary input pin
+  is 5 V tolerant;
+- use an unused 32-bit STM32 timer input-capture channel for the rising edge;
+  TIM4 and TIM5 are already the eight-thruster PWM timers, so they must not be
+  repurposed. TIM2 is a candidate only after the Aquaboard schematic and
+  exposed connector pin have been verified;
+- do not copy the official J4 pin numbers onto the integrated RTSO-3002 carrier
+  without checking its connector routing by schematic or continuity test.
+
+This wire supplies a hard camera-exposure event in the MCU clock domain. It
+does not, by itself, trigger the external Bewei IMU. The available Bewei UART
+manual documents only a cyclic 0--255 frame counter and automatic output-rate
+selection; it does not document `SYNC`, `PPS`, `DRDY`, or external-trigger
+operation. The current firmware also assigns `sample_tick_ms` only after the
+complete UART packet has been parsed, so that field includes approximately
+2.9 ms (33-byte packet) or 4.2 ms (48-byte packet) of 115200-baud serialization
+plus up to one scheduler period.
+
+The firmware follow-up, after the two physical pins are confirmed, is:
+
+1. Run one free-running microsecond timer. Capture both the ZED rising edge and
+   the UART8 frame-end/IDLE event in that timer domain.
+2. Reconstruct 100 Hz IMU sample times from the sensor frame counter, using the
+   UART frame-end capture to discipline phase instead of timestamping parser
+   completion with `HAL_GetTick()`.
+3. Forward a separate frame-sync sequence and capture timestamp to Jetson, and
+   use it to anchor MCU time to the matching ZED image timestamp. Detect pulse,
+   image, and IMU-counter gaps rather than silently pairing by arrival time.
+4. If the exact IMU model exposes a documented hardware sync/data-ready pin,
+   fan the same trigger to that input and capture its data-ready edge. That is
+   the only route to hard synchronization of the physical IMU sampling instant;
+   otherwise the result is hard clock anchoring plus counter-based interpolation.
+
+The ROS wrapper must retain the SDK camera timestamp. The deployed profile sets
+`general.sdk_use_monotonic_clock: true` and
+`debug.use_pub_timestamps: false`, preventing NTP/system-clock steps and ROS
+publication latency from becoming measurement-time errors. This complements
+the wire but is not a substitute for it.
 
 ## Aboard Confirmation Items
 

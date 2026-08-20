@@ -19,6 +19,10 @@ def endpoint(full_name):
     return SimpleNamespace(node_name=name, node_namespace=namespace or "/")
 
 
+def test_import_does_not_initialize_rclpy_or_replace_the_test_process():
+    assert graph_check.rclpy is None
+
+
 class FakeGraphNode:
     def __init__(self):
         self.publishers = {}
@@ -26,8 +30,8 @@ class FakeGraphNode:
         for contract in graph_check.CORE_CONTRACTS:
             self.publishers[contract.topic] = set(contract.publishers)
             self.subscribers[contract.topic] = set(contract.subscribers)
-        self.publishers[graph_check.DETECTED_COUNT] = {graph_check.LOCALIZER_NODE}
-        self.subscribers[graph_check.DETECTED_COUNT] = {"/web_operator_ui"}
+        self.publishers[graph_check.LOCALIZATION_STATUS] = {graph_check.FUSION_NODE}
+        self.subscribers[graph_check.LOCALIZATION_STATUS] = {"/web_operator_ui"}
         self.publishers[graph_check.COMPRESSED_IMAGE] = set()
         self.subscribers[graph_check.COMPRESSED_IMAGE] = set()
 
@@ -48,6 +52,7 @@ def test_exact_payload_contract_passes_without_active_video_client():
     assert snapshot[graph_check.CUDA_INPUT]["subscribers"] == [
         graph_check.DETECTOR_NODE
     ]
+    assert snapshot[graph_check.LOCALIZATION_STATUS]["publishers"] == [graph_check.FUSION_NODE]
 
 
 def test_feedback_or_second_consumer_fails_the_contract():

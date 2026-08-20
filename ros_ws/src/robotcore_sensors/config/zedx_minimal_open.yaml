@@ -1,6 +1,6 @@
-# Stable ZED X Mini profile for AprilTag localisation with a VIO fallback.
-# Positional tracking needs depth extraction, but depth images and point clouds
-# remain disabled so those outputs cannot add display or detector latency.
+# Stable ZED X Mini profile for GEN_3 VIO plus AprilTag global localisation.
+# NEURAL_LIGHT keeps the SDK depth pipeline available to positional tracking;
+# depth products themselves remain unpublished.
 ---
 /**:
   ros__parameters:
@@ -9,20 +9,25 @@
       camera_name: zedx
       serial_number: 0
       camera_id: 1
-      grab_resolution: HD1200
+      grab_resolution: SVGA
       # Keep camera acquisition and ROS image publication on one fixed clock.
       # There is no separate high-rate grab path or downstream frame cap.
       grab_frame_rate: 30
-      # PnP consumes the matching scaled CameraInfo, so publishing 960x600
-      # preserves calibrated geometry while reducing CUDA detector load.
+      # Native 960x600 avoids the 1920x1200 acquisition/downscale path while
+      # preserving calibrated geometry for AprilTag PnP.
       pub_resolution: CUSTOM
-      pub_downscale_factor: 2.0
+      pub_downscale_factor: 1.0
       # Match acquisition exactly: ZED image, CameraInfo and CUDA AprilTag
       # input all run from the same 30 Hz frame stream.
       pub_frame_rate: 30.0
+      # Keep the SDK's camera clock immune to NTP/system-clock steps.  The
+      # wrapper converts this monotonic timestamp back into the ROS epoch at
+      # camera open, so delayed AprilTag measurements remain replayable by the
+      # fixed-lag estimator without inheriting publication latency.
+      sdk_use_monotonic_clock: true
       camera_timeout_sec: 5
       camera_max_reconnect: 1
-      # This is the latest successful 1920x1200 stereo calibration for the
+      # This is the deployed stereo calibration for the
       # ZED X Mini with serial 50649148. Install it at this service-readable
       # path; the ZED SDK then uses it to generate the rectified image and
       # CameraInfo.P consumed by AprilTag PnP.
@@ -60,9 +65,9 @@
               jpeg_quality: 80
 
     depth:
-      # NONE disables positional tracking in the ZED SDK. NEURAL_LIGHT is the
-      # least expensive supported mode that keeps the camera's VIO odometry
-      # available for the Tag-loss / Tag-rejection fallback.
+      # ZED disables positional tracking when depth mode is NONE. Use its
+      # lowest-overhead neural depth mode for internal VIO only; AprilTag still
+      # consumes only rectified RGB and CameraInfo.
       depth_mode: NEURAL_LIGHT
       depth_stabilization: 0
       publish_depth_map: false
@@ -72,24 +77,23 @@
       publish_disparity: false
 
     pos_tracking:
-      # Publish local VIO odometry for the C++ fixed-lag ESKF. Dynamic ZED TF
-      # remains disabled: the estimator is the sole map-pose authority.
-      # The ZED launch supplies its internal static camera-frame tree, while
-      # robotcore_edge_system.launch.py supplies the vehicle mounting TF.
+      # ZED VIO is the continuous local motion source. AprilTag only estimates
+      # map->odom, so ZED never publishes dynamic TF or resets its odom frame.
       pos_tracking_enabled: true
-      pos_tracking_mode: AUTO
+      pos_tracking_mode: GEN_3
       imu_fusion: true
       publish_tf: false
       publish_map_tf: false
+      area_memory: false
+      reset_odom_with_loop_closure: false
       publish_odom_pose: true
       publish_pose_cov: false
       publish_cam_path: false
 
     sensors:
-      # ZED VIO uses the IMU internally. ROS publishes only the 10 Hz samples
-      # needed by the operator HUD; no estimator consumes this ROS topic.
-      sensors_pub_rate: 10.0
-      publish_imu: true
+      # The SDK still fuses its factory-calibrated IMU internally for VIO.
+      # No ZED sensor stream is duplicated onto ROS because nothing consumes it.
+      publish_imu: false
       publish_imu_raw: false
       publish_cam_imu_transf: false
       publish_mag: false
@@ -113,4 +117,7 @@
       # AprilTag subscribes to the GPU-backed /nitros image.  The ZED wrapper
       # retains only an on-demand JPEG transport for the operator switch.
       disable_nitros: false
+      # Preserve the SDK camera timestamp; replacing it with ROS now() would
+      # turn processing and DDS queueing delay into a measurement-time error.
+      use_pub_timestamps: false
       sdk_verbose: 1

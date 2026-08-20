@@ -24,8 +24,10 @@ Checks:
   - extlinux LABEL uses the RTSO-3002 ZED Link DTB.
   - extlinux does not load the generic Stereolabs ZED Link overlay anywhere.
   - the target DTB contains only the i2c-7 ZED Link path.
+  - the MAX9296 is configured as the frame-sync master.
   - optional dmesg log contains no i2c-9/i2c-10 ZED Link probe failures.
-  - optional live device-tree contains no cam_i2cmux ZED Link nodes.
+  - optional live device-tree contains no cam_i2cmux ZED Link nodes and reports
+    the MAX9296 frame-sync master mode.
 EOF
 }
 
@@ -145,6 +147,12 @@ for required in \
 done
 echo "ok DTB contains i2c-7 ZED Link nodes"
 
+if ! grep -Fq 'sync_mode = "master";' <<<"${dtb_dump}"; then
+  echo "fail: DTB does not configure the MAX9296 as frame-sync master" >&2
+  exit 1
+fi
+echo "ok DTB configures the MAX9296 as frame-sync master"
+
 for forbidden in \
   "cam_i2cmux" \
   "zedx_right_1@20" \
@@ -186,5 +194,11 @@ if [[ "${check_live}" == true ]]; then
       exit 1
     fi
   done
-  echo "ok live device-tree has i2c-7 ZED Link nodes and no cam_i2cmux"
+  live_sync_mode="$(tr -d '\000' < \
+    "${live_root}/bus@0/i2c@c250000/max9296_a@48/sync_mode")"
+  if [[ "${live_sync_mode}" != "master" ]]; then
+    echo "fail: live MAX9296 sync_mode is '${live_sync_mode}', expected 'master'" >&2
+    exit 1
+  fi
+  echo "ok live device-tree has i2c-7 ZED Link nodes, master sync, and no cam_i2cmux"
 fi

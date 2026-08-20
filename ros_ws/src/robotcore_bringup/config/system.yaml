@@ -6,7 +6,7 @@ fixed_stack:
     - ros-humble-ros2-controllers
 
 topics:
-  imu: /zedx/zed_node/imu/data
+  imu: /sensors/external_imu
   body_state: /robot/body_state
   localization_status: /localization/status
   thruster_cmd: /control/thruster_cmd

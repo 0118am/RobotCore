@@ -16,7 +16,7 @@ import rclpy
 from rclpy.node import Node
 from std_srvs.srv import Trigger
 
-from robotcore_interfaces.msg import BodyState, TrajectoryTarget
+from robotcore_interfaces.msg import BodyState, ThrusterCommand, TrajectoryTarget
 
 
 @dataclass
@@ -37,7 +37,7 @@ class TrajectoryCommandNode(Node):
         self.declare_parameter("publish_rate_hz", 10.0)
         self.declare_parameter("center_x", 0.0)
         self.declare_parameter("center_y", 0.0)
-        self.declare_parameter("center_z", -1.5)
+        self.declare_parameter("center_z", 0.9)
         self.declare_parameter("amp_x", 1.5)
         self.declare_parameter("amp_y", 0.75)
         self.declare_parameter("amp_z", 0.4)
@@ -54,11 +54,14 @@ class TrajectoryCommandNode(Node):
         self.declare_parameter("attitude_period_s", 30.0)
         self.declare_parameter("step_amplitude", 0.1)
         self.declare_parameter("step_time_s", 5.0)
+        self.declare_parameter("move_duration_s", 18.0)
         self.declare_parameter("require_pool_bounds", False)
         self.declare_parameter("pool_min_xyz", [0.0, 0.0, 0.0])
         self.declare_parameter("pool_max_xyz", [0.0, 0.0, 0.0])
         self.declare_parameter("trajectory_limits_configured", False)
         self.declare_parameter("max_linear_speed_mps", 0.0)
+        self.declare_parameter("manual_vertical_speed_mps", 0.20)
+        self.declare_parameter("manual_input_age_s", 0.15)
         self.declare_parameter("max_angular_speed_rps", 0.0)
         self.declare_parameter("attitude_min_rpy_deg", [0.0, 0.0, 0.0])
         self.declare_parameter("attitude_max_rpy_deg", [0.0, 0.0, 0.0])
@@ -67,10 +70,23 @@ class TrajectoryCommandNode(Node):
         self.tracking_started = False
         self.initial_position = None
         self.initial_quaternion = None
+        self.latest_position = None
+        self.latest_quaternion = None
+        self.motion_start_position = None
+        self.altitude_hold_z = None
+        self.altitude_heave_active = False
+        self.manual_command = None
+        self.manual_command_ns = None
         self.envelope_checked = False
         self.envelope_valid = False
         self.pub = self.create_publisher(TrajectoryTarget, "/runtime/trajectory_target", 10)
         self.create_subscription(BodyState, "/robot/body_state", self.on_body_state, 10)
+        self.create_subscription(
+            ThrusterCommand,
+            "/control/candidates/manual",
+            self.on_manual_command,
+            20,
+        )
         self.create_service(
             Trigger, "/runtime/trajectory/reset", self.on_reset_scenario
         )
@@ -92,9 +108,37 @@ class TrajectoryCommandNode(Node):
         trajectory_type = str(self.get_parameter("trajectory_type").value).lower()
         hold_s = max(0.0, float(self.get_parameter("hold_before_motion_s").value))
         effective_time_s = max(0.0, time_s - hold_s)
-        if not self.tracking_started or time_s < hold_s:
-            sample = self.sample("hold", 0.0)
+        if not self.tracking_started:
+            sample = self.idle_hold_sample()
+            orientation = tuple(
+                self.latest_quaternion
+                if self.latest_quaternion is not None
+                else self.attitude_quaternion("hold", 0.0)
+            )
+            # This remains a valid stationary target for the authority
+            # freshness gate, but it is not an instruction to actuate. The
+            # PID candidate stays neutral until the explicit Start/reset.
+            published_trajectory_type = "idle"
+            target_valid = self.idle_target_is_valid(sample.position)
+            angular_velocity = (0.0, 0.0, 0.0)
+            angular_acceleration = (0.0, 0.0, 0.0)
+        elif trajectory_type == "altitude_hold":
+            sample = self.altitude_hold_sample(now.nanoseconds)
+            orientation = tuple(
+                self.latest_quaternion
+                if self.latest_quaternion is not None
+                else self.attitude_quaternion("hold", 0.0)
+            )
+            published_trajectory_type = trajectory_type
+            target_valid = self.target_is_valid(sample.position)
+            angular_velocity = (0.0, 0.0, 0.0)
+            angular_acceleration = (0.0, 0.0, 0.0)
+        elif time_s < hold_s:
+            sample_type = "move_to_hold" if trajectory_type == "move_to_hold" else "hold"
+            sample = self.sample(sample_type, 0.0)
             orientation = tuple(self.attitude_quaternion("hold", 0.0))
+            published_trajectory_type = trajectory_type
+            target_valid = self.target_is_valid(sample.position)
             angular_velocity = (0.0, 0.0, 0.0)
             angular_acceleration = (0.0, 0.0, 0.0)
         else:
@@ -102,6 +146,8 @@ class TrajectoryCommandNode(Node):
             orientation, angular_velocity, angular_acceleration = self.sample_attitude(
                 trajectory_type, effective_time_s
             )
+            published_trajectory_type = trajectory_type
+            target_valid = self.target_is_valid(sample.position)
 
         msg = TrajectoryTarget()
         msg.header.stamp = now.to_msg()
@@ -127,9 +173,9 @@ class TrajectoryCommandNode(Node):
         msg.target_accel.angular.x = angular_acceleration[0]
         msg.target_accel.angular.y = angular_acceleration[1]
         msg.target_accel.angular.z = angular_acceleration[2]
-        msg.trajectory_type = trajectory_type
+        msg.trajectory_type = published_trajectory_type
         msg.time_s = float(time_s)
-        msg.valid = self.target_is_valid(sample.position)
+        msg.valid = target_valid
         self.pub.publish(msg)
 
     def trajectory_time_s(self, now_ns):
@@ -140,9 +186,9 @@ class TrajectoryCommandNode(Node):
         return max(0.0, (int(now_ns) - self.started_ns) * 1e-9)
 
     def on_body_state(self, msg: BodyState):
-        """Capture the first trustworthy pose as the relative scenario center."""
+        """Track the latest pose and retain the first trusted relative center."""
 
-        if self.initial_position is not None or not msg.state_valid:
+        if not (msg.state_valid or msg.position_estimated):
             return
         quaternion = np.asarray(
             [
@@ -156,15 +202,90 @@ class TrajectoryCommandNode(Node):
         norm = float(np.linalg.norm(quaternion))
         if not np.isfinite(norm) or norm <= 1e-9:
             return
-        self.initial_position = np.asarray(
+        position = np.asarray(
             [msg.pose.position.x, msg.pose.position.y, msg.pose.position.z],
             dtype=np.float64,
         )
-        self.initial_quaternion = quaternion / norm
-        self.envelope_checked = False
-        self.get_logger().info("Captured trusted initial pose for relative trajectory")
+        if not np.all(np.isfinite(position)):
+            return
+        self.latest_position = position
+        self.latest_quaternion = quaternion / norm
+        if self.initial_position is None:
+            self.initial_position = position.copy()
+            self.initial_quaternion = self.latest_quaternion.copy()
+            self.envelope_checked = False
+            self.get_logger().info("Captured trusted initial pose for relative trajectory")
+
+    def on_manual_command(self, msg: ThrusterCommand):
+        self.manual_command = msg
+        self.manual_command_ns = self.get_clock().now().nanoseconds
+
+    def current_manual_heave(self, now_ns):
+        maximum_age = float(self.get_parameter("manual_input_age_s").value)
+        age = (
+            math.inf
+            if self.manual_command_ns is None
+            else (int(now_ns) - self.manual_command_ns) * 1e-9
+        )
+        if (
+            self.manual_command is None
+            or age > maximum_age
+            or not self.manual_command.enable
+            or self.manual_command.source != "web_operator"
+        ):
+            return 0.0
+        values = np.asarray(self.manual_command.normalized, dtype=np.float64)
+        if values.shape != (8,) or not np.all(np.isfinite(values)):
+            return 0.0
+        return float(np.clip(np.mean(values[:4]), -1.0, 1.0))
+
+    def altitude_hold_sample(self, now_ns):
+        """Command vertical speed while held; latch measured height on release."""
+
+        if self.latest_position is None:
+            position = self.motion_start_position
+        else:
+            position = self.latest_position
+        if position is None:
+            position = np.zeros(3, dtype=np.float64)
+
+        heave = self.current_manual_heave(now_ns)
+        heave_active = not math.isclose(heave, 0.0, abs_tol=1e-3)
+
+        # Do not accumulate a setpoint ahead of the vehicle. While the stick
+        # is held, measured Z remains the pose target and the stick commands
+        # vertical velocity. On the release edge, measured Z is retained as
+        # the new fixed height and requested vertical velocity becomes zero.
+        if heave_active or self.altitude_heave_active:
+            self.altitude_hold_z = float(position[2])
+        target_z = (
+            float(position[2])
+            if self.altitude_hold_z is None
+            else self.altitude_hold_z
+        )
+        self.altitude_heave_active = heave_active
+        # Standard-gamepad stick-up is a negative browser axis. Convert it to
+        # positive map FLU vertical velocity; the PID node owns the verified
+        # sign conversion from FLU effort to the installed thrusters.
+        velocity_z = -heave * abs(
+            float(self.get_parameter("manual_vertical_speed_mps").value)
+        )
+
+        return TrajectorySample(
+            position=(float(position[0]), float(position[1]), target_z),
+            velocity=(0.0, 0.0, float(velocity_z)),
+            acceleration=(0.0, 0.0, 0.0),
+        )
 
     def on_reset_scenario(self, _request, response):
+        trajectory_type = str(self.get_parameter("trajectory_type").value).lower()
+        if trajectory_type in {"move_to_hold", "altitude_hold"} and self.motion_start_position is None:
+            response.success = False
+            response.message = f"{trajectory_type} requires a validated current body pose"
+            return response
+        if trajectory_type == "altitude_hold":
+            self.altitude_hold_z = float(self.get_parameter("center_z").value)
+            self.altitude_heave_active = False
         self.started_ns = self.get_clock().now().nanoseconds
         self.tracking_started = True
         self.envelope_checked = False
@@ -176,11 +297,27 @@ class TrajectoryCommandNode(Node):
     def on_stop_scenario(self, _request, response):
         self.tracking_started = False
         self.started_ns = self.get_clock().now().nanoseconds
+        self.motion_start_position = None
+        self.altitude_hold_z = None
+        self.altitude_heave_active = False
         response.success = True
         response.message = "trajectory ready; target time held at 0.00 s"
         return response
 
     def on_validate_scenario(self, _request, response):
+        trajectory_type = str(self.get_parameter("trajectory_type").value).lower()
+        if trajectory_type in {"move_to_hold", "altitude_hold"}:
+            if self.latest_position is None:
+                self.envelope_valid = False
+                self.envelope_checked = True
+                response.success = False
+                response.message = f"{trajectory_type} requires a current valid body pose"
+                return response
+            # Latch exactly the start point used by both validation and reset;
+            # later estimator updates cannot change an already-approved path.
+            self.motion_start_position = self.latest_position.copy()
+        else:
+            self.motion_start_position = None
         self.envelope_valid = self.validate_scenario_envelope()
         self.envelope_checked = True
         response.success = bool(self.envelope_valid)
@@ -213,6 +350,40 @@ class TrajectoryCommandNode(Node):
         phase_x = omega * time_s
         phase_y = 2.0 * omega * time_s
 
+        if trajectory_type == "move_to_hold":
+            start = self.motion_start_position
+            if start is None:
+                start = self.latest_position
+            if start is None:
+                start = np.asarray(center, dtype=np.float64)
+            goal = np.asarray(center, dtype=np.float64)
+            displacement = goal - np.asarray(start, dtype=np.float64)
+            duration = max(0.1, float(self.get_parameter("move_duration_s").value))
+            tau = float(np.clip(time_s / duration, 0.0, 1.0))
+            blend = 10.0 * tau**3 - 15.0 * tau**4 + 6.0 * tau**5
+            blend_rate = (30.0 * tau**2 - 60.0 * tau**3 + 30.0 * tau**4) / duration
+            blend_acceleration = (
+                60.0 * tau - 180.0 * tau**2 + 120.0 * tau**3
+            ) / duration**2
+            position = np.asarray(start, dtype=np.float64) + blend * displacement
+            velocity = blend_rate * displacement
+            acceleration = blend_acceleration * displacement
+            return TrajectorySample(
+                position=tuple(float(value) for value in position),
+                velocity=tuple(float(value) for value in velocity),
+                acceleration=tuple(float(value) for value in acceleration),
+            )
+        if trajectory_type == "altitude_hold":
+            start = self.motion_start_position
+            if start is None:
+                start = self.latest_position
+            if start is None:
+                start = np.asarray(center, dtype=np.float64)
+            return TrajectorySample(
+                position=(float(start[0]), float(start[1]), float(center[2])),
+                velocity=(0.0, 0.0, 0.0),
+                acceleration=(0.0, 0.0, 0.0),
+            )
         if trajectory_type.startswith("step_"):
             offset = [0.0, 0.0, 0.0]
             velocity = [0.0, 0.0, 0.0]
@@ -318,6 +489,38 @@ class TrajectoryCommandNode(Node):
         )
         return TrajectorySample(position=position, velocity=velocity, acceleration=acceleration)
 
+    def idle_hold_sample(self) -> TrajectorySample:
+        """Hold the latest measured position until an approved task starts."""
+
+        if self.latest_position is not None:
+            position = tuple(float(value) for value in self.latest_position)
+        else:
+            position = (
+                float(self.get_parameter("center_x").value),
+                float(self.get_parameter("center_y").value),
+                float(self.get_parameter("center_z").value),
+            )
+        zeros = (0.0, 0.0, 0.0)
+        return TrajectorySample(position=position, velocity=zeros, acceleration=zeros)
+
+    def idle_target_is_valid(self, position):
+        """Validate only the measured idle hold point, not a pending scenario."""
+
+        if self.latest_position is None:
+            return False
+        if not bool(self.get_parameter("require_pool_bounds").value):
+            return True
+        minimum = np.asarray(self.get_parameter("pool_min_xyz").value, dtype=np.float64)
+        maximum = np.asarray(self.get_parameter("pool_max_xyz").value, dtype=np.float64)
+        point = np.asarray(position, dtype=np.float64)
+        return bool(
+            minimum.shape == (3,)
+            and maximum.shape == (3,)
+            and np.all(minimum < maximum)
+            and np.all(point >= minimum)
+            and np.all(point <= maximum)
+        )
+
     def sample_attitude(self, trajectory_type: str, time_s: float):
         """Return target quaternion plus world-frame angular velocity/acceleration."""
 
@@ -332,13 +535,16 @@ class TrajectoryCommandNode(Node):
         return tuple(quaternion), tuple(omega), tuple(acceleration)
 
     def attitude_quaternion(self, trajectory_type: str, time_s: float):
+        mode = str(self.get_parameter("attitude_mode").value).lower()
+        use_initial_attitude = (
+            mode == "hold_initial"
+            or bool(self.get_parameter("relative_to_initial_pose").value)
+        )
         base = (
             self.initial_quaternion
-            if bool(self.get_parameter("relative_to_initial_pose").value)
-            and self.initial_quaternion is not None
+            if use_initial_attitude and self.initial_quaternion is not None
             else np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
         )
-        mode = str(self.get_parameter("attitude_mode").value).lower()
         rpy = np.zeros(3, dtype=np.float64)
         if trajectory_type in {"step_roll", "step_pitch", "step_yaw"}:
             if time_s >= float(self.get_parameter("step_time_s").value):
@@ -404,6 +610,9 @@ class TrajectoryCommandNode(Node):
         )
 
     def validate_scenario_envelope(self):
+        trajectory_type = str(self.get_parameter("trajectory_type").value).lower()
+        if trajectory_type in {"move_to_hold", "altitude_hold"} and self.motion_start_position is None:
+            return False
         if self.initial_position is None and bool(
             self.get_parameter("relative_to_initial_pose").value
         ):
@@ -444,11 +653,11 @@ class TrajectoryCommandNode(Node):
             or not np.all(attitude_min < attitude_max)
         ):
             return False
-        trajectory_type = str(self.get_parameter("trajectory_type").value).lower()
         duration = max(
             float(self.get_parameter("period_s").value),
             2.0 * float(self.get_parameter("attitude_period_s").value),
             float(self.get_parameter("step_time_s").value) + 1.0,
+            float(self.get_parameter("move_duration_s").value) + 1.0,
         )
         for time_s in np.linspace(0.0, duration, 361):
             sample = self.sample(trajectory_type, float(time_s))

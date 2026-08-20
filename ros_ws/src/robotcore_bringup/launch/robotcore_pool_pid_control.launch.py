@@ -19,7 +19,7 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "pid_config_path",
                 default_value=PathJoinSubstitution(
-                    [FindPackageShare("robotcore_control"), "config", "real_pool_pid.yaml"]
+                    [FindPackageShare("robotcore_control"), "config", "pid", "default.json"]
                 ),
             ),
             DeclareLaunchArgument(
@@ -29,9 +29,15 @@ def generate_launch_description():
                 ),
             ),
             DeclareLaunchArgument(
-                "scenario_config_path",
+                "task_config_dir",
                 default_value=PathJoinSubstitution(
-                    [FindPackageShare("robotcore_runtime"), "config", "tracking_scenarios.yaml"]
+                    [FindPackageShare("robotcore_runtime"), "config", "tasks"]
+                ),
+            ),
+            DeclareLaunchArgument(
+                "record_topics_path",
+                default_value=PathJoinSubstitution(
+                    [FindPackageShare("robotcore_runtime"), "config", "tasks", "record_topics.json"]
                 ),
             ),
             Node(
@@ -53,6 +59,7 @@ def generate_launch_description():
                 name="pid_controller",
                 output="screen",
                 parameters=[
+                    LaunchConfiguration("pool_control_config"),
                     {
                         "pid_config_path": LaunchConfiguration("pid_config_path"),
                         "thruster_config_path": LaunchConfiguration(
@@ -81,8 +88,8 @@ def generate_launch_description():
                 output="screen",
                 parameters=[
                     {
-                        "scenario_config_path": LaunchConfiguration(
-                            "scenario_config_path"
+                        "task_config_dir": LaunchConfiguration(
+                            "task_config_dir"
                         )
                     }
                 ],
@@ -98,9 +105,8 @@ def generate_launch_description():
                         "thruster_config_path": LaunchConfiguration(
                             "thruster_config_path"
                         ),
-                        "scenario_config_path": LaunchConfiguration(
-                            "scenario_config_path"
-                        ),
+                        "task_config_dir": LaunchConfiguration("task_config_dir"),
+                        "record_topics_path": LaunchConfiguration("record_topics_path"),
                         "safety_config_path": LaunchConfiguration(
                             "pool_control_config"
                         ),

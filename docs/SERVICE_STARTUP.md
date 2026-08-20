@@ -25,7 +25,7 @@ sudo bash scripts/install_robotcore_services.sh \
 ```
 
 脚本会在安装前确认三个工作空间已经构建，并检查 C++
-`fixed_lag_eskf_node`。因此不会误用 `/opt/RobotCore` 中遗留的 Python 安装。
+`vio_tag_fusion_node`。因此不会误用 `/opt/RobotCore` 中遗留的 Python 安装。
 因为 `/home/nvidia` 默认不可由服务账户穿过，脚本只给 `robotcore` 增加该目录的
 路径穿越 ACL，不授予列目录或写入权限。若正式版本部署到 `/opt`，用上面的参数
 显式改成对应 `/opt` 路径即可。
@@ -159,7 +159,6 @@ journalctl -fu robotcore.service -u control-interface.service
 ```bash
 test -e /dev/robotcore/aboard
 test -r /etc/robotcore/apriltag_map.json
-test -r /etc/robotcore/external_imu_calibration.yaml
 nvpmodel -q
 sudo systemd-analyze verify /etc/systemd/system/robotcore*.service /etc/systemd/system/control-interface.service /etc/systemd/system/robotcore-stack.target
 ```
@@ -169,7 +168,7 @@ sudo systemd-analyze verify /etc/systemd/system/robotcore*.service /etc/systemd/
 ```bash
 source /home/nvidia/RobotCore/scripts/robotcore_ros_env.sh
 ros2 topic hz /hardware/aboard_imu_raw
-ros2 topic hz /localization/zed_odom
+ros2 topic hz /zedx/zed_node/odom
 ros2 topic hz /localization/apriltag/detections
 ros2 topic hz /robot/body_state
 ros2 topic echo /diagnostics --once

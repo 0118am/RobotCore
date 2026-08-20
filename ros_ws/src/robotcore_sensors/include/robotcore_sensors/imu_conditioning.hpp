@@ -5,45 +5,57 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 
 namespace robotcore_sensors
 {
-inline bool persistent_imu_calibration_valid(
-  const Eigen::Matrix3d & accel_matrix,
-  const Eigen::Matrix3d & gyro_matrix,
-  const Eigen::Vector3d & accel_bias,
-  const Eigen::Vector3d & gyro_bias)
-{
-  return accel_matrix.allFinite() && gyro_matrix.allFinite() &&
-         accel_bias.allFinite() && gyro_bias.allFinite() &&
-         accel_matrix.determinant() > 1e-6 && gyro_matrix.determinant() > 1e-6;
-}
-
-inline bool acceleration_fusion_enabled(
-  bool persistent_calibration_valid, double startup_residual_mps2,
-  double maximum_residual_mps2)
-{
-  return persistent_calibration_valid && std::isfinite(startup_residual_mps2) &&
-         startup_residual_mps2 < maximum_residual_mps2;
-}
-
-inline Eigen::Vector3d calibrate_sensor_vector(
-  const Eigen::Vector3d & raw, const Eigen::Vector3d & bias,
-  const Eigen::Matrix3d & calibration)
-{
-  return calibration * (raw - bias);
-}
-
 inline Eigen::Vector3d rotate_imu_vector_to_base(
   const Eigen::Vector3d & imu_vector, const Eigen::Matrix3d & base_from_imu)
 {
   return base_from_imu * imu_vector;
 }
 
+class TimestampedVectorLowPass
+{
+public:
+  TimestampedVectorLowPass(double cutoff_hz, double reset_gap_s)
+  : cutoff_hz_(cutoff_hz), reset_gap_s_(reset_gap_s) {}
+
+  Eigen::Vector3d update(const Eigen::Vector3d & input, std::int64_t stamp_ns)
+  {
+    if (!initialized_) {
+      reset(input, stamp_ns);
+      return state_;
+    }
+    const double dt = static_cast<double>(stamp_ns - last_stamp_ns_) * 1e-9;
+    if (!std::isfinite(dt) || dt <= 0.0 || dt > reset_gap_s_) {
+      reset(input, stamp_ns);
+      return state_;
+    }
+    const double alpha = 1.0 - std::exp(-2.0 * std::acos(-1.0) * cutoff_hz_ * dt);
+    state_ += alpha * (input - state_);
+    last_stamp_ns_ = stamp_ns;
+    return state_;
+  }
+
+  void reset(const Eigen::Vector3d & input, std::int64_t stamp_ns)
+  {
+    state_ = input;
+    last_stamp_ns_ = stamp_ns;
+    initialized_ = true;
+  }
+
+private:
+  double cutoff_hz_{};
+  double reset_gap_s_{};
+  Eigen::Vector3d state_{Eigen::Vector3d::Zero()};
+  std::int64_t last_stamp_ns_{};
+  bool initialized_{false};
+};
+
 template<typename CovarianceArray>
 Eigen::Matrix3d condition_imu_covariance(
   const CovarianceArray & raw_covariance,
-  const Eigen::Matrix3d & calibration,
   const Eigen::Matrix3d & base_from_imu,
   double standard_deviation_floor)
 {
@@ -59,8 +71,8 @@ Eigen::Matrix3d condition_imu_covariance(
   }
   if (!input_valid) {sensor_covariance.setZero();}
 
-  const Eigen::Matrix3d jacobian = base_from_imu * calibration;
-  Eigen::Matrix3d result = jacobian * sensor_covariance * jacobian.transpose();
+  Eigen::Matrix3d result =
+    base_from_imu * sensor_covariance * base_from_imu.transpose();
   result = 0.5 * (result + result.transpose());
   if (!result.allFinite()) {return Eigen::Matrix3d::Identity() * variance_floor;}
 

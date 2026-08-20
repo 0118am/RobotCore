@@ -9,6 +9,7 @@
 #include <robotcore_interfaces/msg/thruster_command.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/imu.hpp>
+#include <std_srvs/srv/trigger.hpp>
 
 #include <sys/file.h>
 #include <termios.h>
@@ -44,7 +45,8 @@ namespace
 {
 constexpr std::uint8_t kKnownStatusFlags =
   kStatusFlagSessionEstablished | kStatusFlagOutputsEnabled |
-  kStatusFlagFailsafe;
+  kStatusFlagFailsafe | kStatusFlagImuCalibrating |
+  kStatusFlagImuCalibrationOk | kStatusFlagImuCalibrationFail;
 constexpr std::uint16_t kMinimumReportedPwmUs = 1000U;
 constexpr std::uint16_t kMaximumReportedPwmUs = 2000U;
 constexpr std::uint32_t kMaximumAckSequenceLag = 8U;
@@ -53,6 +55,8 @@ constexpr auto kCommandPeriod = 20ms;
 constexpr auto kReconnectDelay = 1s;
 constexpr auto kWriteDeadline = 50ms;
 constexpr auto kShutdownDeadline = 150ms;
+constexpr auto kImuCalibrationStartTimeout = 3s;
+constexpr auto kImuCalibrationOverallTimeout = 25s;
 constexpr char kAuthoritySourcePrefix[] = "command_authority:";
 
 bool sequence_newer(std::uint32_t candidate, std::uint32_t reference)
@@ -85,6 +89,19 @@ bool board_status_semantically_valid(const BoardStatusFrame & status, std::strin
   }
   if (!board_status_reason_flags_consistent(status)) {
     reason = "board safety reason contradicts session/failsafe flags";
+    return false;
+  }
+  const auto calibration_flags = static_cast<std::uint8_t>(status.flags &
+    (kStatusFlagImuCalibrating | kStatusFlagImuCalibrationOk |
+    kStatusFlagImuCalibrationFail));
+  if (calibration_flags != 0U && (calibration_flags & (calibration_flags - 1U)) != 0U) {
+    reason = "contradictory IMU calibration flags";
+    return false;
+  }
+  if ((status.flags & kStatusFlagImuCalibrating) != 0U &&
+    (status.flags & kStatusFlagOutputsEnabled) != 0U)
+  {
+    reason = "outputs enabled during IMU calibration";
     return false;
   }
   if (status.boot_id == 0U) {
@@ -148,10 +165,16 @@ public:
       {
         on_command(message);
       });
+    imu_calibration_service_ = create_service<std_srvs::srv::Trigger>(
+      "/hardware/aboard/calibrate_gyro",
+      std::bind(
+        &AboardBridgeNode::calibrate_imu_gyro, this,
+        std::placeholders::_1, std::placeholders::_2));
     command_timer_ = create_wall_timer(kCommandPeriod, std::bind(&AboardBridgeNode::write_command, this));
-    status_timer_ = create_wall_timer(100ms, std::bind(&AboardBridgeNode::publish_status, this));
-    updater_.setHardwareID("aboard-uart6");
-    updater_.add("A-board serial and IMU", this, &AboardBridgeNode::diagnose);
+      status_timer_ = create_wall_timer(100ms, std::bind(&AboardBridgeNode::publish_status, this));
+      updater_.setHardwareID("aboard-uart6");
+      updater_.add("Aquaboard serial and IMU", this, &AboardBridgeNode::diagnose);
+      diagnostic_timer_ = create_wall_timer(1s, [this]() {updater_.force_update();});
 
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
@@ -163,14 +186,15 @@ public:
     boost::asio::post(io_, [this]() {open_serial_io();});
     RCLCPP_INFO(
       get_logger(),
-      "A-board protocol v2 bridge started; PWM channels 8-15 are command echoes, not motor feedback");
+      "Aquaboard protocol v2 bridge started; PWM channels 8-15 are command echoes, not motor feedback");
   }
 
   ~AboardBridgeNode() override
   {
     shutting_down_.store(true);
-    if (command_timer_) {command_timer_->cancel();}
-    if (status_timer_) {status_timer_->cancel();}
+      if (command_timer_) {command_timer_->cancel();}
+      if (status_timer_) {status_timer_->cancel();}
+      if (diagnostic_timer_) {diagnostic_timer_->cancel();}
 
     shutdown_promise_ = std::make_shared<std::promise<void>>();
     auto complete = shutdown_promise_->get_future();
@@ -207,6 +231,7 @@ private:
     std::uint32_t session_id{};
     std::uint32_t sequence{};
     bool enable{false};
+    bool calibrate_imu_gyro{false};
     bool shutdown{false};
   };
 
@@ -226,6 +251,9 @@ private:
     bool publisher_gate{false};
     bool authority_endpoint{false};
     bool command_timeout_latched{false};
+    bool imu_calibration_requested{false};
+    bool imu_calibration_seen_active{false};
+    bool imu_calibration_local_failed{false};
     bool have_dispatched{false};
     bool have_ack{false};
     bool have_boot_challenge{false};
@@ -242,6 +270,7 @@ private:
     std::int64_t last_runtime_ns{};
     std::uint64_t runtime_generation{};
     std::int64_t last_command_ns{};
+    std::int64_t imu_calibration_request_ns{};
     std::string command_source;
     std::string transition_reason;
   };
@@ -304,7 +333,7 @@ private:
     boost::system::error_code error;
     serial_.set_option(option, error);
     if (!error) {return true;}
-    RCLCPP_ERROR(get_logger(), "Cannot set A-board %s: %s", name, error.message().c_str());
+    RCLCPP_ERROR(get_logger(), "Cannot set Aquaboard %s: %s", name, error.message().c_str());
     return false;
   }
 
@@ -330,7 +359,7 @@ private:
 
     termios options{};
     if (::tcgetattr(serial_.native_handle(), &options) != 0) {
-      RCLCPP_ERROR(get_logger(), "tcgetattr failed for A-board: %s", std::strerror(errno));
+      RCLCPP_ERROR(get_logger(), "tcgetattr failed for Aquaboard: %s", std::strerror(errno));
       return false;
     }
     ::cfmakeraw(&options);
@@ -349,13 +378,13 @@ private:
     options.c_cflag &= static_cast<tcflag_t>(~CRTSCTS);
 #endif
     if (::tcsetattr(serial_.native_handle(), TCSANOW, &options) != 0) {
-      RCLCPP_ERROR(get_logger(), "tcsetattr failed for A-board: %s", std::strerror(errno));
+      RCLCPP_ERROR(get_logger(), "tcsetattr failed for Aquaboard: %s", std::strerror(errno));
       return false;
     }
 
     termios verified{};
     if (::tcgetattr(serial_.native_handle(), &verified) != 0) {
-      RCLCPP_ERROR(get_logger(), "Cannot verify A-board termios: %s", std::strerror(errno));
+      RCLCPP_ERROR(get_logger(), "Cannot verify Aquaboard termios: %s", std::strerror(errno));
       return false;
     }
     const bool raw_input = (verified.c_iflag & forbidden_input) == 0U;
@@ -382,14 +411,14 @@ private:
     {
       RCLCPP_ERROR(
         get_logger(),
-        "A-board termios verification failed (raw_input=%d raw_local=%d raw_output=%d "
+        "Aquaboard termios verification failed (raw_input=%d raw_local=%d raw_output=%d "
         "8N1=%d sw_flow_off=%d hw_flow_off=%d receiver=%d baud=%d)",
         raw_input, raw_local, raw_output, eight_n_one, no_software_flow, no_hardware_flow,
         receiver_enabled, baud_matches);
       return false;
     }
     if (::tcflush(serial_.native_handle(), TCIFLUSH) != 0) {
-      RCLCPP_ERROR(get_logger(), "Cannot flush stale A-board input: %s", std::strerror(errno));
+      RCLCPP_ERROR(get_logger(), "Cannot flush stale Aquaboard input: %s", std::strerror(errno));
       return false;
     }
     return true;
@@ -403,14 +432,14 @@ private:
     if (error) {
       connected_.store(false);
       RCLCPP_WARN_THROTTLE(
-        get_logger(), *get_clock(), 5000, "Cannot open A-board %s: %s",
+        get_logger(), *get_clock(), 5000, "Cannot open Aquaboard %s: %s",
         port_.c_str(), error.message().c_str());
       schedule_reconnect_io();
       return;
     }
     if (::flock(serial_.native_handle(), LOCK_EX | LOCK_NB) != 0) {
       RCLCPP_ERROR_THROTTLE(
-        get_logger(), *get_clock(), 5000, "A-board serial device is already owned: %s",
+        get_logger(), *get_clock(), 5000, "Aquaboard serial device is already owned: %s",
         port_.c_str());
       close_serial_io();
       schedule_reconnect_io();
@@ -444,7 +473,7 @@ private:
     start_read_io();
     dispatch_neutral_current_session_io();
     RCLCPP_INFO(
-      get_logger(), "Opened A-board UART6 %s at %d baud; new session %08x",
+      get_logger(), "Opened Aquaboard UART6 %s at %d baud; new session %08x",
       port_.c_str(), baud_, new_session);
   }
 
@@ -487,7 +516,7 @@ private:
     if (!shutting_down_.load()) {
       if (error != boost::asio::error::operation_aborted) {
         RCLCPP_ERROR(
-          get_logger(), "A-board %s failed: %s", operation, error.message().c_str());
+          get_logger(), "Aquaboard %s failed: %s", operation, error.message().c_str());
       }
       schedule_reconnect_io();
     } else {
@@ -594,7 +623,7 @@ private:
       }
       if (newly_faulted) {
         RCLCPP_ERROR(
-          get_logger(), "Rejected semantically invalid A-board status: %s",
+          get_logger(), "Rejected semantically invalid Aquaboard status: %s",
           semantic_reason.c_str());
         dispatch_neutral_current_session_io();
       }
@@ -605,6 +634,8 @@ private:
     std::string fault_reason;
     bool rotated = false;
     bool shutdown_neutral_applied = false;
+    bool calibration_completed = false;
+    bool calibration_failed = false;
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
       status_semantic_fault_ = false;
@@ -655,6 +686,23 @@ private:
       have_status_ = true;
       last_status_ns_ = now;
       ++status_frames_;
+
+      const bool calibration_active =
+        (board.flags & kStatusFlagImuCalibrating) != 0U;
+      if (imu_calibration_requested_ && calibration_active) {
+        imu_calibration_seen_active_ = true;
+      }
+      if (imu_calibration_requested_ && imu_calibration_seen_active_ && !calibration_active) {
+        if ((board.flags & kStatusFlagImuCalibrationOk) != 0U) {
+          calibration_completed = true;
+          imu_calibration_requested_ = false;
+          transition_reason_ = "external IMU gyro calibration succeeded";
+        } else if ((board.flags & kStatusFlagImuCalibrationFail) != 0U) {
+          calibration_failed = true;
+          imu_calibration_requested_ = false;
+          transition_reason_ = "external IMU gyro calibration failed";
+        }
+      }
 
       const bool reported_session =
         (board.flags & kStatusFlagSessionEstablished) != 0U &&
@@ -754,10 +802,15 @@ private:
 
     if (rotated) {
       RCLCPP_WARN(
-        get_logger(), "Rotated A-board control session: %s", fault_reason.c_str());
+        get_logger(), "Rotated Aquaboard control session: %s", fault_reason.c_str());
       dispatch_neutral_current_session_io();
     }
     if (shutdown_neutral_applied) {finish_shutdown_io();}
+    if (calibration_completed) {
+      RCLCPP_INFO(get_logger(), "External IMU saved gyro calibration succeeded");
+    } else if (calibration_failed) {
+      RCLCPP_ERROR(get_logger(), "External IMU saved gyro calibration failed");
+    }
   }
 
   bool handle_imu_io(const ImuFrame & sample)
@@ -1012,6 +1065,59 @@ private:
     }
   }
 
+  void calibrate_imu_gyro(
+    const std::shared_ptr<std_srvs::srv::Trigger::Request>,
+    std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+  {
+    const auto now = steady_now_ns();
+    const auto imu_arrival = last_imu_arrival_steady_ns_.load();
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    const bool status_fresh = have_status_ && last_status_ns_ > 0 &&
+      (now - last_status_ns_) / 1000000LL <= heartbeat_timeout_ms_;
+    const bool imu_fresh = imu_arrival > 0 && (now - imu_arrival) <= 100000000LL;
+    const bool board_outputs_disabled = have_status_ &&
+      (latest_status_.flags & kStatusFlagOutputsEnabled) == 0U &&
+      std::all_of(
+      latest_status_.pwm_us.begin(), latest_status_.pwm_us.end(),
+      [](std::uint16_t pwm) {return pwm == 1500U;});
+
+    if (!connected_.load() || !status_fresh || status_semantic_fault_ ||
+      !session_acknowledged_)
+    {
+      response->success = false;
+      response->message = "Aquaboard link/session is not healthy";
+      return;
+    }
+    if (!command_valid_ || command_armed_ || command_enabled_ || !board_outputs_disabled) {
+      response->success = false;
+      response->message = "disarm first and wait for all PWM outputs to report 1500 us";
+      return;
+    }
+    if (!imu_fresh) {
+      response->success = false;
+      response->message = "external IMU stream is not fresh";
+      return;
+    }
+    if (imu_calibration_requested_ ||
+      (latest_status_.flags & kStatusFlagImuCalibrating) != 0U)
+    {
+      response->success = false;
+      response->message = "external IMU gyro calibration is already active";
+      return;
+    }
+
+    imu_calibration_requested_ = true;
+    imu_calibration_seen_active_ = false;
+    imu_calibration_local_failed_ = false;
+    imu_calibration_request_ns_ = now;
+    reset_arm_barrier_locked();
+    transition_reason_ = "external IMU gyro calibration requested";
+    response->success = true;
+    response->message =
+      "accepted; keep the vehicle level and completely still until completion "
+      "(about 12 seconds); monitor /hardware/board_status";
+  }
+
   bool host_enable_allowed_locked(std::int64_t now_ns) const
   {
     const bool status_fresh = have_status_ && last_status_ns_ > 0 &&
@@ -1023,8 +1129,11 @@ private:
       (latest_status_.flags & kStatusFlagFailsafe) == 0U;
     const bool command_fresh = last_command_ns_ > 0 &&
       (now_ns - last_command_ns_) / 1000000LL <= command_timeout_ms_;
+    const bool calibration_inhibit = imu_calibration_requested_ || (have_status_ &&
+      (latest_status_.flags & kStatusFlagImuCalibrating) != 0U);
     return connected_.load() && status_fresh && !status_semantic_fault_ && board_session &&
       board_safe && session_acknowledged_ && !ack_fault_latched_ &&
+      !calibration_inhibit &&
       command_publisher_gate_ && command_valid_ && command_fresh && command_enabled_ &&
       command_armed_ && arm_authorized_ && command_arm_generation_ == authorized_generation_;
   }
@@ -1047,14 +1156,31 @@ private:
         heartbeat_rotated = true;
       }
 
+      if (imu_calibration_requested_) {
+        const auto elapsed = std::chrono::nanoseconds(now - imu_calibration_request_ns_);
+        const bool start_timeout = !imu_calibration_seen_active_ &&
+          elapsed > kImuCalibrationStartTimeout;
+        const bool overall_timeout = elapsed > kImuCalibrationOverallTimeout;
+        if (start_timeout || overall_timeout) {
+          imu_calibration_requested_ = false;
+          imu_calibration_local_failed_ = true;
+          transition_reason_ = start_timeout ?
+            "Aquaboard firmware did not acknowledge IMU calibration" :
+            "external IMU calibration timed out";
+          RCLCPP_ERROR(
+            get_logger(), "%s", transition_reason_.c_str());
+        }
+      }
+
       request.session_id = session_id_;
       request.boot_id = have_link_boot_challenge_ ? link_boot_id_ : 0U;
       request.sequence = ++command_sequence_;
+      request.calibrate_imu_gyro = imu_calibration_requested_;
       request.enable = host_enable_allowed_locked(now);
       if (request.enable) {request.offsets = command_offsets_;}
     }
     if (heartbeat_rotated) {
-      RCLCPP_ERROR(get_logger(), "A-board heartbeat timed out; session rotated and re-arm required");
+      RCLCPP_ERROR(get_logger(), "Aquaboard heartbeat timed out; session rotated and re-arm required");
     }
     enqueue_latest_write(std::move(request));
   }
@@ -1128,6 +1254,10 @@ private:
         request.enable = false;
         request.offsets.fill(0);
       }
+      if (request.calibrate_imu_gyro) {
+        request.enable = false;
+        request.offsets.fill(0);
+      }
       last_dispatched_sequence_ = request.sequence;
       have_dispatched_sequence_ = true;
       if (!request.enable && !have_handshake_sequence_) {
@@ -1136,6 +1266,9 @@ private:
       }
       CommandFrame dispatched;
       dispatched.flags = request.enable ? kCommandFlagEnable : 0U;
+      if (request.calibrate_imu_gyro) {
+        dispatched.flags |= kCommandFlagImuGyroCalibrate;
+      }
       dispatched.boot_id = request.boot_id;
       dispatched.session_id = request.session_id;
       dispatched.sequence = request.sequence;
@@ -1147,7 +1280,8 @@ private:
     }
 
     request.frame = build_command_v2(
-      request.boot_id, request.session_id, request.sequence, request.enable, request.offsets);
+      request.boot_id, request.session_id, request.sequence, request.enable, request.offsets,
+      request.calibrate_imu_gyro);
     auto active = std::make_shared<WriteRequest>(std::move(request));
     active_write_ = active;
     const auto token = ++write_token_;
@@ -1275,6 +1409,10 @@ private:
     snapshot.publisher_gate = command_publisher_gate_;
     snapshot.authority_endpoint = authority_publisher_identified_;
     snapshot.command_timeout_latched = command_timeout_latched_;
+    snapshot.imu_calibration_requested = imu_calibration_requested_;
+    snapshot.imu_calibration_seen_active = imu_calibration_seen_active_;
+    snapshot.imu_calibration_local_failed = imu_calibration_local_failed_;
+    snapshot.imu_calibration_request_ns = imu_calibration_request_ns_;
     snapshot.have_dispatched = have_dispatched_sequence_;
     snapshot.have_ack = have_ack_baseline_;
     snapshot.have_boot_challenge = have_link_boot_challenge_;
@@ -1328,6 +1466,13 @@ private:
     status.session_established = session_ok;
     status.outputs_enabled = snapshot.have_status &&
       (snapshot.board.flags & kStatusFlagOutputsEnabled) != 0U;
+    status.imu_gyro_calibration_active = snapshot.have_status &&
+      (snapshot.board.flags & kStatusFlagImuCalibrating) != 0U;
+    status.imu_gyro_calibration_succeeded = snapshot.have_status &&
+      (snapshot.board.flags & kStatusFlagImuCalibrationOk) != 0U;
+    status.imu_gyro_calibration_failed = snapshot.imu_calibration_local_failed ||
+      (snapshot.have_status &&
+      (snapshot.board.flags & kStatusFlagImuCalibrationFail) != 0U);
     status.failsafe_active = !heartbeat || !session_ok || snapshot.semantic_fault ||
       snapshot.ack_fault || reported_failsafe || publisher_fault ||
       rearm_required;
@@ -1367,8 +1512,7 @@ private:
       published_runtime_generation_ = snapshot.runtime_generation;
     }
 
-    updater_.force_update();
-  }
+    }
 
   void diagnose(diagnostic_updater::DiagnosticStatusWrapper & status)
   {
@@ -1491,6 +1635,13 @@ private:
     status.add("authority_epoch", snapshot.authority_epoch);
     status.add("command_age_ms", command_age_ms);
     status.add("command_timeout_latched", snapshot.command_timeout_latched);
+    status.add("imu_gyro_calibration_requested", snapshot.imu_calibration_requested);
+    status.add("imu_gyro_calibration_active",
+      (snapshot.board.flags & kStatusFlagImuCalibrating) != 0U);
+    status.add("imu_gyro_calibration_succeeded",
+      (snapshot.board.flags & kStatusFlagImuCalibrationOk) != 0U);
+    status.add("imu_gyro_calibration_failed", snapshot.imu_calibration_local_failed ||
+      (snapshot.board.flags & kStatusFlagImuCalibrationFail) != 0U);
     status.add("command_source", snapshot.command_source);
     status.add("command_arm_generation", snapshot.arm_generation);
     status.add("authorized_arm_generation", snapshot.authorized_generation);
@@ -1575,6 +1726,10 @@ private:
   std::uint64_t disarmed_generation_{0U};
   std::int64_t last_command_ns_{0};
   bool command_timeout_latched_{false};
+  bool imu_calibration_requested_{false};
+  bool imu_calibration_seen_active_{false};
+  bool imu_calibration_local_failed_{false};
+  std::int64_t imu_calibration_request_ns_{0};
   std::string command_source_;
   std::string transition_reason_;
 
@@ -1611,7 +1766,8 @@ private:
   rclcpp::Publisher<robotcore_interfaces::msg::BoardStatus>::SharedPtr status_pub_;
   rclcpp::Publisher<robotcore_interfaces::msg::BoardRuntime>::SharedPtr runtime_pub_;
   rclcpp::Subscription<robotcore_interfaces::msg::ThrusterCommand>::SharedPtr command_sub_;
-  rclcpp::TimerBase::SharedPtr command_timer_, status_timer_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr imu_calibration_service_;
+  rclcpp::TimerBase::SharedPtr command_timer_, status_timer_, diagnostic_timer_;
   diagnostic_updater::Updater updater_;
 };
 }  // namespace robotcore_hardware

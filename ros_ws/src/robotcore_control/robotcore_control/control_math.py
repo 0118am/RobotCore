@@ -21,6 +21,93 @@ def vec(values: Iterable[float], size: int) -> np.ndarray:
     return result
 
 
+def altitude_velocity_setpoint(
+    target_height: float,
+    actual_height: float,
+    target_vertical_velocity: float,
+    position_kp: float,
+) -> float:
+    """Convert map-frame height error into an unrestricted speed target."""
+
+    values = np.asarray(
+        [
+            target_height,
+            actual_height,
+            target_vertical_velocity,
+            position_kp,
+        ],
+        dtype=np.float64,
+    )
+    if not np.all(np.isfinite(values)):
+        raise ValueError("altitude-loop inputs must be finite")
+    return float(target_vertical_velocity) + float(position_kp) * (
+        float(target_height) - float(actual_height)
+    )
+
+
+def altitude_collective_pwm_commands(
+    pid_output: float, command_limit: float, command_sign: float
+) -> np.ndarray:
+    """Apply one direct PID effort to the four vertical PWM channels."""
+
+    if not all(
+        math.isfinite(value) for value in (pid_output, command_limit, command_sign)
+    ):
+        raise ValueError("altitude PWM inputs must be finite")
+    if math.isclose(command_sign, 0.0, abs_tol=1e-12):
+        raise ValueError("altitude PWM command sign must be non-zero")
+    limit = abs(float(command_limit))
+    common = float(
+        np.clip(math.copysign(1.0, command_sign) * pid_output, -limit, limit)
+    )
+    commands = np.zeros(8, dtype=np.float64)
+    commands[:4] = common
+    return commands
+
+
+def first_order_low_pass(
+    previous: float | None,
+    sample: float,
+    dt: float,
+    time_constant_s: float,
+) -> float:
+    """Filter one finite sample without adding an actuator command ramp."""
+
+    values = (sample, dt, time_constant_s)
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("low-pass inputs must be finite")
+    if dt <= 0.0:
+        raise ValueError("low-pass dt must be positive")
+    if previous is None or time_constant_s <= 0.0:
+        return float(sample)
+    if not math.isfinite(previous):
+        raise ValueError("low-pass previous value must be finite")
+    alpha = -math.expm1(-dt / time_constant_s)
+    return float(previous + alpha * (sample - previous))
+
+
+def manual_surge_yaw_commands(commands: Iterable[float]) -> np.ndarray:
+    """Keep only manual surge/yaw and return their T5--T8 command pattern.
+
+    Browser/manual candidates are physical thruster vectors.  Projecting onto
+    the two approved mixer basis vectors prevents vertical or roll input from
+    leaking into altitude-hold mode, including from an older browser client.
+    """
+
+    values = vec(commands, 8)
+    upper = values[4:]
+    surge = 0.25 * (-upper[0] - upper[1] + upper[2] + upper[3])
+    yaw = 0.25 * (-upper[0] + upper[1] + upper[2] - upper[3])
+    result = np.zeros(8, dtype=np.float64)
+    result[4:] = [
+        -surge - yaw,
+        -surge + yaw,
+        surge + yaw,
+        surge - yaw,
+    ]
+    return np.clip(result, -1.0, 1.0)
+
+
 def normalize_quaternion(quaternion: Iterable[float]) -> np.ndarray:
     q = vec(quaternion, 4)
     norm = float(np.linalg.norm(q))
@@ -128,7 +215,15 @@ class ConditionalPid:
         self.filtered_derivative = 0.0
         self.saturated = False
 
-    def step(self, *, setpoint: float, measurement: float, dt: float, feedforward: float = 0.0) -> float:
+    def step(
+        self,
+        *,
+        setpoint: float,
+        measurement: float,
+        dt: float,
+        feedforward: float = 0.0,
+        output_limit: float | None = None,
+    ) -> float:
         if not all(math.isfinite(value) for value in (setpoint, measurement, dt, feedforward)):
             raise ValueError("PID inputs must be finite")
         if dt <= 0.0:
@@ -157,7 +252,13 @@ class ConditionalPid:
             + self.gains.ki * proposed_integral
             + self.gains.kd * self.filtered_derivative
         )
-        limit = abs(float(self.gains.output_limit))
+        limit = abs(
+            float(self.gains.output_limit)
+            if output_limit is None
+            else float(output_limit)
+        )
+        if not math.isfinite(limit):
+            raise ValueError("PID output limit must be finite")
         saturated = float(np.clip(unsaturated, -limit, limit))
 
         # Integrate when unsaturated, or when the error would pull an already
@@ -211,4 +312,3 @@ class SixAxisPid:
             ],
             dtype=np.float64,
         )
-

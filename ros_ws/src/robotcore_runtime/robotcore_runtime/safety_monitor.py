@@ -14,8 +14,8 @@ class SafetyMonitor(Node):
 
     def __init__(self):
         super().__init__("safety_monitor")
-        self.declare_parameter("publish_rate_hz", 20.0)
-        # aCube publishes at 20 Hz. Ten periods avoid false trips from a few
+        self.declare_parameter("publish_rate_hz", 10.0)
+        # The bridge publishes BoardStatus at 10 Hz. Five periods avoid false trips from a few
         # delayed ROS callbacks while the MCU's independent command timeout
         # remains the actuator's hard communication deadline.
         self.declare_parameter("board_status_timeout_s", 0.50)

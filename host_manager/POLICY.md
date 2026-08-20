@@ -6,7 +6,7 @@
    state and call the existing, safety-reviewed ROS interfaces.  It has no
    Unix-socket access and no credentials for Linux service management.
 2. **Robot service zone (`robotcore.service`)**: the `robotcore` account owns the
-   ROS graph and is the only process granted A-board device access.  The web
+   ROS graph and is the only process granted Aquaboard device access.  The web
    service runs as the same non-root account but uses ROS controls only.
 3. **Host-manager zone (`robotcore-host-manager.service`)**: root-owned, local Unix
    socket, command allowlist, audit log via journald.  Socket access is granted
@@ -21,7 +21,7 @@
   an authenticated TLS reverse proxy or VPN; do not expose port 8080 directly.
 - The browser service must have no serial-device parameter, UART framing code,
   or normalized-command-to-PWM mapping. It publishes a ROS manual candidate
-  only. The production A-board bridge is the sole Jetson serial writer, and the
+  only. The production Aquaboard bridge is the sole Jetson serial writer, and the
   browser unit must remain outside the `dialout` group. An empty serial setting
   is not an acceptable substitute for deleting the capability.
 - `/etc/robotcore/host-manager.json` must be `root:root`, mode `0640`; only root may
@@ -53,5 +53,5 @@
 | `/etc/robotcore/*.json`, systemd units, udev rules | root / release process |
 | `/var/lib/robotcore/runs` | `robotcore` runtime; host manager reads health only |
 | `/var/log` and journald | systemd/journald |
-| A-board serial device | `robotcore` service and approved local operators via `dialout` |
+| Aquaboard serial device | `robotcore` service and approved local operators via `dialout` |
 | Web static assets | release process; read-only at runtime |

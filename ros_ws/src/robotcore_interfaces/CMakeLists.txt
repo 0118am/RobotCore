@@ -31,6 +31,9 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/SetPolicy.srv"
   "srv/TriggerAbort.srv"
   "srv/SetControlAuthority.srv"
+  "srv/GetPidConfig.srv"
+  "srv/StartRun.srv"
+  "srv/StopRun.srv"
   "action/RunTrackingExperiment.action"
   "action/RunTask.action"
   DEPENDENCIES builtin_interfaces geometry_msgs std_msgs

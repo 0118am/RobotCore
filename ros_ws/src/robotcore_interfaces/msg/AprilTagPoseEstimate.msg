@@ -1,4 +1,4 @@
-# Single mapped AprilTag observation contract consumed by the ESKF.
+# Single mapped AprilTag observation consumed by map-to-odom alignment fusion.
 # Invalid observations still carry quality/rejection metadata. A monotonically
 # increasing map_generation folds relocalization into this same input stream.
 std_msgs/Header header

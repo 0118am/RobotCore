@@ -59,9 +59,8 @@ class TrackingMonitorNode(Node):
 
         now = self.get_clock().now()
         now_ns = now.nanoseconds
-        localization_valid = self.last_body.state_valid or (
-            self.last_body.position_estimated
-            and str(self.last_body.localization_source).startswith("ZED VIO")
+        localization_valid = (
+            self.last_body.state_valid or self.last_body.position_estimated
         )
         valid = (
             self.inputs_are_fresh(now_ns)

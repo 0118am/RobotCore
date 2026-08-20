@@ -25,7 +25,7 @@ float32 apriltag_frame_rate_hz
 float32 vio_transport_delay_s
 float32 tag_transport_delay_s
 
-# Time-aligned Tag-versus-filter innovation. Unavailable values are NaN.
+# Time-aligned Tag-versus-current-map-alignment innovation. Unavailable values are NaN.
 float32 tag_vio_translation_residual_m
 float32 tag_vio_angle_residual_deg
 

@@ -9,12 +9,12 @@ geometry_msgs/Twist twist
 # estimator or measurement.  A default-initialised Vector3 is not a zero-speed
 # observation.
 bool linear_velocity_valid
-# True when pose is a ZED-VIO/EKF dead-reckoning prediction following the last
+# True when pose is a ZED-VIO local-motion prediction following the last
 # trusted map observation. In that case state_valid remains false so control
 # code cannot mistake the prediction for an absolute localisation fix.
 bool position_estimated
 # Human-readable provenance for the current map pose, for example
-# "Tag+ZED VIO", "ZED VIO", or "EKF prediction". An empty value means no
+# "AprilTag+ZED VIO" or "ZED VIO after Tag loss". An empty value means no
 # usable position estimate is available.
 string localization_source
 bool state_valid

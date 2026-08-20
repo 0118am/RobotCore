@@ -1,4 +1,4 @@
-"""Launch the real Jetson/A-board edge graph."""
+"""Launch the real Jetson/Aquaboard edge graph."""
 
 import os
 from pathlib import Path
@@ -21,6 +21,7 @@ def generate_launch_description():
     run_root = os.environ.get(
         "ROBOTCORE_RUN_ROOT", str(Path.cwd() / "data" / "robotcore_runs")
     )
+    config_root = Path(os.environ.get("ROBOTCORE_CONFIG_ROOT", "/var/lib/robotcore/config"))
 
     return LaunchDescription(
         [
@@ -32,7 +33,6 @@ def generate_launch_description():
                 default_value="/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B7A033320-if00",
             ),
             DeclareLaunchArgument("baud", default_value="115200"),
-            DeclareLaunchArgument("zed_imu_topic", default_value="/zedx/zed_node/imu/data"),
             DeclareLaunchArgument("imu_raw_topic", default_value="/hardware/aboard_imu_raw"),
             DeclareLaunchArgument("external_imu_topic", default_value="/sensors/external_imu"),
             DeclareLaunchArgument("front_camera_raw_topic", default_value="/zedx/zed_node/rgb/color/rect/image"),
@@ -44,10 +44,10 @@ def generate_launch_description():
                 "front_camera_info_topic", default_value="/zedx/zed_node/rgb/color/rect/camera_info"
             ),
             DeclareLaunchArgument("enable_apriltag_localization", default_value="true"),
-            # The real-pool PID configs are intentionally fail-closed until
-            # measured. Do not burn timer/DDS CPU on the automatic tracking
-            # graph during the normal manual/sensor edge workflow.
-            DeclareLaunchArgument("enable_pool_tracking", default_value="false"),
+            # The validation-vehicle thruster model and pool envelope are
+            # confirmed. Individual authority, localisation and target gates
+            # remain fail-closed even though the tracking processes are live.
+            DeclareLaunchArgument("enable_pool_tracking", default_value="true"),
             DeclareLaunchArgument(
                 "apriltag_detections_topic",
                 default_value="/localization/apriltag/detections",
@@ -58,10 +58,9 @@ def generate_launch_description():
                 # publishes RGB8 and the CUDA detector consumes it.
                 default_value="/localization/apriltag/cuda_input_rgb",
             ),
-            # AprilTag calibrates map->odom. ZED VIO already fuses the camera
-            # IMU and continuously propagates odom->base_link between tags.
+            # ZED VIO supplies continuous local odometry and AprilTag supplies
+            # the absolute map alignment. External IMU remains telemetry only.
             DeclareLaunchArgument("enable_fixed_rate_state_estimator", default_value="true"),
-            DeclareLaunchArgument("zed_odometry_topic", default_value="/zedx/zed_node/odom"),
             DeclareLaunchArgument("zed_workspace", default_value="/home/nvidia/ros2_ws"),
             DeclareLaunchArgument(
                 "zed_params_file",
@@ -76,10 +75,6 @@ def generate_launch_description():
                 default_value=PathJoinSubstitution(
                     [FindPackageShare("robotcore_sensors"), "config", "external_imu.yaml"]
                 ),
-            ),
-            DeclareLaunchArgument(
-                "apriltag_detected_count_topic",
-                default_value="/localization/apriltag/detected_count",
             ),
             DeclareLaunchArgument("apriltag_max_tags", default_value="24"),
             DeclareLaunchArgument(
@@ -110,9 +105,7 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "pid_config_path",
-                default_value=PathJoinSubstitution(
-                    [FindPackageShare("robotcore_control"), "config", "real_pool_pid.yaml"]
-                ),
+                default_value=str(config_root / "pid" / "active.json"),
             ),
             DeclareLaunchArgument(
                 "thruster_config_path",
@@ -120,13 +113,13 @@ def generate_launch_description():
                     [FindPackageShare("robotcore_control"), "config", "real_pool_thrusters.yaml"]
                 ),
             ),
+            DeclareLaunchArgument("task_config_dir", default_value=str(config_root / "tasks")),
             DeclareLaunchArgument(
-                "scenario_config_path",
-                default_value=PathJoinSubstitution(
-                    [FindPackageShare("robotcore_runtime"), "config", "tracking_scenarios.yaml"]
-                ),
+                "record_topics_path",
+                default_value=str(config_root / "tasks" / "record_topics.json"),
             ),
             SetEnvironmentVariable(name="ROBOTCORE_RUN_ROOT", value=run_root),
+            SetEnvironmentVariable(name="ROBOTCORE_CONFIG_ROOT", value=str(config_root)),
             # Static transforms use the standard C++ tf2 publisher. No Python
             # process remains in the sensor-to-BodyState data path.
             Node(
@@ -158,8 +151,9 @@ def generate_launch_description():
             ),
             # Isaac ROS owns only the image-space detector. Its single-size
             # pose and TF outputs are not authoritative because the managed
-            # map contains both 0.4 m and 0.2 m Tags. The downstream map node
-            # consumes ID/corners and performs one joint, per-Tag-size PnP.
+            # map contains both 0.4 m and 0.2 m Tags. RobotCore's own
+            # apriltag_localization component consumes ID/corners and performs
+            # one joint, per-Tag-size PnP.
             # Negotiated subscriptions advertise transient-local capabilities,
             # so discovery remains correct regardless of whether the ZED
             # managed publisher or this container appears first.
@@ -236,7 +230,6 @@ def generate_launch_description():
                             "camera_info_topic": LaunchConfiguration("front_camera_info_topic"),
                             "detections_topic": LaunchConfiguration("apriltag_detections_topic"),
                             "tag_map_file": LaunchConfiguration("apriltag_tag_map_file"),
-                            "detected_count_topic": LaunchConfiguration("apriltag_detected_count_topic"),
                             "base_frame": "base_link",
                             "map_frame": "map",
                             "enforce_cuboid_pool_geometry": True,
@@ -244,10 +237,18 @@ def generate_launch_description():
                             "pool_width_m": 3.73,
                             "pool_surface_tolerance_m": 0.02,
                             "pool_orientation_tolerance_deg": 2.0,
-                            "minimum_pose_tag_count": 3,
+                            "minimum_pose_tag_count": 1,
+                            "maximum_pose_tag_count": 3,
                             "minimum_inlier_corners_per_tag": 3,
+                            "maximum_tag_edge_ratio": 2.5,
                             "max_reprojection_rms_px": 3.0,
+                            "single_tag_max_reprojection_rms_px": 1.5,
                             "multi_tag_position_stddev_m": 0.05,
+                            "dual_tag_position_stddev_m": 0.075,
+                            "dual_tag_angle_stddev_deg": 3.0,
+                            "single_tag_position_stddev_m": 0.10,
+                            "single_tag_angle_stddev_deg": 4.0,
+                            "single_tag_reference_edge_px": 40.0,
                         }],
                         extra_arguments=[{"use_intra_process_comms": True}],
                     ),
@@ -259,7 +260,7 @@ def generate_launch_description():
                 name="localization_estimator_container",
                 namespace="",
                 output="screen",
-                parameters=[{"thread_num": 3}],
+                parameters=[{"thread_num": 2}],
                 condition=IfCondition(LaunchConfiguration("enable_fixed_rate_state_estimator")),
                 composable_node_descriptions=[
                     ComposableNode(
@@ -269,32 +270,22 @@ def generate_launch_description():
                         parameters=[LaunchConfiguration("external_imu_config"), {
                             "input_topic": LaunchConfiguration("imu_raw_topic"),
                             "output_topic": LaunchConfiguration("external_imu_topic"),
-                            "calibration_sample_count": 250,
-                            "calibration_timeout_s": 10.0,
                         }],
                         extra_arguments=[{"use_intra_process_comms": True}],
                     ),
                     ComposableNode(
                         package="robotcore_sensors",
-                        plugin="robotcore_sensors::ZedOdometryAdapterComponent",
-                        name="zed_odometry_adapter",
+                        plugin="robotcore_sensors::VioTagFusionComponent",
+                        name="vio_tag_fusion",
                         parameters=[{
-                            "input_topic": LaunchConfiguration("zed_odometry_topic"),
-                            "output_topic": "/localization/zed_odom",
-                            "base_frame": "base_link",
-                        }],
-                        extra_arguments=[{"use_intra_process_comms": True}],
-                    ),
-                    ComposableNode(
-                        package="robotcore_sensors",
-                        plugin="robotcore_sensors::FixedLagEskfComponent",
-                        name="fixed_lag_eskf",
-                        parameters=[{
-                            "imu_topic": LaunchConfiguration("external_imu_topic"),
-                            "vio_topic": "/localization/zed_odom",
+                            "vio_topic": "/zedx/zed_node/odom",
                             "tag_topic": "/localization/apriltag_pose",
                             "output_rate_hz": 60.0,
                             "history_duration_s": 3.0,
+                            "tag_fresh_s": 0.35,
+                            "tag_innovation_gate_m": 0.50,
+                            "vio_arrival_timeout_s": 0.30,
+                            "vio_prediction_horizon_s": 0.50,
                         }],
                         extra_arguments=[{"use_intra_process_comms": True}],
                     ),
@@ -323,12 +314,13 @@ def generate_launch_description():
                 output="screen",
                 condition=IfCondition(LaunchConfiguration("enable_pool_tracking")),
                 parameters=[
+                    LaunchConfiguration("pool_control_config"),
                     {
                         "pid_config_path": LaunchConfiguration("pid_config_path"),
                         "thruster_config_path": LaunchConfiguration(
                             "thruster_config_path"
                         ),
-                        "control_rate_hz": 60.0,
+                        "control_rate_hz": 30.0,
                     }
                 ],
             ),
@@ -347,9 +339,26 @@ def generate_launch_description():
                 condition=IfCondition(LaunchConfiguration("enable_pool_tracking")),
                 parameters=[
                     {
-                        "scenario_config_path": LaunchConfiguration(
-                            "scenario_config_path"
+                        "task_config_dir": LaunchConfiguration(
+                            "task_config_dir"
                         )
+                    }
+                ],
+            ),
+            Node(
+                package="robotcore_runtime",
+                executable="run_logger",
+                name="run_logger",
+                output="screen",
+                condition=IfCondition(LaunchConfiguration("enable_pool_tracking")),
+                parameters=[
+                    {
+                        "run_root": run_root,
+                        "pid_config_path": LaunchConfiguration("pid_config_path"),
+                        "thruster_config_path": LaunchConfiguration("thruster_config_path"),
+                        "task_config_dir": LaunchConfiguration("task_config_dir"),
+                        "record_topics_path": LaunchConfiguration("record_topics_path"),
+                        "safety_config_path": LaunchConfiguration("pool_control_config"),
                     }
                 ],
             ),
@@ -357,12 +366,6 @@ def generate_launch_description():
                 package="robotcore_runtime",
                 executable="safety_monitor",
                 name="safety_monitor",
-                output="screen",
-            ),
-            Node(
-                package="robotcore_runtime",
-                executable="blackboard",
-                name="blackboard",
                 output="screen",
             ),
             Node(
@@ -401,12 +404,10 @@ def generate_launch_description():
                         "web_port": LaunchConfiguration("web_port"),
                         "host_manager_socket": LaunchConfiguration("host_manager_socket"),
                         "apriltag_map_file": LaunchConfiguration("apriltag_tag_map_file"),
-                        "apriltag_detected_count_topic": LaunchConfiguration(
-                            "apriltag_detected_count_topic"
-                        ),
+                        "localization_status_topic": "/localization/status",
                         "title": "RobotCore Operator",
                         "front_camera_compressed_topic": LaunchConfiguration("front_camera_compressed_topic"),
-                        "imu_topic": LaunchConfiguration("zed_imu_topic"),
+                        "imu_topic": LaunchConfiguration("external_imu_topic"),
                         "manual_thruster_topic": "/control/candidates/manual",
                     }
                 ],

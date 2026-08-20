@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only timing/integrity probe for aCube UART protocol v2."""
+"""Read-only timing/integrity probe for Aquaboard UART protocol v2."""
 
 from __future__ import annotations
 

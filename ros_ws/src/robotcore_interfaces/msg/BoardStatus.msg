@@ -7,6 +7,11 @@ bool failsafe_active
 # replace the previous unacknowledged 16-channel heartbeat stream.
 bool session_established
 bool outputs_enabled
+# Saved gyro-bias calibration performed inside the external IMU through
+# Aquaboard. Exactly one terminal flag is reported after completion.
+bool imu_gyro_calibration_active
+bool imu_gyro_calibration_succeeded
+bool imu_gyro_calibration_failed
 uint8 protocol_version
 uint32 board_tick_ms
 uint32 boot_id

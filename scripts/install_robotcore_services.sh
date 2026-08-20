@@ -70,15 +70,15 @@ validate_env_path ROBOTCORE_WORKSPACE "${robot_workspace}"
 validate_env_path CONTROL_INTERFACE_WORKSPACE "${web_workspace}"
 validate_env_path ZED_WORKSPACE "${zed_workspace}"
 
-# Refuse to install a service that would silently launch the old Python
-# localisation graph. The fixed-lag ESKF executable is the C++ deployment
-# marker produced by the current workspace build.
+# Refuse to install a service without the production C++ localisation graph.
+# The VIO/Tag fusion executable is the deployment marker produced by the
+# current workspace build.
 test -r "${robot_workspace}/install/setup.bash" || {
   echo "RobotCore workspace is not built: ${robot_workspace}" >&2
   exit 1
 }
-test -x "${robot_workspace}/install/robotcore_sensors/lib/robotcore_sensors/fixed_lag_eskf_node" || {
-  echo "C++ fixed_lag_eskf_node is missing from ${robot_workspace}" >&2
+test -x "${robot_workspace}/install/robotcore_sensors/lib/robotcore_sensors/vio_tag_fusion_node" || {
+  echo "C++ vio_tag_fusion_node is missing from ${robot_workspace}" >&2
   exit 1
 }
 test -x "${robot_workspace}/install/robotcore_control_cpp/lib/robotcore_control_cpp/command_authority" || {
@@ -166,10 +166,32 @@ set_env_value ROS_DOMAIN_ID 42
 set_env_value RMW_IMPLEMENTATION rmw_cyclonedds_cpp
 set_env_value CYCLONEDDS_URI file:///etc/robotcore/cyclonedds.xml
 set_env_value ROBOTCORE_RUN_ROOT /var/lib/robotcore/runs
+set_env_value ROBOTCORE_CONFIG_ROOT /var/lib/robotcore/config
 chown root:robotcore "${edge_env}" "${config_root}/cyclonedds.xml"
 chmod 0640 "${edge_env}" "${config_root}/cyclonedds.xml"
 install -d -o robotcore -g robotcore -m 0750 /var/lib/robotcore
 install -d -o robotcore -g robotcore -m 0750 /var/lib/robotcore/runs
+install -d -o root -g robotops -m 0750 /var/lib/robotcore/config
+install -d -o root -g robotops -m 0750 /var/lib/robotcore/config/pid
+install -d -o root -g robotops -m 0750 /var/lib/robotcore/config/pid/profiles
+install -d -o root -g robotops -m 0750 /var/lib/robotcore/config/tasks
+if [[ ! -e /var/lib/robotcore/config/pid/active.json ]]; then
+  install -o root -g robotops -m 0640 \
+    "${repo_root}/ros_ws/src/robotcore_control/config/pid/default.json" \
+    /var/lib/robotcore/config/pid/active.json
+fi
+if [[ ! -e /var/lib/robotcore/config/pid/profiles/default.json ]]; then
+  install -o root -g robotops -m 0640 \
+    "${repo_root}/ros_ws/src/robotcore_control/config/pid/default.json" \
+    /var/lib/robotcore/config/pid/profiles/default.json
+fi
+for task_file in "${repo_root}"/ros_ws/src/robotcore_runtime/config/tasks/*.json; do
+  task_name=$(basename "${task_file}")
+  if [[ ! -e /var/lib/robotcore/config/tasks/${task_name} ]]; then
+    install -o root -g robotops -m 0640 "${task_file}" \
+      "/var/lib/robotcore/config/tasks/${task_name}"
+  fi
+done
 
 # Apply only RobotCore's queue tuning. Loading every host sysctl fragment here
 # produces unrelated Jetson/container warnings and can obscure a real failure.

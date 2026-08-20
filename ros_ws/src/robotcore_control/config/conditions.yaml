@@ -1,0 +1,39 @@
+sample_hz: 30.0
+
+excitation:
+  v_max: 0.45
+  duration_scale: 0.6
+  min_segment_s: 0.75
+  waypoint_dwell_s: 8.0
+  figure8_period_s: 20.0
+  paired_workspace_scale: 0.25
+  workspace_xy_scale: 0.85
+  workspace_z_min: -6.0
+  workspace_z_max: 1.0
+  switch_replan_speed_threshold_mps: 0.1
+  switch_hold_timeout_s: 2.0
+  switch_action_grace_s: 0.1
+  attitude_amplitude_deg: [15.0, 15.0, 30.0]
+  attitude_frequency_hz: [0.22, 0.20, 0.16]
+  attitude_ramp_s: 3.0
+  attitude_kp: [8.0, 8.0, 5.0]
+  attitude_kd: [2.5, 2.5, 2.0]
+  action_ou_theta_per_s: 2.0
+  action_ou_stationary_std: 0.08
+  action_ou_clip: 0.20
+
+train:
+  - {k: 0, current_speed: 0.00, current_dir_deg: 0, desc: H0_still_or_near_still}
+  - {k: 1, current_speed: 0.10, current_dir_deg: 0, desc: Xp1_pool_plus_x_0p1}
+  - {k: 2, current_speed: 0.20, current_dir_deg: 0, desc: Xp2_pool_plus_x_0p2}
+  - {k: 3, current_speed: 0.30, current_dir_deg: 0, desc: Xp3_pool_plus_x_0p3}
+  - {k: 4, current_speed: 0.35, current_dir_deg: 0, desc: Xp4_pool_plus_x_0p4}
+  - {k: 5, current_speed: 0.10, current_dir_deg: 90, desc: Yp1_pool_plus_y_0p1}
+
+extrapolation:
+  - {validation_id: V1, current_speed: 0.25, current_dir_deg: 0, desc: validation_unseen_pool_plus_x_interpolation}
+  - {validation_id: V2, current_speed: 0.4, current_dir_deg: 0, desc: validation_unseen_pool_plus_x_near_limit}
+  - {validation_id: V3, current_speed: 0.15, current_dir_deg: 90, desc: validation_unseen_pool_plus_y_lateral}
+
+fault:
+  - {thruster_id: random, efficiency_range: [0.0, 0.7]}

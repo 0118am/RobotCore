@@ -1,7 +1,7 @@
-# A-board UART6 protocol v2
+# Aquaboard UART6 protocol v2
 
-This is the only production propulsion transport between RobotCore and aCube.
-It deliberately carries eight logical thrusters; aCube maps logical channel
+This is the only production propulsion transport between RobotCore and Aquaboard.
+It deliberately carries eight logical thrusters; Aquaboard maps logical channel
 `0..7` to physical PWM `8..15`. PWM `0..7`, the legacy onboard mixer, CAN
 motion commands, and motion commands received on other UARTs are not control
 authorities.
@@ -15,7 +15,7 @@ pool floor as the map origin, the sole vertical state is the FLU
 All multibyte integers are little-endian. CRC is CRC-16/CCITT-FALSE with
 polynomial `0x1021` and initial value `0xffff`, stored low byte first.
 
-## Command, Jetson to aCube
+## Command, Jetson to Aquaboard
 
 The bridge sends one 34-byte frame at 50 Hz. It does not send per-command
 deadlines or per-source leases.
@@ -42,7 +42,7 @@ fffc02010403020178563412f0debc9a9cffffff000001001900320063006400c3dc
 A disabled frame whose boot ID matches the board's current status challenge
 establishes or changes the single control session and applies neutral. Until a
 valid status has supplied that challenge, RobotCore sends only boot ID zero and
-disabled output; aCube rejects it. An enabled frame is accepted only for the
+disabled output; Aquaboard rejects it. An enabled frame is accepted only for the
 current boot challenge and established session, and only when its sequence is
 newer. A boot mismatch, duplicate or old sequence, CRC failure, or enabled frame
 from another session does not refresh the board watchdog. A boot or session
@@ -50,13 +50,13 @@ mismatch also makes the outputs neutral, so restarting either processor
 requires a fresh disabled handshake plus an explicit disarm and re-arm.
 
 RobotCore independently turns a stale ROS producer command into a disabled
-frame after 150 ms. aCube has one transport watchdog at 250 ms. These are the
+frame after 150 ms. Aquaboard has one transport watchdog at 250 ms. These are the
 two necessary fault-containment boundaries; there are no overlapping leases
 inside the UART protocol.
 
-## Status/ACK, aCube to Jetson
+## Status/ACK, Aquaboard to Jetson
 
-aCube sends one 48-byte frame at 20 Hz.
+Aquaboard sends one 48-byte frame at 20 Hz.
 
 | Offset | Size | Field |
 | ---: | ---: | --- |
@@ -95,8 +95,8 @@ UART6 is 115200 baud, 8N1, so each direction can carry 11520 bytes/s.
 
 | Direction | Traffic | Bytes/s | Link use |
 | --- | --- | ---: | ---: |
-| Jetson to aCube | 34 B command at 50 Hz | 1700 | 14.8% |
-| aCube to Jetson | 27 B IMU at 100 Hz + 48 B status at 20 Hz | 3660 | 31.8% |
+| Jetson to Aquaboard | 34 B command at 50 Hz | 1700 | 14.8% |
+| Aquaboard to Jetson | 27 B IMU at 100 Hz + 48 B status at 20 Hz | 3660 | 31.8% |
 
 When IMU and status become ready together, their 75 bytes serialize in 6.51
 ms. This remains below the 10 ms IMU sample period. CRC failures, command age,

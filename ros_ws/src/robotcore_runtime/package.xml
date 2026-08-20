@@ -2,7 +2,7 @@
 <package format="3">
   <name>robotcore_runtime</name>
   <version>0.1.0</version>
-  <description>Runtime, safety, blackboard, task, and logging orchestration.</description>
+  <description>Runtime safety, task, tracking, and logging orchestration.</description>
   <maintainer email="maintainer@example.com">RobotCore Team</maintainer>
   <license>MIT</license>
 

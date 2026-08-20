@@ -53,14 +53,22 @@ def test_map_is_loaded_only_at_startup_or_by_explicit_relocalization():
     assert "tag_map_reload_interval_s" not in source
     assert "reload_tag_layout_if_changed" not in source
     assert "tag_map_mtime_ns" not in source
-    assert "bool load_map()" in source
+    assert "void load_map()" in source
     assert "void reload(" in source
+    assert "const auto previous = tags_" not in source
+    assert "map_error_" not in source
+    assert "if (!stream)" not in source
 
 
 def test_weak_tags_are_removed_without_rejecting_strong_tags_or_logging_acceptance():
     source = LOCALIZER.read_text(encoding="utf-8")
+    parser = MAP_PARSER.read_text(encoding="utf-8")
 
-    assert "tag_min_edge < min_edge_px_" in source
+    assert "assess_tag_image_quality(" in source
+    assert "shortest < minimum_edge_px" in parser
+    assert "longest / shortest > maximum_edge_ratio" in parser
+    assert "left.quality.score > right.quality.score" in source
+    assert "candidates.resize" in source
     assert "best_area" in source
     assert "degraded two-Tag VIO validation accepted" not in source
     assert "AprilTag correction accepted from mapped Tags" not in source
@@ -78,14 +86,15 @@ def test_isaac_raw_pose_is_not_used_for_mixed_tag_sizes():
     assert "definition.corners[index]" in parser
 
 
-def test_empty_or_invalid_map_is_fail_closed_without_retaining_deleted_tags():
+def test_invalid_map_is_rejected_without_empty_map_runtime_state():
     source = LOCALIZER.read_text(encoding="utf-8")
     parser = MAP_PARSER.read_text(encoding="utf-8")
 
     assert '"tag_map_file", "/etc/robotcore/apriltag_map.json"' in source
     assert "tags_ = parse_apriltag_map(root, map_frame_, pool_geometry_)" in source
-    assert "if (tags_.empty())" in source
-    assert '"empty tag map loaded; absolute Tag localization disabled"' in source
+    assert "empty_map_state_published_" not in source
+    assert "if (tags_.empty())" not in source
+    assert "empty tag map" not in source
     assert 'root.at("schema_version").get<int>() != 1' in parser
     assert 'root.at("frame").get<std::string>() != expected_frame' in parser
     assert "validate_tag_on_pool" in parser
@@ -136,25 +145,24 @@ def test_apriltag_payload_remappings_define_one_zed_cuda_localizer_path():
     assert launch.count('LaunchConfiguration("apriltag_detections_topic")') == 2
 
 
-def test_tag_bootstrap_uses_four_frames_then_enters_the_common_measurement_queue():
+def test_tag_measurement_updates_only_map_to_odom_alignment():
     fusion = (
         ROOT
-        / "ros_ws/src/robotcore_sensors/src/fixed_lag_eskf_component.cpp"
+        / "ros_ws/src/robotcore_sensors/src/vio_tag_fusion_component.cpp"
     ).read_text(encoding="utf-8")
 
-    assert "while (alignment_candidates_.size() > 4U)" in fusion
-    assert "if (alignment_candidates_.size() < 4U)" in fusion
-    assert "map_from_odom_ = representative_alignment();" in fusion
-    assert "event.source = MeasurementSource::Tag" in fusion
-    assert "measurements_.insert(insertion, event)" in fusion
-    assert "replay_from(*index, event.id)" in fusion
-    assert "blend_transform" not in fusion
+    assert "candidate =" in fusion
+    assert "map_from_base * vio->odom_from_base.inverse()" in fusion
+    assert "update_alignment(candidate" in fusion
+    assert "filter_.update_pose(" not in fusion
+    assert "replay_from(" not in fusion
 
 
-def test_imu_latched_status_does_not_disable_high_rate_intra_process_path():
+def test_imu_conditioner_uses_bounded_sensor_qos_without_duplicate_status_stream():
     conditioner = (
         ROOT / "ros_ws/src/robotcore_sensors/src/imu_conditioner_component.cpp"
     ).read_text(encoding="utf-8")
 
-    assert "status_options.use_intra_process_comm" in conditioner
-    assert "rclcpp::IntraProcessSetting::Disable" in conditioner
+    assert "rclcpp::SensorDataQoS().keep_last(8)" in conditioner
+    assert "rclcpp::SensorDataQoS().keep_last(32)" in conditioner
+    assert "status_pub_" not in conditioner

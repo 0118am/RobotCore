@@ -13,8 +13,8 @@ def test_run_logger_buffers_one_open_file_and_bounds_repeated_streams():
     assert "buffering=64 * 1024" in source
     assert "self.event_log_handle.write" in source
     assert 'separators=(",", ":")' in source
-    assert "self.event_log_path.open(" in source
-    assert 'with self.event_log_path.open("a"' not in source
+    assert '(self.run_dir / "event_log.jsonl").open(' in source
+    assert "if self.event_log_handle is None:" in source
     assert 'self.declare_parameter("thruster_log_rate_hz", 20.0)' in source
     assert 'self.declare_parameter("authority_log_rate_hz", 10.0)' in source
     assert 'self.declare_parameter("pid_log_rate_hz", 10.0)' in source
@@ -27,4 +27,7 @@ def test_safety_and_experiment_events_force_a_buffer_flush():
     source = LOGGER.read_text(encoding="utf-8")
 
     assert "flush=bool(msg.abort_active)" in source
-    assert 'self.write_event("tracking_experiment", payload, flush=True)' in source
+    assert source.count('"tracking_experiment",') == 2
+    assert source.count("flush=True,") >= 3
+    assert "self.stop_rosbag()" in source
+    assert "self.event_log_handle.close()" in source

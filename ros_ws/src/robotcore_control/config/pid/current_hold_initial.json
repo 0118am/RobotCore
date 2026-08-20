@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "profile_name": "current_hold_initial",
+  "configured": true,
+  "outer_position_kp": [0.65, 0.65, 0.55],
+  "outer_orientation_kp": [0.9, 0.9, 0.7],
+  "max_linear_velocity_mps": [0.16, 0.12, 0.08],
+  "max_angular_velocity_rps": [0.22, 0.22, 0.30],
+  "inner_kp": [16.0, 14.0, 14.0, 2.8, 2.8, 2.5],
+  "inner_ki": [2.0, 1.6, 1.0, 0.08, 0.08, 0.06],
+  "inner_kd": [2.2, 2.0, 1.8, 0.35, 0.35, 0.30],
+  "integral_limit": [10.0, 8.0, 6.0, 0.8, 0.8, 0.8],
+  "wrench_limit": [45.0, 28.0, 35.0, 5.0, 5.0, 4.0],
+  "derivative_cutoff_hz": 3.0
+}

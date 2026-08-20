@@ -12,12 +12,17 @@ constexpr std::uint8_t kCommandV2Type = 0xFCU;
 constexpr std::uint8_t kStatusV2Type = 0xFDU;
 constexpr std::uint8_t kProtocolV2 = 0x02U;
 constexpr std::uint8_t kCommandFlagEnable = 0x01U;
+constexpr std::uint8_t kCommandFlagImuGyroCalibrate = 0x02U;
 constexpr std::uint8_t kStatusFlagSessionEstablished = 0x01U;
 constexpr std::uint8_t kStatusFlagOutputsEnabled = 0x02U;
 constexpr std::uint8_t kStatusFlagFailsafe = 0x04U;
+constexpr std::uint8_t kStatusFlagImuCalibrating = 0x08U;
+constexpr std::uint8_t kStatusFlagImuCalibrationOk = 0x10U;
+constexpr std::uint8_t kStatusFlagImuCalibrationFail = 0x20U;
 constexpr std::uint8_t kStatusFlagMask =
   kStatusFlagSessionEstablished | kStatusFlagOutputsEnabled |
-  kStatusFlagFailsafe;
+  kStatusFlagFailsafe | kStatusFlagImuCalibrating |
+  kStatusFlagImuCalibrationOk | kStatusFlagImuCalibrationFail;
 constexpr std::uint8_t kSafetyReasonOk = 0U;
 constexpr std::uint8_t kSafetyReasonDisabled = 3U;
 constexpr std::uint8_t kMaximumSafetyReason = 6U;
@@ -84,7 +89,8 @@ struct RuntimeFrame
 std::uint16_t crc16_ccitt(const std::uint8_t * data, std::size_t size);
 std::array<std::uint8_t, kCommandV2FrameSize> build_command_v2(
   std::uint32_t boot_id, std::uint32_t session_id, std::uint32_t sequence, bool enable,
-  const std::array<std::int16_t, kThrusterChannels> & offsets_us);
+  const std::array<std::int16_t, kThrusterChannels> & offsets_us,
+  bool calibrate_imu_gyro = false);
 std::optional<CommandFrame> parse_command_v2(const std::uint8_t * data, std::size_t size);
 std::optional<BoardStatusFrame> parse_board_status_v2(
   const std::uint8_t * data, std::size_t size);

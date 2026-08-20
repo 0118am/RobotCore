@@ -27,10 +27,11 @@ def test_robot_service_owns_latency_cores_and_maximum_jetson_profile():
     assert "LimitMEMLOCK=infinity" in robot
     assert "TimerSlackNSec=1us" in robot
     assert "enable_web_ui:=false" in robot
+    assert "enable_pool_tracking:=true" in robot
     assert "Restart=always" in robot
     assert "RMW_IMPLEMENTATION=rmw_cyclonedds_cpp" in robot
     assert "CYCLONEDDS_URI=file:///etc/robotcore/cyclonedds.xml" in robot
-    assert "fixed_lag_eskf_node" in robot
+    assert "vio_tag_fusion_node" in robot
     assert "set -eo pipefail; source /opt/ros/humble/setup.bash" in robot
     assert 'setup.bash"; set -u; exec ros2 launch' in robot
     assert "set -euo pipefail; source /opt/ros/humble/setup.bash" not in robot
@@ -53,7 +54,7 @@ def test_web_service_is_supervised_on_non_localization_cores():
     assert "Nice=10" in web
     assert "Restart=always" in web
     assert "RMW_IMPLEMENTATION=rmw_cyclonedds_cpp" in web
-    assert "imu_topic:=/sensors/external_imu" in web
+    assert "imu_topic:=" not in web
     assert "set -eo pipefail; source /opt/ros/humble/setup.bash" in web
     assert 'setup.bash"; set -u; exec ros2 launch' in web
     assert "set -euo pipefail; source /opt/ros/humble/setup.bash" not in web
@@ -83,10 +84,10 @@ def test_component_executor_thread_counts_are_bounded():
         ROOT / "ros_ws/src/robotcore_bringup/launch/robotcore_edge_system.launch.py"
     ).read_text(encoding="utf-8")
 
-    assert 'parameters=[{"thread_num": 2}]' in launch
-    assert 'parameters=[{"thread_num": 3}]' in launch
+    assert launch.count('parameters=[{"thread_num": 2}]') == 2
+    assert 'parameters=[{"thread_num": 3}]' not in launch
     assert 'os.environ.get(\n        "ROBOTCORE_RUN_ROOT"' in launch
-    assert 'DeclareLaunchArgument("enable_pool_tracking", default_value="false")' in launch
+    assert 'DeclareLaunchArgument("enable_pool_tracking", default_value="true")' in launch
 
 
 def test_installer_pins_and_validates_the_cpp_workspaces():
@@ -95,7 +96,7 @@ def test_installer_pins_and_validates_the_cpp_workspaces():
     )
 
     assert "--robot-workspace" in installer
-    assert "fixed_lag_eskf_node" in installer
+    assert "vio_tag_fusion_node" in installer
     assert 'set_env_value ROBOTCORE_WORKSPACE "${robot_workspace}"' in installer
     assert 'set_env_value CONTROL_INTERFACE_WORKSPACE "${web_workspace}"' in installer
     assert 'set_env_value ZED_WORKSPACE "${zed_workspace}"' in installer

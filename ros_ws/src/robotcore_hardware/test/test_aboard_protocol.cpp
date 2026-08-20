@@ -105,6 +105,15 @@ TEST(AboardProtocol, ParsesV2BoardStatus)
   put_u16(
     frame.data() + frame.size() - 2U,
     robotcore_hardware::crc16_ccitt(frame.data(), frame.size() - 2U));
+  const auto calibration = robotcore_hardware::parse_board_status_v2(
+    frame.data(), frame.size());
+  ASSERT_TRUE(calibration);
+  EXPECT_NE(calibration->flags & robotcore_hardware::kStatusFlagImuCalibrating, 0U);
+
+  frame[3] |= 0x40U;
+  put_u16(
+    frame.data() + frame.size() - 2U,
+    robotcore_hardware::crc16_ccitt(frame.data(), frame.size() - 2U));
   EXPECT_FALSE(robotcore_hardware::parse_board_status_v2(frame.data(), frame.size()));
 }
 
@@ -183,6 +192,12 @@ TEST(AboardProtocol, SafetyReasonAndFlagsMustDescribeOneState)
 
   status.safety_reason = robotcore_hardware::kSafetyReasonDisabled;
   EXPECT_TRUE(robotcore_hardware::board_status_reason_flags_consistent(status));
+
+  status.flags = robotcore_hardware::kStatusFlagSessionEstablished |
+    robotcore_hardware::kStatusFlagImuCalibrating;
+  EXPECT_TRUE(robotcore_hardware::board_status_reason_flags_consistent(status));
+  status.flags |= robotcore_hardware::kStatusFlagImuCalibrationOk;
+  EXPECT_FALSE(robotcore_hardware::board_status_reason_flags_consistent(status));
 
   status.safety_reason = 2U;  // command timeout
   status.flags = robotcore_hardware::kStatusFlagFailsafe |

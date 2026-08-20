@@ -52,13 +52,15 @@ std::uint16_t crc16_ccitt(const std::uint8_t * data, std::size_t size)
 
 std::array<std::uint8_t, kCommandV2FrameSize> build_command_v2(
   std::uint32_t boot_id, std::uint32_t session_id, std::uint32_t sequence, bool enable,
-  const std::array<std::int16_t, kThrusterChannels> & offsets_us)
+  const std::array<std::int16_t, kThrusterChannels> & offsets_us,
+  bool calibrate_imu_gyro)
 {
   std::array<std::uint8_t, kCommandV2FrameSize> frame{};
   frame[0] = kFrameHead;
   frame[1] = kCommandV2Type;
   frame[2] = kProtocolV2;
   frame[3] = enable ? kCommandFlagEnable : 0U;
+  if (calibrate_imu_gyro) {frame[3] |= kCommandFlagImuGyroCalibrate;}
   write_u32(frame.data() + 4U, boot_id);
   write_u32(frame.data() + 8U, session_id);
   write_u32(frame.data() + 12U, sequence);
@@ -72,7 +74,10 @@ std::array<std::uint8_t, kCommandV2FrameSize> build_command_v2(
 std::optional<CommandFrame> parse_command_v2(const std::uint8_t * data, std::size_t size)
 {
   if (size != kCommandV2FrameSize || data[0] != kFrameHead || data[1] != kCommandV2Type ||
-      data[2] != kProtocolV2 || (data[3] & ~kCommandFlagEnable) != 0U ||
+      data[2] != kProtocolV2 ||
+      (data[3] & ~(kCommandFlagEnable | kCommandFlagImuGyroCalibrate)) != 0U ||
+      (data[3] & (kCommandFlagEnable | kCommandFlagImuGyroCalibrate)) ==
+      (kCommandFlagEnable | kCommandFlagImuGyroCalibrate) ||
       read_u16(data + size - 2U) != crc16_ccitt(data, size - 2U))
   {
     return std::nullopt;
@@ -144,6 +149,11 @@ bool board_status_reason_flags_consistent(const BoardStatusFrame & status)
   const bool failsafe = (status.flags & kStatusFlagFailsafe) != 0U;
   const bool nominal_reason = status.safety_reason == kSafetyReasonOk ||
     status.safety_reason == kSafetyReasonDisabled;
+  const unsigned calibration_state_count =
+    ((status.flags & kStatusFlagImuCalibrating) != 0U ? 1U : 0U) +
+    ((status.flags & kStatusFlagImuCalibrationOk) != 0U ? 1U : 0U) +
+    ((status.flags & kStatusFlagImuCalibrationFail) != 0U ? 1U : 0U);
+  if (calibration_state_count > 1U) {return false;}
 
   // Physical outputs may remain enabled for one PWM boundary while a fault
   // stages neutral, so outputs_enabled deliberately does not participate.

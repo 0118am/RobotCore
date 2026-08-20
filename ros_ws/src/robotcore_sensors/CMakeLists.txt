@@ -30,52 +30,38 @@ find_package(OpenCV REQUIRED COMPONENTS calib3d core)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_components REQUIRED)
 find_package(sensor_msgs REQUIRED)
-find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_eigen REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
-find_package(yaml-cpp REQUIRED)
-
-add_library(robotcore_localization_core src/fixed_lag_eskf.cpp)
-target_include_directories(robotcore_localization_core PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>)
-target_link_libraries(robotcore_localization_core Eigen3::Eigen)
 
 add_library(robotcore_sensors_components SHARED
   src/imu_conditioner_component.cpp
-  src/zed_odometry_adapter_component.cpp
   src/apriltag_map_localizer_component.cpp
-  src/fixed_lag_eskf_component.cpp)
+  src/vio_tag_fusion_component.cpp)
 target_include_directories(robotcore_sensors_components PUBLIC include)
 target_link_libraries(robotcore_sensors_components
-  robotcore_localization_core Eigen3::Eigen nlohmann_json::nlohmann_json ${OpenCV_LIBS} yaml-cpp
+  Eigen3::Eigen nlohmann_json::nlohmann_json ${OpenCV_LIBS}
   isaac_ros_apriltag_interfaces::isaac_ros_apriltag_interfaces__rosidl_typesupport_cpp)
 ament_target_dependencies(robotcore_sensors_components
   diagnostic_msgs diagnostic_updater robotcore_interfaces geometry_msgs
   nav_msgs rclcpp rclcpp_components sensor_msgs
-  std_msgs std_srvs tf2 tf2_eigen tf2_geometry_msgs tf2_ros)
+  std_srvs tf2 tf2_eigen tf2_geometry_msgs tf2_ros)
 
 rclcpp_components_register_node(robotcore_sensors_components
   PLUGIN "robotcore_sensors::ImuConditionerComponent" EXECUTABLE imu_conditioning_node)
 rclcpp_components_register_node(robotcore_sensors_components
-  PLUGIN "robotcore_sensors::ZedOdometryAdapterComponent" EXECUTABLE zed_odometry_adapter_node)
-rclcpp_components_register_node(robotcore_sensors_components
   PLUGIN "robotcore_sensors::AprilTagMapLocalizerComponent" EXECUTABLE apriltag_localization_node)
 rclcpp_components_register_node(robotcore_sensors_components
-  PLUGIN "robotcore_sensors::FixedLagEskfComponent" EXECUTABLE fixed_lag_eskf_node)
+  PLUGIN "robotcore_sensors::VioTagFusionComponent" EXECUTABLE vio_tag_fusion_node)
 
-install(TARGETS robotcore_localization_core robotcore_sensors_components
+install(TARGETS robotcore_sensors_components
   ARCHIVE DESTINATION lib LIBRARY DESTINATION lib RUNTIME DESTINATION bin)
 install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
-  ament_add_gtest(test_fixed_lag_eskf test/test_fixed_lag_eskf.cpp)
-  target_link_libraries(test_fixed_lag_eskf robotcore_localization_core Eigen3::Eigen)
-
   ament_add_gtest(test_imu_conditioning test/test_imu_conditioning.cpp)
   target_include_directories(test_imu_conditioning PRIVATE include)
   target_link_libraries(test_imu_conditioning Eigen3::Eigen)
@@ -86,5 +72,5 @@ if(BUILD_TESTING)
 endif()
 
 ament_export_include_directories(include)
-ament_export_libraries(robotcore_localization_core robotcore_sensors_components)
+ament_export_libraries(robotcore_sensors_components)
 ament_package()

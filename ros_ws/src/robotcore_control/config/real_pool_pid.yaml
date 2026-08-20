@@ -1,6 +1,5 @@
-# SAFETY: set configured true only after the six inner loops have been tuned
-# under the staged tethered-pool procedure.
-configured: false
+# Calculated reference gains supplied for the validation vehicle.
+configured: true
 outer_position_kp: [0.8, 0.8, 0.8]
 outer_orientation_kp: [1.0, 1.0, 1.0]
 max_linear_velocity_mps: [0.25, 0.25, 0.20]

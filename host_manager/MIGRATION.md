@@ -22,7 +22,7 @@ vehicle mechanically safe.
 2. Mount or create `/var/lib/robotcore/runs` with adequate capacity and configure
    `ROBOTCORE_RUN_ROOT` to it.  Keep rosbag files off the root filesystem.
 3. Install the reviewed udev rule from `systemd/99-robotcore-aboard.rules` only after
-   confirming the A-board VID/PID/serial.  Change the edge configuration to
+   confirming the Aquaboard VID/PID/serial.  Change the edge configuration to
    use the stable `/dev/robotcore/aboard` path.
 4. Copy and tailor `config/host-manager.example.json` to
    `/etc/robotcore/host-manager.json`, then set owner `root:root`, mode `0640`.
@@ -87,7 +87,7 @@ the safety control loop.
 ## Phase 4 — controlled updates and flashing
 
 1. Follow [workflows/upgrade.md](workflows/upgrade.md) for software artifacts.
-2. Follow [workflows/flash.md](workflows/flash.md) for Jetson/A-board images.
+2. Follow [workflows/flash.md](workflows/flash.md) for Jetson/Aquaboard images.
 3. Keep both workflows outside the daemon RPC surface.  They require a local
    maintainer to verify artifact digest, stop/disarm the robot, capture a
    backup, and record results before restoring services.

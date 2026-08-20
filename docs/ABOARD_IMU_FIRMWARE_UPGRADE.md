@@ -1,4 +1,4 @@
-# A-board external IMU firmware upgrade contract
+# Aquaboard external IMU firmware upgrade contract
 
 This document records the firmware/host protocol used by RobotCore's 60 Hz
 state estimator. The STM32 source is the separate repository
@@ -27,7 +27,7 @@ RobotCore does not treat this legacy frame-3 path as a production IMU input.
 | Sensor UART | 115200 baud, 8N1 |
 | Sensor output | connected VG/AH/MINS mode `0x06`, 48-byte `0x59` float packet; IMU-family `0x70` also accepted |
 | Sensor rate | 100 Hz (`0x0C = 0x06`) |
-| A-board to Jetson | UART6 at 115200 baud |
+| Aquaboard to Jetson | UART6 at 115200 baud |
 | Frame-4 delivery | once per new IMU sample, approximately 100 Hz |
 | Integrity | version 1, valid flag, CRC16-CCITT |
 | Time/sequence | uint32 extension of the source counter and uint32 MCU sample tick |
@@ -103,7 +103,7 @@ with zero UART8 checksum errors and zero stack overflows. That hash predates
 the protocol-v2 session/ACK, synchronized PWM latch, and task cleanup and must
 not be treated as the current production image.
 
-The current aCube and RobotCore sources must be built, flashed, and deployed as
+The current Aquaboard and RobotCore sources must be built, flashed, and deployed as
 one atomic protocol-v2 cutover. No claim is made here that the current image
 has been flashed. After deployment, complete estimator calibration, timing,
 noise, physical-axis, brownout, and full-thrust acceptance before arming in

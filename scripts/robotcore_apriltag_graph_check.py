@@ -6,41 +6,64 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from pathlib import Path
+import shlex
 import sys
 import time
 from dataclasses import dataclass
 
 
-os.environ.setdefault("ROS_DOMAIN_ID", "42")
-os.environ.setdefault("ROS_LOCALHOST_ONLY", "1")
-os.environ.setdefault("RMW_IMPLEMENTATION", "rmw_cyclonedds_cpp")
-os.environ.setdefault("CYCLONEDDS_URI", "file:///etc/robotcore/cyclonedds.xml")
+rclpy = None
 
-try:
-    import rclpy
-except ModuleNotFoundError:
-    if os.environ.get("ROBOTCORE_GRAPH_CHECK_BOOTSTRAPPED") == "1":
-        raise
-    os.environ["ROBOTCORE_GRAPH_CHECK_BOOTSTRAPPED"] = "1"
-    os.execle(
-        "/bin/bash",
-        "bash",
-        "-c",
-        "source /opt/ros/humble/setup.bash && "
-        "source /home/nvidia/ros2_ws/install/setup.bash && "
-        "source /home/nvidia/RobotCore/ros_ws/install/setup.bash && "
-        "exec python3 /home/nvidia/RobotCore/scripts/robotcore_apriltag_graph_check.py \"$@\"",
-        "robotcore-apriltag-graph-check",
-        *sys.argv[1:],
-        os.environ,
+
+def ensure_rclpy() -> None:
+    """Load rclpy for CLI execution without replacing an importing process."""
+
+    global rclpy
+    os.environ["ROS_DOMAIN_ID"] = os.environ.get("ROBOTCORE_ROS_DOMAIN_ID", "42")
+    os.environ["ROS_LOCALHOST_ONLY"] = os.environ.get(
+        "ROBOTCORE_ROS_LOCALHOST_ONLY", "1"
     )
+    os.environ["RMW_IMPLEMENTATION"] = os.environ.get(
+        "ROBOTCORE_RMW_IMPLEMENTATION", "rmw_cyclonedds_cpp"
+    )
+    os.environ["CYCLONEDDS_URI"] = os.environ.get(
+        "ROBOTCORE_CYCLONEDDS_URI", "file:///etc/robotcore/cyclonedds.xml"
+    )
+    try:
+        import rclpy as rclpy_module
+    except ModuleNotFoundError:
+        if os.environ.get("ROBOTCORE_GRAPH_CHECK_BOOTSTRAPPED") == "1":
+            raise
+        environment = os.environ.copy()
+        environment["ROBOTCORE_GRAPH_CHECK_BOOTSTRAPPED"] = "1"
+        script = Path(__file__).resolve()
+        home = script.parents[2]
+        zed_setup = home / "ros2_ws" / "install" / "setup.bash"
+        robotcore_setup = script.parents[1] / "ros_ws" / "install" / "setup.bash"
+        command = (
+            "source /opt/ros/humble/setup.bash && "
+            f"source {shlex.quote(str(zed_setup))} && "
+            f"source {shlex.quote(str(robotcore_setup))} && "
+            f"exec python3 {shlex.quote(str(script))} \"$@\""
+        )
+        os.execle(
+            "/bin/bash",
+            "bash",
+            "-c",
+            command,
+            "robotcore-apriltag-graph-check",
+            *sys.argv[1:],
+            environment,
+        )
+    rclpy = rclpy_module
 
 
 ZED_NODE = "/zedx/zed_node"
 CONVERTER_NODE = "/apriltag_cuda_rgb_converter"
 DETECTOR_NODE = "/apriltag_cuda_detector"
 LOCALIZER_NODE = "/apriltag_localization"
-ESKF_NODE = "/fixed_lag_eskf"
+FUSION_NODE = "/vio_tag_fusion"
 UI_NODES = {"/web_operator", "/web_operator_ui"}
 
 RAW_IMAGE = "/zedx/zed_node/rgb/color/rect/image"
@@ -48,7 +71,7 @@ CAMERA_INFO = "/zedx/zed_node/rgb/color/rect/camera_info"
 CUDA_INPUT = "/localization/apriltag/cuda_input_rgb"
 DETECTIONS = "/localization/apriltag/detections"
 POSE = "/localization/apriltag_pose"
-DETECTED_COUNT = "/localization/apriltag/detected_count"
+LOCALIZATION_STATUS = "/localization/status"
 COMPRESSED_IMAGE = "/zedx/zed_node/rgb/color/rect/image/compressed"
 
 
@@ -68,7 +91,7 @@ CORE_CONTRACTS = (
     ),
     TopicContract(CUDA_INPUT, frozenset({CONVERTER_NODE}), frozenset({DETECTOR_NODE})),
     TopicContract(DETECTIONS, frozenset({DETECTOR_NODE}), frozenset({LOCALIZER_NODE})),
-    TopicContract(POSE, frozenset({LOCALIZER_NODE}), frozenset({ESKF_NODE})),
+    TopicContract(POSE, frozenset({LOCALIZER_NODE}), frozenset({FUSION_NODE})),
 )
 
 
@@ -114,23 +137,23 @@ def validate(node, require_ui: bool, require_ui_video: bool) -> tuple[list[str],
                 f"expected={sorted(contract.subscribers)}"
             )
 
-    count_publishers, count_subscribers = topic_endpoints(node, DETECTED_COUNT)
-    snapshot[DETECTED_COUNT] = {
-        "publishers": sorted(count_publishers),
-        "subscribers": sorted(count_subscribers),
+    status_publishers, status_subscribers = topic_endpoints(node, LOCALIZATION_STATUS)
+    snapshot[LOCALIZATION_STATUS] = {
+        "publishers": sorted(status_publishers),
+        "subscribers": sorted(status_subscribers),
     }
-    if count_publishers != {LOCALIZER_NODE}:
+    if status_publishers != {FUSION_NODE}:
         errors.append(
-            f"{DETECTED_COUNT}: publishers={sorted(count_publishers)}, "
-            f"expected={[LOCALIZER_NODE]}"
+            f"{LOCALIZATION_STATUS}: publishers={sorted(status_publishers)}, "
+            f"expected={[FUSION_NODE]}"
         )
-    if not count_subscribers.issubset(UI_NODES):
+    if not status_subscribers.issubset(UI_NODES):
         errors.append(
-            f"{DETECTED_COUNT}: unexpected subscribers="
-            f"{sorted(count_subscribers - UI_NODES)}"
+            f"{LOCALIZATION_STATUS}: unexpected subscribers="
+            f"{sorted(status_subscribers - UI_NODES)}"
         )
-    if require_ui and not count_subscribers.intersection(UI_NODES):
-        errors.append(f"{DETECTED_COUNT}: UI subscription is required but absent")
+    if require_ui and not status_subscribers.intersection(UI_NODES):
+        errors.append(f"{LOCALIZATION_STATUS}: UI subscription is required but absent")
 
     video_publishers, video_subscribers = topic_endpoints(node, COMPRESSED_IMAGE)
     snapshot[COMPRESSED_IMAGE] = {
@@ -172,6 +195,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    ensure_rclpy()
     rclpy.init()
     node = rclpy.create_node("apriltag_graph_contract_check", enable_rosout=False)
     try:

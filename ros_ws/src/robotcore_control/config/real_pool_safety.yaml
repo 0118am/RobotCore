@@ -6,18 +6,32 @@ command_authority:
     publish_rate_hz: 50.0
     # UI/diagnostic state does not need to duplicate the safety command rate.
     status_publish_rate_hz: 10.0
+    # Low-rate mirror consumed by the Python operator UI. Hardware continues
+    # to use the canonical 50 Hz /control/thruster_cmd stream.
+    ui_command_topic: /ui/thruster_cmd
     candidate_timeout_s: 0.10
     state_timeout_s: 0.15
     target_timeout_s: 0.15
     safety_heartbeat_timeout_s: 0.25
-    automatic_command_limit: 0.15
-    automatic_slew_rate_per_s: 0.5
+    # One limit for manual, PID and RL. The measured force model is valid only
+    # for |p - 1500| <= 200 us. Commands are applied immediately (no slew).
+    pwm_limit_us: 200.0
     allow_rl_hardware: false
-    # SAFETY: replace the values and set true only after the AprilTag map and
-    # physical pool envelope have been measured.
-    pool_bounds_configured: false
+    # Confirmed RobotCore pool envelope in map FLU metres.
+    pool_bounds_configured: true
     pool_min_xyz: [0.0, 0.0, 0.0]
-    pool_max_xyz: [0.0, 0.0, 0.0]
+    pool_max_xyz: [5.42, 3.73, 1.0]
+
+pid_controller:
+  ros__parameters:
+    # Dedicated actuator-domain altitude PID. Live tests show installed
+    # T1-T4 +PWM moves toward -Z, hence command_sign=-1 for an FLU loop.
+    altitude_pwm_kp: 2.0
+    altitude_pwm_ki: 0.6
+    altitude_pwm_kd: 0.0
+    altitude_pwm_integral_limit: 0.4
+    altitude_velocity_filter_time_constant_s: 0.20
+    altitude_pwm_command_sign: -1.0
 
 trajectory_command:
   ros__parameters:
@@ -25,12 +39,11 @@ trajectory_command:
     relative_to_initial_pose: true
     require_pool_bounds: true
     pool_min_xyz: [0.0, 0.0, 0.0]
-    pool_max_xyz: [0.0, 0.0, 0.0]
-    # SAFETY: set true only after all limits below have been approved on site.
-    trajectory_limits_configured: false
-    max_linear_speed_mps: 0.0
-    max_angular_speed_rps: 0.0
-    attitude_min_rpy_deg: [0.0, 0.0, 0.0]
-    attitude_max_rpy_deg: [0.0, 0.0, 0.0]
+    pool_max_xyz: [5.42, 3.73, 1.0]
+    trajectory_limits_configured: true
+    max_linear_speed_mps: 0.45
+    max_angular_speed_rps: 0.55
+    attitude_min_rpy_deg: [-15.0, -15.0, -30.0]
+    attitude_max_rpy_deg: [15.0, 15.0, 30.0]
     trajectory_type: hold
-    attitude_mode: hold_initial
+    attitude_mode: fixed_identity

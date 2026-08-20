@@ -9,6 +9,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -30,6 +31,99 @@ struct CuboidPoolGeometry
   double surface_tolerance_m{0.02};
   double orientation_tolerance_rad{2.0 * std::acos(-1.0) / 180.0};
 };
+
+struct TagImageQuality
+{
+  bool accepted{false};
+  double score{};
+  double minimum_edge_px{};
+  double area_px2{};
+};
+
+inline std::vector<std::size_t> independently_supported_tag_indices(
+  const std::vector<int> & inlier_point_indices,
+  std::size_t tag_count, std::size_t points_per_tag,
+  int minimum_inlier_points_per_tag)
+{
+  std::vector<std::size_t> supported;
+  if (tag_count == 0U || points_per_tag == 0U || minimum_inlier_points_per_tag <= 0) {
+    return supported;
+  }
+
+  const std::size_t point_count = tag_count * points_per_tag;
+  std::vector<bool> point_seen(point_count, false);
+  std::vector<int> inlier_counts(tag_count, 0);
+  for (const int raw_index : inlier_point_indices) {
+    if (raw_index < 0) {continue;}
+    const auto point_index = static_cast<std::size_t>(raw_index);
+    if (point_index >= point_count || point_seen[point_index]) {continue;}
+    point_seen[point_index] = true;
+    ++inlier_counts[point_index / points_per_tag];
+  }
+  for (std::size_t tag_index = 0; tag_index < tag_count; ++tag_index) {
+    if (inlier_counts[tag_index] >= minimum_inlier_points_per_tag) {
+      supported.push_back(tag_index);
+    }
+  }
+  return supported;
+}
+
+inline TagImageQuality assess_tag_image_quality(
+  const std::array<Eigen::Vector2d, 4> & corners,
+  std::uint32_t image_width, std::uint32_t image_height,
+  double minimum_edge_px, double maximum_edge_ratio)
+{
+  TagImageQuality result;
+  if (image_width == 0U || image_height == 0U ||
+    !std::isfinite(minimum_edge_px) || !std::isfinite(maximum_edge_ratio) ||
+    minimum_edge_px <= 0.0 || maximum_edge_ratio < 1.0)
+  {
+    return result;
+  }
+
+  double shortest = std::numeric_limits<double>::infinity();
+  double longest = 0.0;
+  double signed_twice_area = 0.0;
+  double winding_sign = 0.0;
+  for (std::size_t index = 0; index < corners.size(); ++index) {
+    const auto & previous = corners[(index + corners.size() - 1U) % corners.size()];
+    const auto & current = corners[index];
+    const auto & next = corners[(index + 1U) % corners.size()];
+    if (!current.allFinite() || current.x() < 0.0 || current.y() < 0.0 ||
+      current.x() >= static_cast<double>(image_width) ||
+      current.y() >= static_cast<double>(image_height))
+    {
+      return result;
+    }
+    const double edge = (next - current).norm();
+    shortest = std::min(shortest, edge);
+    longest = std::max(longest, edge);
+    signed_twice_area += current.x() * next.y() - current.y() * next.x();
+    const Eigen::Vector2d incoming = current - previous;
+    const Eigen::Vector2d outgoing = next - current;
+    const double cross = incoming.x() * outgoing.y() - incoming.y() * outgoing.x();
+    if (!std::isfinite(cross) || std::abs(cross) < 1e-6) {return result;}
+    const double sign = std::copysign(1.0, cross);
+    if (winding_sign == 0.0) {winding_sign = sign;}
+    else if (sign != winding_sign) {return result;}
+  }
+
+  const double area = 0.5 * std::abs(signed_twice_area);
+  if (!std::isfinite(shortest) || !std::isfinite(longest) || !std::isfinite(area) ||
+    shortest < minimum_edge_px || longest / shortest > maximum_edge_ratio ||
+    area < 0.5 * minimum_edge_px * minimum_edge_px)
+  {
+    return result;
+  }
+
+  result.accepted = true;
+  result.minimum_edge_px = shortest;
+  result.area_px2 = area;
+  // Prefer large, nearly square observations. Oblique or stretched quads have
+  // lower pose observability even when their raw pixel area is large.
+  result.score = std::sqrt(area) * shortest / longest;
+  return result;
+}
 
 inline Eigen::Matrix3d fixed_axis_rpy_rotation(const Eigen::Vector3d & rpy)
 {

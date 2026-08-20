@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "kind": "tracking_task",
+  "name": "step_roll",
+  "label": "Step roll +5 deg",
+  "controller": "pid",
+  "duration_s": 20.0,
+  "trajectory": {
+    "trajectory_type": "step_roll",
+    "attitude_mode": "hold_initial",
+    "step_amplitude": 5.0,
+    "step_time_s": 5.0
+  }
+}

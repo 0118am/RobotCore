@@ -28,6 +28,17 @@ def load_policy_manifest(path: str, default_name: str, role: str) -> PolicyManif
         return PolicyManifest(name=default_name, role=role)
 
     manifest_path = Path(path)
+    if manifest_path.suffix.lower() == ".onnx":
+        return PolicyManifest(
+            name=default_name,
+            role=role,
+            runner="onnx",
+            model_path=str(manifest_path),
+            input_schema=[
+                "/robot/body_state",
+                "/runtime/trajectory_target",
+            ],
+        )
     if not manifest_path.exists():
         return PolicyManifest(name=default_name, role=role, model_path=path)
 
