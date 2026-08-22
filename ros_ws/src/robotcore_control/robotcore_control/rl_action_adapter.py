@@ -1,4 +1,4 @@
-"""Adapt policy vectors to the isolated future-RL command candidate."""
+"""Adapt policy vectors to the isolated future-RL thruster command stream."""
 
 import math
 import rclpy
@@ -29,7 +29,7 @@ class RlActionAdapter(Node):
         except Exception as exc:
             self.get_logger().error(f"RL layout configuration rejected: {exc}")
         self.publisher = self.create_publisher(
-            ThrusterCommand, "/control/candidates/rl", 10
+            ThrusterCommand, "/control/rl/thruster_cmd", 10
         )
         self.create_subscription(
             Float32MultiArray, "/policy/body/action", self.on_action, 10

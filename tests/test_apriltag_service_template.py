@@ -6,9 +6,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVICE = ROOT / "host_manager" / "systemd" / "robotcore.service"
-CAMERA_IPC_READY = ROOT / "host_manager" / "systemd" / "robotcore-camera-ipc-ready.service"
-CAMERA_IPC_HELPER = ROOT / "host_manager" / "bin" / "robotcore-camera-ipc-ready"
 ARGUS_DROP_IN = ROOT / "host_manager" / "systemd" / "robotcore-argus.conf"
+ARGUS_LIFECYCLE = ROOT / "host_manager" / "systemd" / "nvargus-robotcore.conf"
+ZED_LIFECYCLE = ROOT / "host_manager" / "systemd" / "zed-x-robotcore.conf"
 EDGE_ENV = ROOT / "host_manager" / "systemd" / "edge.env.example"
 HOST_MANAGER_CONFIG = ROOT / "host_manager" / "config" / "host-manager.example.json"
 
@@ -21,21 +21,21 @@ def test_robot_service_requires_and_passes_the_managed_apriltag_map():
     assert not (ROOT / "host_manager/systemd/robotcore-tag-vio.conf").exists()
 
 
-def test_robot_service_exposes_only_the_argus_socket_to_the_zed_runtime():
+def test_robot_service_restarts_the_complete_zed_stack():
     service = SERVICE.read_text(encoding="utf-8")
-    readiness = CAMERA_IPC_READY.read_text(encoding="utf-8")
-    helper = CAMERA_IPC_HELPER.read_text(encoding="utf-8")
+    argus_lifecycle = ARGUS_LIFECYCLE.read_text(encoding="utf-8")
+    zed_lifecycle = ZED_LIFECYCLE.read_text(encoding="utf-8")
 
     assert "PrivateTmp=true" in service
     assert "BindReadOnlyPaths=/tmp/argus_socket" in service
     assert "BindReadOnlyPaths=/tmp/imu_daemon.sock" in service
     assert "After=network-online.target dev-robotcore-aboard.device nvargus-daemon.service" in service
-    assert "Wants=network-online.target nvargus-daemon.service" in service
-    assert "Requires=dev-robotcore-aboard.device robotcore-camera-ipc-ready.service" in service
-    assert "Before=robotcore.service" in readiness
-    assert "ExecStart=/usr/local/libexec/robotcore-camera-ipc-ready" in readiness
-    assert "-S /tmp/argus_socket" in helper
-    assert "-S /tmp/imu_daemon.sock" in helper
+    assert "Requires=dev-robotcore-aboard.device nvargus-daemon.service zed_x_daemon.service" in service
+    assert "KillMode=mixed" in service
+    assert "PartOf=robotcore.service" in argus_lifecycle
+    assert "Before=robotcore.service" in argus_lifecycle
+    assert "PartOf=robotcore.service" in zed_lifecycle
+    assert "Before=robotcore.service" in zed_lifecycle
 
 
 def test_argus_drop_in_preserves_tmp_isolation_except_for_the_ipc_socket():

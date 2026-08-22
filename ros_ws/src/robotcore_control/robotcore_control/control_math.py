@@ -1,4 +1,4 @@
-"""Pure control mathematics for the six degree-of-freedom PID controller.
+"""Pure control mathematics shared by the direct hold controllers.
 
 The module deliberately has no ROS imports so quaternion and anti-windup
 behaviour can be tested on development machines without a sourced ROS install.
@@ -65,6 +65,143 @@ def altitude_collective_pwm_commands(
     return commands
 
 
+def altitude_level_pwm_commands(
+    altitude_pid_output: float,
+    roll_pd_output: float,
+    pitch_pd_output: float,
+    command_limit: float,
+    altitude_command_sign: float,
+) -> np.ndarray:
+    """Mix height with level-attitude correction on vertical T1--T4.
+
+    The installed vertical layout is right-front, right-rear, left-front,
+    left-rear. Positive PWM produces down force, so ``(+,+,-,-)`` produces
+    positive roll torque and ``(+,-,+,-)`` produces positive pitch torque.
+    Attitude differential is preserved first; collective height effort uses
+    the remaining symmetric per-thruster PWM headroom.
+    """
+
+    if not all(
+        math.isfinite(value)
+        for value in (
+            altitude_pid_output,
+            roll_pd_output,
+            pitch_pd_output,
+            command_limit,
+            altitude_command_sign,
+        )
+    ):
+        raise ValueError("altitude-level PWM inputs must be finite")
+    if math.isclose(altitude_command_sign, 0.0, abs_tol=1e-12):
+        raise ValueError("altitude PWM command sign must be non-zero")
+
+    limit = abs(float(command_limit))
+    attitude = (
+        float(roll_pd_output) * np.asarray([1.0, 1.0, -1.0, -1.0])
+        + float(pitch_pd_output) * np.asarray([1.0, -1.0, 1.0, -1.0])
+    )
+    attitude_peak = float(np.max(np.abs(attitude)))
+    if attitude_peak > limit and attitude_peak > 0.0:
+        attitude *= limit / attitude_peak
+
+    requested_collective = math.copysign(
+        1.0, altitude_command_sign
+    ) * float(altitude_pid_output)
+    collective_min = -limit - float(np.min(attitude))
+    collective_max = limit - float(np.max(attitude))
+    collective = float(
+        np.clip(requested_collective, collective_min, collective_max)
+    )
+
+    commands = np.zeros(8, dtype=np.float64)
+    commands[:4] = np.clip(collective + attitude, -limit, limit)
+    return commands
+
+
+def level_attitude_pd_efforts(
+    orientation_error: Iterable[float],
+    target_angular_rate: Iterable[float],
+    measured_angular_rate: Iterable[float],
+    angle_kp: Iterable[float],
+    rate_kp: Iterable[float],
+    combined_limit: float,
+) -> tuple[np.ndarray, np.ndarray, bool]:
+    """Return independently tuned roll/pitch angle and rate feedback.
+
+    Keeping the angle and rate gains separate avoids weakening static leveling
+    when the delayed gyro loop must use a lower gain. The combined L1 limit is
+    the peak differential that can appear on any one T1--T4 channel.
+    """
+
+    error = vec(orientation_error, 2)
+    target_rate = vec(target_angular_rate, 2)
+    measured_rate = vec(measured_angular_rate, 2)
+    angle_gains = vec(angle_kp, 2)
+    rate_gains = vec(rate_kp, 2)
+    limit = float(combined_limit)
+    if (
+        np.any(angle_gains < 0.0)
+        or np.any(rate_gains < 0.0)
+        or not math.isfinite(limit)
+        or limit < 0.0
+    ):
+        raise ValueError("level PD gains and limit must be finite and non-negative")
+
+    raw = angle_gains * error + rate_gains * (target_rate - measured_rate)
+    peak = float(np.sum(np.abs(raw)))
+    if peak > limit and peak > 0.0:
+        return raw * (limit / peak), raw, True
+    return raw.copy(), raw, False
+
+
+def altitude_station_pwm_commands(
+    altitude_pid_output: float,
+    surge_p_output: float,
+    sway_p_output: float,
+    yaw_p_output: float,
+    command_limit: float,
+    altitude_command_sign: float,
+) -> np.ndarray:
+    """Mix direct height and calibrated horizontal station-control outputs."""
+
+    commands = altitude_collective_pwm_commands(
+        altitude_pid_output, command_limit, altitude_command_sign
+    )
+    if not all(
+        math.isfinite(value)
+        for value in (surge_p_output, sway_p_output, yaw_p_output)
+    ):
+        raise ValueError("station P outputs must be finite")
+    limit = abs(float(command_limit))
+    surge = float(np.clip(surge_p_output, -limit, limit))
+    sway = float(np.clip(sway_p_output, -limit, limit))
+    yaw = float(np.clip(yaw_p_output, -limit, limit))
+
+    # Forward/back remains the field-verified normal left-stick pattern.
+    upper = surge * np.asarray([-1.0, -1.0, 1.0, 1.0])
+
+    # Direction-specific coefficients compensate the measured asymmetric
+    # forward/reverse curves. Positive sway is base_link +Y/left. Positive
+    # yaw is CCW and deliberately retains T5/T8 positive and T6/T7 negative;
+    # its ratios are balanced at the approved 0.20 yaw-command limit.
+    if sway >= 0.0:
+        upper += sway * np.asarray([-1.0, 0.0, -0.893, 0.608])
+    else:
+        upper += -sway * np.asarray([0.0, -1.0, 0.608, -0.893])
+    if yaw >= 0.0:
+        upper += yaw * np.asarray([1.0, -0.998, -0.355, 0.722])
+    else:
+        upper += -yaw * np.asarray([-0.998, 1.0, 0.722, -0.355])
+
+    # Preserve the requested direction ratios if simultaneous station axes
+    # need more authority than the live web PWM limit permits.
+    peak = float(np.max(np.abs(upper)))
+    if peak > limit and peak > 0.0:
+        upper *= limit / peak
+    commands[4:] = upper
+    return commands
+
+
 def first_order_low_pass(
     previous: float | None,
     sample: float,
@@ -86,26 +223,98 @@ def first_order_low_pass(
     return float(previous + alpha * (sample - previous))
 
 
-def manual_surge_yaw_commands(commands: Iterable[float]) -> np.ndarray:
-    """Keep only manual surge/yaw and return their T5--T8 command pattern.
+def reject_vector_outlier(
+    recent_samples: Iterable[Iterable[float]],
+    sample: Iterable[float],
+    threshold: float,
+) -> np.ndarray:
+    """Reject an isolated vector spike without delaying ordinary samples.
 
-    Browser/manual candidates are physical thruster vectors.  Projecting onto
-    the two approved mixer basis vectors prevents vertical or roll input from
-    leaking into altitude-hold mode, including from an older browser client.
+    The newest sample is compared per axis with the median of itself and the
+    two preceding accepted samples. Values inside the threshold pass through
+    unchanged; only an implausible single-sample excursion is replaced.
     """
 
-    values = vec(commands, 8)
-    upper = values[4:]
-    surge = 0.25 * (-upper[0] - upper[1] + upper[2] + upper[3])
-    yaw = 0.25 * (-upper[0] + upper[1] + upper[2] - upper[3])
-    result = np.zeros(8, dtype=np.float64)
-    result[4:] = [
-        -surge - yaw,
-        -surge + yaw,
-        surge + yaw,
-        surge - yaw,
-    ]
-    return np.clip(result, -1.0, 1.0)
+    current = vec(sample, 3)
+    limit = float(threshold)
+    if not math.isfinite(limit) or limit < 0.0:
+        raise ValueError("outlier threshold must be finite and non-negative")
+    history = np.asarray(list(recent_samples), dtype=np.float64)
+    if history.size == 0 or history.shape[0] < 2 or limit <= 0.0:
+        return current.copy()
+    if (
+        history.ndim != 2
+        or history.shape[1] != 3
+        or not np.all(np.isfinite(history))
+    ):
+        raise ValueError("recent vector samples must be finite three-vectors")
+    median = np.median(np.vstack((history[-2:], current)), axis=0)
+    return np.where(np.abs(current - median) > limit, median, current)
+
+
+def timestamped_rate_prediction(
+    sample_times_ns: Iterable[int],
+    rate_samples: Iterable[Iterable[float]],
+    prediction_horizon_s: float,
+    acceleration_limit_rps2: float,
+    correction_limit_rps: float,
+) -> np.ndarray:
+    """Fit a causal local rate trend and predict a short execution horizon.
+
+    This is an endpoint least-squares polynomial estimate, equivalent to the
+    first-order case of a causal Savitzky-Golay filter. Timestamps, rather than
+    an assumed sample period, define the fit. Both angular acceleration and
+    the total correction from the newest accepted gyro sample are bounded.
+    """
+
+    times = np.asarray(list(sample_times_ns), dtype=np.int64).reshape(-1)
+    rates = np.asarray(list(rate_samples), dtype=np.float64)
+    horizon = float(prediction_horizon_s)
+    acceleration_limit = float(acceleration_limit_rps2)
+    correction_limit = float(correction_limit_rps)
+    if (
+        rates.ndim != 2
+        or rates.shape[1:] != (3,)
+        or rates.shape[0] != times.size
+        or times.size == 0
+        or not np.all(np.isfinite(rates))
+    ):
+        raise ValueError(
+            "timestamped rates must be a non-empty sequence of three-vectors"
+        )
+    if np.any(np.diff(times) <= 0):
+        raise ValueError("rate sample timestamps must be strictly increasing")
+    if not all(
+        math.isfinite(value) and value >= 0.0
+        for value in (horizon, acceleration_limit, correction_limit)
+    ):
+        raise ValueError("rate prediction limits must be finite and non-negative")
+
+    latest = rates[-1].copy()
+    if (
+        times.size < 3
+        or horizon <= 0.0
+        or acceleration_limit <= 0.0
+        or correction_limit <= 0.0
+    ):
+        return latest
+
+    relative_time = (times - times[-1]).astype(np.float64) * 1e-9
+    centered_time = relative_time - float(np.mean(relative_time))
+    denominator = float(np.dot(centered_time, centered_time))
+    if denominator <= 1e-12:
+        return latest
+    mean_rate = np.mean(rates, axis=0)
+    slope = np.sum(
+        centered_time[:, np.newaxis] * (rates - mean_rate), axis=0
+    ) / denominator
+    slope = np.clip(slope, -acceleration_limit, acceleration_limit)
+    fitted_latest = mean_rate - slope * float(np.mean(relative_time))
+    predicted = fitted_latest + slope * horizon
+    correction = np.clip(
+        predicted - latest, -correction_limit, correction_limit
+    )
+    return latest + correction
 
 
 def normalize_quaternion(quaternion: Iterable[float]) -> np.ndarray:
@@ -114,6 +323,29 @@ def normalize_quaternion(quaternion: Iterable[float]) -> np.ndarray:
     if norm <= 1e-9:
         raise ValueError("quaternion norm is zero")
     return q / norm
+
+
+def quaternion_slerp(
+    current: Iterable[float], target: Iterable[float], weight: float
+) -> np.ndarray:
+    """Interpolate unit quaternions along the shortest rotation arc."""
+
+    start = normalize_quaternion(current)
+    end = normalize_quaternion(target)
+    amount = float(np.clip(weight, 0.0, 1.0))
+    dot = float(np.dot(start, end))
+    if dot < 0.0:
+        end = -end
+        dot = -dot
+    dot = float(np.clip(dot, -1.0, 1.0))
+    if dot > 0.9995:
+        return normalize_quaternion(start + amount * (end - start))
+    angle = math.acos(dot)
+    sine = math.sin(angle)
+    return normalize_quaternion(
+        math.sin((1.0 - amount) * angle) / sine * start
+        + math.sin(amount * angle) / sine * end
+    )
 
 
 def quaternion_conjugate(quaternion: Iterable[float]) -> np.ndarray:
@@ -223,6 +455,7 @@ class ConditionalPid:
         dt: float,
         feedforward: float = 0.0,
         output_limit: float | None = None,
+        integral_enabled: bool = True,
     ) -> float:
         if not all(math.isfinite(value) for value in (setpoint, measurement, dt, feedforward)):
             raise ValueError("PID inputs must be finite")
@@ -239,13 +472,19 @@ class ConditionalPid:
         alpha = 1.0 if cutoff <= 0.0 else 1.0 - math.exp(-2.0 * math.pi * cutoff * dt)
         self.filtered_derivative += alpha * (raw_derivative - self.filtered_derivative)
 
-        proposed_integral = float(
-            np.clip(
-                self.integral + error * dt,
-                -abs(self.gains.integral_limit),
-                abs(self.gains.integral_limit),
+        if integral_enabled:
+            proposed_integral = float(
+                np.clip(
+                    self.integral + error * dt,
+                    -abs(self.gains.integral_limit),
+                    abs(self.gains.integral_limit),
+                )
             )
-        )
+        else:
+            # PD operation must not retain integral state accumulated by a
+            # previous controller mode.
+            self.integral = 0.0
+            proposed_integral = 0.0
         unsaturated = (
             feedforward
             + self.gains.kp * error
@@ -268,9 +507,9 @@ class ConditionalPid:
             or (unsaturated > limit and error < 0.0)
             or (unsaturated < -limit and error > 0.0)
         )
-        if can_integrate:
+        if integral_enabled and can_integrate:
             self.integral = proposed_integral
-        else:
+        elif integral_enabled:
             unsaturated = (
                 feedforward
                 + self.gains.kp * error
@@ -281,34 +520,3 @@ class ConditionalPid:
 
         self.saturated = not math.isclose(unsaturated, saturated, rel_tol=0.0, abs_tol=1e-12)
         return saturated
-
-
-class SixAxisPid:
-    """Six independent inner-loop PID axes with a shared reset operation."""
-
-    def __init__(self, gains: Iterable[PidGains]):
-        gain_list = list(gains)
-        if len(gain_list) != 6:
-            raise ValueError("six PID gain sets are required")
-        self.axes = [ConditionalPid(item) for item in gain_list]
-
-    def reset(self):
-        for axis in self.axes:
-            axis.reset()
-
-    def step(self, setpoint, measurement, dt: float, feedforward=None) -> np.ndarray:
-        desired = vec(setpoint, 6)
-        actual = vec(measurement, 6)
-        ff = np.zeros(6, dtype=np.float64) if feedforward is None else vec(feedforward, 6)
-        return np.asarray(
-            [
-                axis.step(
-                    setpoint=float(desired[index]),
-                    measurement=float(actual[index]),
-                    dt=dt,
-                    feedforward=float(ff[index]),
-                )
-                for index, axis in enumerate(self.axes)
-            ],
-            dtype=np.float64,
-        )

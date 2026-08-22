@@ -4,12 +4,10 @@ command_authority:
     # bridge only needs a 50 Hz command heartbeat and receives neutral edges immediately.
     evaluation_rate_hz: 100.0
     publish_rate_hz: 50.0
-    # UI/diagnostic state does not need to duplicate the safety command rate.
+    # UI/diagnostic status is lower rate; the UI subscribes directly to the
+    # canonical 50 Hz /control/thruster_cmd output for actuator visualization.
     status_publish_rate_hz: 10.0
-    # Low-rate mirror consumed by the Python operator UI. Hardware continues
-    # to use the canonical 50 Hz /control/thruster_cmd stream.
-    ui_command_topic: /ui/thruster_cmd
-    candidate_timeout_s: 0.10
+    source_command_timeout_s: 0.10
     state_timeout_s: 0.15
     target_timeout_s: 0.15
     safety_heartbeat_timeout_s: 0.25
@@ -17,21 +15,48 @@ command_authority:
     # for |p - 1500| <= 200 us. Commands are applied immediately (no slew).
     pwm_limit_us: 200.0
     allow_rl_hardware: false
-    # Confirmed RobotCore pool envelope in map FLU metres.
-    pool_bounds_configured: true
-    pool_min_xyz: [0.0, 0.0, 0.0]
-    pool_max_xyz: [5.42, 3.73, 1.0]
-
 pid_controller:
   ros__parameters:
     # Dedicated actuator-domain altitude PID. Live tests show installed
     # T1-T4 +PWM moves toward -Z, hence command_sign=-1 for an FLU loop.
     altitude_pwm_kp: 2.0
-    altitude_pwm_ki: 0.6
-    altitude_pwm_kd: 0.0
+    altitude_pwm_ki: 0.8
+    altitude_pwm_kd: 0.15
     altitude_pwm_integral_limit: 0.4
     altitude_velocity_filter_time_constant_s: 0.20
     altitude_pwm_command_sign: -1.0
+    altitude_position_kp: 0.35
+    # Direct station mode keeps translation conservative while giving yaw
+    # enough authority to clear the measured +/-25 us thruster deadband.
+    station_surge_pwm_kp: 1.5
+    station_sway_pwm_kp: 1.25
+    station_yaw_pwm_kp: 0.55
+    station_yaw_heading_kp: 0.60
+    station_horizontal_axis_limit: 0.12
+    station_yaw_axis_limit: 0.20
+    station_surge_rate_limit: 0.40
+    fast_station_surge_rate_limit: 0.50
+    station_yaw_rate_limit: 0.60
+    # The measured roll loop has about 160 ms command-to-angular-acceleration
+    # delay. Its old 0.9 rate gain exceeded the fitted delayed-integrator
+    # stability boundary (~0.43). Keep angle stiffness independent from the
+    # lower gyro gains and bound combined T1-T4 differential to 50 us.
+    fast_station_level_pwm_limit: 0.10
+    fast_station_roll_angle_kp: 0.45
+    fast_station_pitch_angle_kp: 0.45
+    fast_station_roll_rate_kp: 0.30
+    fast_station_pitch_rate_kp: 0.55
+    # Native-100-Hz gyro conditioning: reject only isolated spikes, fit the
+    # latest five timestamped samples, and predict the bounded 40 ms command-
+    # application horizon. The final 10 ms low-pass is about 16 Hz, avoiding
+    # the large phase lag of the previous 40 ms (~4 Hz) filter.
+    imu_rate_history_samples: 5
+    imu_rate_outlier_limit_rps: 0.20
+    imu_rate_prediction_horizon_s: 0.04
+    imu_rate_prediction_accel_limit_rps2: 4.0
+    imu_rate_prediction_delta_limit_rps: 0.12
+    imu_rate_filter_time_constant_s: 0.01
+    imu_orientation_filter_time_constant_s: 0.05
 
 trajectory_command:
   ros__parameters:
@@ -41,8 +66,8 @@ trajectory_command:
     pool_min_xyz: [0.0, 0.0, 0.0]
     pool_max_xyz: [5.42, 3.73, 1.0]
     trajectory_limits_configured: true
-    max_linear_speed_mps: 0.45
-    max_angular_speed_rps: 0.55
+    max_linear_speed_mps: 0.55
+    max_angular_speed_rps: 0.60
     attitude_min_rpy_deg: [-15.0, -15.0, -30.0]
     attitude_max_rpy_deg: [15.0, 15.0, 30.0]
     trajectory_type: hold

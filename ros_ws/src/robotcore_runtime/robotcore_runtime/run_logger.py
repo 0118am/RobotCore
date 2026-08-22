@@ -15,6 +15,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from ament_index_python.packages import get_package_share_directory
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
@@ -302,12 +303,26 @@ class RunLogger(Node):
             if source.is_file():
                 shutil.copy2(source, destination / source.name)
                 hashes[source.name] = hashlib.sha256(source.read_bytes()).hexdigest()
-        task_path = Path(str(self.get_parameter("task_config_dir").value)) / f"{task_name}.json"
+        task_path = self.task_path(task_name)
         shutil.copy2(task_path, destination / task_path.name)
         hashes[task_path.name] = hashlib.sha256(task_path.read_bytes()).hexdigest()
         (destination / "control_config_hashes.json").write_text(
             json.dumps(hashes, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
+        )
+
+    def task_path(self, task_name):
+        """Resolve the same managed-or-installed task document used to execute it."""
+
+        filename = f"{task_name}.json"
+        path = Path(str(self.get_parameter("task_config_dir").value)) / filename
+        if path.is_file():
+            return path
+        return (
+            Path(get_package_share_directory("robotcore_runtime"))
+            / "config"
+            / "tasks"
+            / filename
         )
 
     def publish_run_dir(self):
@@ -499,12 +514,11 @@ class RunLogger(Node):
                 "fault_latched": bool(msg.fault_latched),
                 "fault_code": msg.fault_code,
                 "message": msg.message,
-                "candidate_age_s": float(msg.candidate_age_s),
+                "selected_command_age_s": float(msg.selected_command_age_s),
                 "body_state_age_s": float(msg.body_state_age_s),
                 "target_age_s": float(msg.target_age_s),
                 "command_limit": float(msg.command_limit),
                 "localization_source": msg.localization_source,
-                "pool_bounds_configured": bool(msg.pool_bounds_configured),
             },
         )
 
@@ -517,6 +531,9 @@ class RunLogger(Node):
                 "ready": bool(msg.ready),
                 "producing_command": bool(msg.producing_command),
                 "missing_inputs": list(msg.missing_inputs),
+                "body_state_age_s": float(msg.body_state_age_s),
+                "imu_age_s": float(msg.imu_age_s),
+                "target_age_s": float(msg.target_age_s),
                 "allocation_rank": int(msg.allocation_rank),
                 "allocation_condition": float(msg.allocation_condition),
                 "allocation_residual": float(msg.allocation_residual),
@@ -568,7 +585,7 @@ class RunLogger(Node):
                 ),
                 "vio_rate_hz": float(msg.vio_rate_hz),
                 "tag_rate_hz": float(msg.tag_rate_hz),
-                "fused_rate_hz": float(msg.fused_rate_hz),
+                "body_state_rate_hz": float(msg.body_state_rate_hz),
                 "apriltag_frame_rate_hz": float(msg.apriltag_frame_rate_hz),
                 "vio_transport_delay_s": finite_or_none(msg.vio_transport_delay_s),
                 "tag_transport_delay_s": finite_or_none(msg.tag_transport_delay_s),

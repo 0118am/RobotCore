@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "kind": "tracking_task",
+  "name": "spatial_figure_eight",
+  "label": "spacial Lissajous",
+  "mode": "station_hold",
+  "trajectory_name": "spatial_figure_eight",
+  "controller": "pid",
+  "control_law": "pd",
+  "duration_s": 86400.0,
+  "run_until_stopped": true,
+  "trajectory": {
+    "trajectory_type": "spatial_figure_eight",
+    "attitude_mode": "path_tangent",
+    "relative_to_initial_pose": false,
+    "center_x": 2.71,
+    "center_y": 1.865,
+    "center_z": 0.5,
+    "hold_before_motion_s": 25.0,
+    "move_duration_s": 15.0,
+    "trajectory_ramp_s": 10.0,
+    "amp_x": 2.3,
+    "amp_y": 1.2,
+    "amp_z": 0.1,
+    "period_s": 200.0
+  }
+}

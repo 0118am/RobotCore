@@ -115,17 +115,14 @@ def test_zed_nitros_is_enabled_while_operator_video_remains_on_demand():
     camera_config = (
         ROOT / "ros_ws" / "src" / "robotcore_sensors" / "config" / "zedx_minimal_open.yaml"
     ).read_text(encoding="utf-8")
-    assert 'plugin="nvidia::isaac_ros::image_proc::ImageFormatConverterNode"' in launch
-    assert 'name="apriltag_cuda_rgb_converter"' in launch
-    assert '("image_raw", LaunchConfiguration("front_camera_raw_topic"))' in launch
-    assert 'default_value="/localization/apriltag/cuda_input_rgb"' in launch
-    assert launch.count(
-        '("image", LaunchConfiguration("apriltag_cuda_input_topic"))'
-    ) == 2
-    assert '"encoding_desired": "rgb8"' in launch
-    assert '"image_raw_nitros_format": "nitros_image_bgr8"' in launch
-    assert '"image_nitros_format": "nitros_image_rgb8"' in launch
+    assert 'plugin="nvidia::isaac_ros::image_proc::ImageFormatConverterNode"' not in launch
+    assert 'name="apriltag_cuda_rgb_converter"' not in launch
+    assert "apriltag_cuda_input_topic" not in launch
+    assert "/localization/apriltag/cuda_input_rgb" not in launch
+    assert '("image", LaunchConfiguration("front_camera_raw_topic"))' in launch
+    assert '"encoding_desired": "rgb8"' not in launch
     assert "front_camera_nitros_topic" not in launch
+    assert "enable_24bit_output: true" in camera_config
     assert "disable_nitros: false" in camera_config
     assert "jpeg_quality: 80" in camera_config
     assert '"publish_imu_tf:=false enable_ipc:=false node_log_type:=screen "' in launch
@@ -141,28 +138,31 @@ def test_apriltag_payload_remappings_define_one_zed_cuda_localizer_path():
     # the actual publisher/subscriber graph.
     assert launch.count('LaunchConfiguration("front_camera_raw_topic")') == 1
     assert launch.count('LaunchConfiguration("front_camera_info_topic")') == 2
-    assert launch.count('LaunchConfiguration("apriltag_cuda_input_topic")') == 2
+    assert "apriltag_cuda_input_topic" not in launch
     assert launch.count('LaunchConfiguration("apriltag_detections_topic")') == 2
 
 
-def test_tag_measurement_updates_only_map_to_odom_alignment():
+def test_tag_measurement_is_replayed_into_vio_tag_ekf():
     fusion = (
         ROOT
         / "ros_ws/src/robotcore_sensors/src/vio_tag_fusion_component.cpp"
     ).read_text(encoding="utf-8")
 
     assert "candidate =" in fusion
-    assert "map_from_base * vio->odom_from_base.inverse()" in fusion
-    assert "update_alignment(candidate" in fusion
-    assert "filter_.update_pose(" not in fusion
-    assert "replay_from(" not in fusion
+    assert "map_from_base * odom_from_base.inverse()" in fusion
+    assert "add_alignment_candidate(candidate" in fusion
+    assert "filter.update_position(" in fusion
+    assert "filter.update_orientation(" in fusion
+    assert "MeasurementSource::Imu" not in fusion
+    assert "sensor_msgs::msg::Imu" not in fusion
+    assert "MeasurementResult replay(" in fusion
 
 
-def test_imu_conditioner_uses_bounded_sensor_qos_without_duplicate_status_stream():
-    conditioner = (
-        ROOT / "ros_ws/src/robotcore_sensors/src/imu_conditioner_component.cpp"
+def test_aboard_bridge_publishes_the_canonical_imu_with_bounded_sensor_qos():
+    bridge = (
+        ROOT / "ros_ws/src/robotcore_hardware/src/aboard_bridge_node.cpp"
     ).read_text(encoding="utf-8")
 
-    assert "rclcpp::SensorDataQoS().keep_last(8)" in conditioner
-    assert "rclcpp::SensorDataQoS().keep_last(32)" in conditioner
-    assert "status_pub_" not in conditioner
+    assert '"/sensors/external_imu", rclcpp::SensorDataQoS().keep_last(8)' in bridge
+    assert 'message.header.frame_id = "base_link"' in bridge
+    assert "/hardware/aboard_imu_raw" not in bridge

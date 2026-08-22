@@ -161,10 +161,14 @@ bool board_status_reason_flags_consistent(const BoardStatusFrame & status)
          (!session_established && failsafe);
 }
 
-std::optional<ImuFrame> parse_imu_v1(const std::uint8_t * data, std::size_t size)
+std::optional<ImuFrame> parse_imu_v2(const std::uint8_t * data, std::size_t size)
 {
-  if (size != kImuV1FrameSize || data[0] != 0xFFU || data[1] != 0xF8U ||
-      data[2] != 0x04U || data[3] != 0x01U) {return std::nullopt;}
+  if (size != kImuV2FrameSize || data[0] != kFrameHead || data[1] != 0xF8U ||
+      data[2] != kImuFrameNumber || data[3] != 0x02U ||
+      (data[4] & static_cast<std::uint8_t>(~(kImuFlagValid | kImuFlagAttitudeValid))) != 0U)
+  {
+    return std::nullopt;
+  }
   if (read_u16(data + size - 2U) != crc16_ccitt(data, size - 2U)) {return std::nullopt;}
   ImuFrame result;
   result.version = data[3];
@@ -175,8 +179,27 @@ std::optional<ImuFrame> parse_imu_v1(const std::uint8_t * data, std::size_t size
   for (std::size_t i = 0; i < 3U; ++i) {
     result.gyro_rad_s[i] = static_cast<double>(read_i16(data + 13U + 2U * i)) * 0.01 * kDegToRad;
     result.accel_m_s2[i] = static_cast<double>(read_i16(data + 19U + 2U * i)) * 0.001 * kGravity;
+    result.attitude_rpy_rad[i] =
+      static_cast<double>(read_i16(data + 25U + 2U * i)) * 0.01 * kDegToRad;
   }
-  return (result.flags & 0x01U) != 0U ? std::optional<ImuFrame>(result) : std::nullopt;
+  result.attitude_valid = (result.flags & kImuFlagAttitudeValid) != 0U;
+  return (result.flags & kImuFlagValid) != 0U ?
+    std::optional<ImuFrame>(result) : std::nullopt;
+}
+
+std::array<double, 3> imu_vector_to_base_link(
+  const std::array<double, 3> & sensor_vector)
+{
+  // The installed UART8 IMU is mounted 90 degrees clockwise about base Z.
+  return {sensor_vector[1], -sensor_vector[0], sensor_vector[2]};
+}
+
+std::array<double, 3> imu_attitude_rpy_to_base_link(
+  const std::array<double, 3> & sensor_rpy)
+{
+  // Its native AHRS already names physical roll and pitch, but reports pitch
+  // with the opposite sign from ROS base_link FLU.
+  return {sensor_rpy[0], -sensor_rpy[1], sensor_rpy[2]};
 }
 
 std::optional<RuntimeFrame> parse_runtime_v1(const std::uint8_t * data, std::size_t size)

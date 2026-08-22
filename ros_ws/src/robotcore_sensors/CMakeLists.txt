@@ -35,9 +35,9 @@ find_package(tf2 REQUIRED)
 find_package(tf2_eigen REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
+find_package(zed_msgs REQUIRED)
 
 add_library(robotcore_sensors_components SHARED
-  src/imu_conditioner_component.cpp
   src/apriltag_map_localizer_component.cpp
   src/vio_tag_fusion_component.cpp)
 target_include_directories(robotcore_sensors_components PUBLIC include)
@@ -47,10 +47,8 @@ target_link_libraries(robotcore_sensors_components
 ament_target_dependencies(robotcore_sensors_components
   diagnostic_msgs diagnostic_updater robotcore_interfaces geometry_msgs
   nav_msgs rclcpp rclcpp_components sensor_msgs
-  std_srvs tf2 tf2_eigen tf2_geometry_msgs tf2_ros)
+  std_srvs tf2 tf2_eigen tf2_geometry_msgs tf2_ros zed_msgs)
 
-rclcpp_components_register_node(robotcore_sensors_components
-  PLUGIN "robotcore_sensors::ImuConditionerComponent" EXECUTABLE imu_conditioning_node)
 rclcpp_components_register_node(robotcore_sensors_components
   PLUGIN "robotcore_sensors::AprilTagMapLocalizerComponent" EXECUTABLE apriltag_localization_node)
 rclcpp_components_register_node(robotcore_sensors_components
@@ -62,10 +60,6 @@ install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
-  ament_add_gtest(test_imu_conditioning test/test_imu_conditioning.cpp)
-  target_include_directories(test_imu_conditioning PRIVATE include)
-  target_link_libraries(test_imu_conditioning Eigen3::Eigen)
-
   ament_add_gtest(test_apriltag_map test/test_apriltag_map.cpp)
   target_include_directories(test_apriltag_map PRIVATE include)
   target_link_libraries(test_apriltag_map Eigen3::Eigen nlohmann_json::nlohmann_json)

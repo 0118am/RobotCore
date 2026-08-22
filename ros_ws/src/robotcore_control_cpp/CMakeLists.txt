@@ -10,10 +10,9 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(robotcore_interfaces REQUIRED)
-find_package(std_msgs REQUIRED)
 
 add_executable(command_authority src/command_authority_node.cpp)
-ament_target_dependencies(command_authority rclcpp robotcore_interfaces std_msgs)
+ament_target_dependencies(command_authority rclcpp robotcore_interfaces)
 
 install(TARGETS command_authority DESTINATION lib/${PROJECT_NAME})
 ament_package()

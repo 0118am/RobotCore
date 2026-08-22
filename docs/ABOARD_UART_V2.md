@@ -96,9 +96,9 @@ UART6 is 115200 baud, 8N1, so each direction can carry 11520 bytes/s.
 | Direction | Traffic | Bytes/s | Link use |
 | --- | --- | ---: | ---: |
 | Jetson to Aquaboard | 34 B command at 50 Hz | 1700 | 14.8% |
-| Aquaboard to Jetson | 27 B IMU at 100 Hz + 48 B status at 20 Hz | 3660 | 31.8% |
+| Aquaboard to Jetson | 33 B IMU at 100 Hz + 48 B status at 20 Hz + 37 B runtime at 2 Hz | 4334 | 37.6% |
 
-When IMU and status become ready together, their 75 bytes serialize in 6.51
+When IMU and status become ready together, their 81 bytes serialize in 7.03
 ms. This remains below the 10 ms IMU sample period. CRC failures, command age,
 boot/reset changes, and applied-sequence lag are exported as diagnostics and
 must be checked during full-power pool acceptance.

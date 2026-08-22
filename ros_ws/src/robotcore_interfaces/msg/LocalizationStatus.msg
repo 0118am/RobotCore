@@ -17,7 +17,7 @@ float32 apriltag_frame_age_s
 # Rates are measured from callback arrivals over a rolling window.
 float32 vio_rate_hz
 float32 tag_rate_hz
-float32 fused_rate_hz
+float32 body_state_rate_hz
 float32 apriltag_frame_rate_hz
 
 # now - Header.stamp measured when the sample arrived. These include sensor
@@ -29,7 +29,7 @@ float32 tag_transport_delay_s
 float32 tag_vio_translation_residual_m
 float32 tag_vio_angle_residual_deg
 
-# Covariance from the canonical /localization/fused_odom estimate.
+# Covariance corresponding to the canonical /robot/body_state EKF estimate.
 float64[36] pose_covariance
 float64[36] twist_covariance
 

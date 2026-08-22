@@ -51,7 +51,7 @@ Design rules:
 Core topics:
 
 - `/apriltag_localization` is a RobotCore-owned `robotcore_sensors`
-  component. Isaac ROS supplies only GPU image conversion/detection; RobotCore
+  component. Isaac ROS supplies CUDA detection directly from ZED's BGR8 NITROS image; RobotCore
   owns map loading, mixed-size joint PnP, quality gates, and pose publication.
 
 - ZED camera IMU: fused internally by the SDK for VIO; its unused ROS topic is disabled.
@@ -72,20 +72,21 @@ Core topics:
   relocalization topic.
 - `/zedx/zed_node/odom`: sole local `odom -> base_link` motion source. Fusion
   converts it directly to `base_link`; no adapted duplicate topic is published.
-- `/hardware/aboard_imu_raw`: valid external UART8 gyro and acceleration
-  samples forwarded by the Aquaboard. No sample is published for an invalid
-  frame-3 payload.
-- `/sensors/external_imu`: the single calibrated external-IMU telemetry stream.
-  It uses `base_link` and retains the ROS specific-force
-  convention (`+g` on Z at rest for a level FLU mounting).
-- `/localization/fused_odom`: continuous 60 Hz position/velocity estimate. ZED
-  VIO supplies local motion; AprilTag updates only `map -> odom`.
-- `/robot/body_state`: 60 Hz view of the same fused base pose, body-frame velocity, and
-  validity. Velocity comes from ZED VIO, not by finite
-  differencing AprilTag poses.
+- `/sensors/external_imu`: the single external-IMU stream, published directly
+  by `aboard_bridge` from CRC-valid, uniquely sequenced frame-4 samples. It uses
+  `base_link`, retains the factory calibration, native VG/AH/MINS orientation,
+  and ROS specific-force convention (`+g` on Z at rest for a level FLU
+  mounting), and is not republished through a conditioning node or software
+  AHRS.
+- `/robot/body_state`: the canonical 60 Hz EKF output containing base pose,
+  body-frame velocity, and validity. The EKF contains only ZED VIO and AprilTag
+  measurements. Its localization orientation is used for map/body coordinate
+  conversion, while PID attitude and angular-rate feedback subscribe directly
+  to `/sensors/external_imu`. Velocity is not obtained by finite-differencing
+  AprilTag poses.
 - `/localization/status`: quantitative source ages, measured rates, transport
   delays, detected/mapped/inlier Tag counts, reprojection RMS, Tag/VIO
-  innovation, rejection reasons, and fused covariance. It is published at 10 Hz
+  innovation, rejection reasons, and EKF covariance. It is published at 60 Hz
   for the UI; the run logger persists it at 1 Hz.
 - `/control/thruster_cmd`: 8 normalized thruster commands.
 - `/policy/body/status`: readiness and missing inputs.
@@ -116,7 +117,7 @@ Core action:
   IMU connected to its UART8 as telemetry on the shared UART6 transport.
 - Aquaboard accepts only the CRC/session/sequence UART v2 command path and maps its
   eight logical channels to physical PWM indexes 8 through 15.
-- The browser publishes only `/control/candidates/manual`. It has no serial
+- The browser publishes manual input only to `/control/manual/thruster_cmd`. It has no serial
   device parameter, UART encoder, PWM span, or physical-channel mapping; the
   central authority and the sole Aquaboard bridge remain mandatory boundaries.
 - `BoardStatus.pwm_us` is an MCU timer-latch acknowledgement. It must not be

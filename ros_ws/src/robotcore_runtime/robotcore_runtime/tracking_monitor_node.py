@@ -11,6 +11,8 @@ import math
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import Imu
 
 from robotcore_interfaces.msg import BodyState, TrackingStatus, TrajectoryTarget
 
@@ -22,9 +24,12 @@ class TrackingMonitorNode(Node):
         super().__init__("tracking_monitor_node")
         self.declare_parameter("publish_rate_hz", 20.0)
         self.declare_parameter("max_input_age_s", 0.15)
+        self.declare_parameter("imu_topic", "/sensors/external_imu")
 
         self.last_body: BodyState | None = None
         self.last_body_ns: int | None = None
+        self.last_imu: Imu | None = None
+        self.last_imu_ns: int | None = None
         self.last_target: TrajectoryTarget | None = None
         self.last_target_ns: int | None = None
         self.previous_velocity_body: tuple[float, float, float] | None = None
@@ -33,6 +38,12 @@ class TrackingMonitorNode(Node):
 
         self.publisher = self.create_publisher(TrackingStatus, "/runtime/tracking_status", 10)
         self.create_subscription(BodyState, "/robot/body_state", self.on_body_state, 10)
+        self.create_subscription(
+            Imu,
+            str(self.get_parameter("imu_topic").value),
+            self.on_imu,
+            qos_profile_sensor_data,
+        )
         self.create_subscription(
             TrajectoryTarget,
             "/runtime/trajectory_target",
@@ -47,6 +58,24 @@ class TrackingMonitorNode(Node):
         self.last_body = msg
         self.last_body_ns = self.get_clock().now().nanoseconds
 
+    def on_imu(self, msg: Imu):
+        quaternion = (
+            float(msg.orientation.w),
+            float(msg.orientation.x),
+            float(msg.orientation.y),
+            float(msg.orientation.z),
+        )
+        norm = math.sqrt(sum(value * value for value in quaternion))
+        if (
+            msg.header.frame_id != "base_link"
+            or msg.orientation_covariance[0] < 0.0
+            or not math.isfinite(norm)
+            or norm <= 1e-9
+        ):
+            return
+        self.last_imu = msg
+        self.last_imu_ns = self.get_clock().now().nanoseconds
+
     def on_trajectory_target(self, msg: TrajectoryTarget):
         self.last_target = msg
         self.last_target_ns = self.get_clock().now().nanoseconds
@@ -54,7 +83,7 @@ class TrackingMonitorNode(Node):
     def tick(self):
         """Publish one status sample when both inputs are available."""
 
-        if self.last_body is None or self.last_target is None:
+        if self.last_body is None or self.last_imu is None or self.last_target is None:
             return
 
         now = self.get_clock().now()
@@ -70,6 +99,7 @@ class TrackingMonitorNode(Node):
         )
 
         body = self.last_body
+        imu = self.last_imu
         target = self.last_target
         actual_pos = (
             float(body.pose.position.x),
@@ -88,10 +118,10 @@ class TrackingMonitorNode(Node):
         )
 
         root_quat_w = (
-            float(body.pose.orientation.w),
-            float(body.pose.orientation.x),
-            float(body.pose.orientation.y),
-            float(body.pose.orientation.z),
+            float(imu.orientation.w),
+            float(imu.orientation.x),
+            float(imu.orientation.y),
+            float(imu.orientation.z),
         )
         world_to_body = self.quat_conjugate_wxyz(root_quat_w)
         target_velocity_body = self.quat_apply_wxyz(
@@ -124,9 +154,9 @@ class TrackingMonitorNode(Node):
             ),
         )
         actual_angular_velocity_body = (
-            float(body.twist.angular.x),
-            float(body.twist.angular.y),
-            float(body.twist.angular.z),
+            float(imu.angular_velocity.x),
+            float(imu.angular_velocity.y),
+            float(imu.angular_velocity.z),
         )
         target_quat_w = (
             float(target.target_pose.orientation.w),
@@ -145,7 +175,7 @@ class TrackingMonitorNode(Node):
         status.target_position.x, status.target_position.y, status.target_position.z = target_pos
         status.actual_position.x, status.actual_position.y, status.actual_position.z = actual_pos
         status.target_orientation = target.target_pose.orientation
-        status.actual_orientation = body.pose.orientation
+        status.actual_orientation = imu.orientation
         self.assign_vector(status.target_velocity_body, target_velocity_body)
         self.assign_vector(status.actual_velocity_body, actual_velocity_body)
         self.assign_vector(status.target_acceleration_body, target_acceleration_body)
@@ -173,9 +203,17 @@ class TrackingMonitorNode(Node):
         """Reject stale inputs so the UI can distinguish live tracking from replay gaps."""
 
         max_age_ns = int(float(self.get_parameter("max_input_age_s").value) * 1e9)
-        if self.last_body_ns is None or self.last_target_ns is None:
+        if (
+            self.last_body_ns is None
+            or self.last_imu_ns is None
+            or self.last_target_ns is None
+        ):
             return False
-        return (now_ns - self.last_body_ns) <= max_age_ns and (now_ns - self.last_target_ns) <= max_age_ns
+        return (
+            (now_ns - self.last_body_ns) <= max_age_ns
+            and (now_ns - self.last_imu_ns) <= max_age_ns
+            and (now_ns - self.last_target_ns) <= max_age_ns
+        )
 
     def estimate_actual_acceleration(self, velocity_body: tuple[float, float, float], now_ns: int):
         """Estimate actual body-frame linear acceleration from successive body states."""

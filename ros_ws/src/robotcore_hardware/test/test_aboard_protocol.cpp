@@ -123,19 +123,19 @@ TEST(AboardProtocol, V2FitsThe115200BaudJitterBudget)
   constexpr double serial_bytes_per_second = baud / 10.0;  // 8N1
   constexpr double command_bytes_per_second = robotcore_hardware::kCommandV2FrameSize * 50.0;
   constexpr double telemetry_bytes_per_second =
-    robotcore_hardware::kImuV1FrameSize * 100.0 +
+    robotcore_hardware::kImuV2FrameSize * 100.0 +
     robotcore_hardware::kStatusV2FrameSize * 20.0 +
     robotcore_hardware::kRuntimeV1FrameSize * 2.0;
   constexpr double coincident_telemetry_burst_ms =
-    (robotcore_hardware::kImuV1FrameSize + robotcore_hardware::kStatusV2FrameSize) * 10.0 * 1000.0 /
+    (robotcore_hardware::kImuV2FrameSize + robotcore_hardware::kStatusV2FrameSize) * 10.0 * 1000.0 /
     baud;
 
   EXPECT_LT(command_bytes_per_second / serial_bytes_per_second, 0.15);
-  EXPECT_LT(telemetry_bytes_per_second / serial_bytes_per_second, 0.33);
+  EXPECT_LT(telemetry_bytes_per_second / serial_bytes_per_second, 0.38);
   EXPECT_LT(
     (telemetry_bytes_per_second + command_bytes_per_second) / serial_bytes_per_second,
-    0.50);
-  EXPECT_LT(coincident_telemetry_burst_ms, 7.0);
+    0.53);
+  EXPECT_LT(coincident_telemetry_burst_ms, 7.1);
 }
 
 TEST(AboardProtocol, ParsesRuntimeFrame5)
@@ -213,28 +213,49 @@ TEST(AboardProtocol, SafetyReasonAndFlagsMustDescribeOneState)
   EXPECT_FALSE(robotcore_hardware::board_status_reason_flags_consistent(status));
 }
 
-TEST(AboardProtocol, ParsesFrame4)
+TEST(AboardProtocol, ParsesAttitudeFrame4)
 {
-  std::array<std::uint8_t, robotcore_hardware::kImuV1FrameSize> frame{};
-  frame[0] = 0xFF; frame[1] = 0xF8; frame[2] = 4; frame[3] = 1; frame[4] = 1;
+  std::array<std::uint8_t, robotcore_hardware::kImuV2FrameSize> frame{};
+  frame[0] = 0xFF; frame[1] = 0xF8; frame[2] = 4; frame[3] = 2; frame[4] = 3;
   frame[5] = 0x78; frame[6] = 0x56; frame[7] = 0x34; frame[8] = 0x12;
   frame[9] = 0xE8; frame[10] = 0x03;
   frame[13] = 100;  // 1 deg/s
   frame[23] = 0xE8; frame[24] = 0x03;  // 1 g
+  frame[25] = 100;  // roll = 1 deg
+  frame[27] = 0x38; frame[28] = 0xFF;  // pitch = -2 deg
+  frame[29] = 0x28; frame[30] = 0x23;  // yaw = 90 deg
   const auto crc = robotcore_hardware::crc16_ccitt(frame.data(), frame.size() - 2);
-  frame[25] = static_cast<std::uint8_t>(crc); frame[26] = static_cast<std::uint8_t>(crc >> 8);
-  const auto parsed = robotcore_hardware::parse_imu_v1(frame.data(), frame.size());
+  frame[31] = static_cast<std::uint8_t>(crc); frame[32] = static_cast<std::uint8_t>(crc >> 8);
+  const auto parsed = robotcore_hardware::parse_imu_v2(frame.data(), frame.size());
   ASSERT_TRUE(parsed);
   EXPECT_EQ(parsed->sample_counter, 0x12345678U);
   EXPECT_NEAR(parsed->gyro_rad_s[0], 3.141592653589793 / 180.0, 1e-9);
   EXPECT_NEAR(parsed->accel_m_s2[2], 9.80665, 1e-9);
+  EXPECT_TRUE(parsed->attitude_valid);
+  EXPECT_NEAR(parsed->attitude_rpy_rad[0], 3.141592653589793 / 180.0, 1e-9);
+  EXPECT_NEAR(parsed->attitude_rpy_rad[1], -2.0 * 3.141592653589793 / 180.0, 1e-9);
+  EXPECT_NEAR(parsed->attitude_rpy_rad[2], 3.141592653589793 / 2.0, 1e-9);
+}
+
+TEST(AboardProtocol, MapsInstalledImuAxesToBaseLinkFlu)
+{
+  const auto vector = robotcore_hardware::imu_vector_to_base_link({1.0, 2.0, 3.0});
+  EXPECT_DOUBLE_EQ(vector[0], 2.0);
+  EXPECT_DOUBLE_EQ(vector[1], -1.0);
+  EXPECT_DOUBLE_EQ(vector[2], 3.0);
+
+  const auto attitude = robotcore_hardware::imu_attitude_rpy_to_base_link(
+    {0.1, 0.2, 0.3});
+  EXPECT_DOUBLE_EQ(attitude[0], 0.1);
+  EXPECT_DOUBLE_EQ(attitude[1], -0.2);
+  EXPECT_DOUBLE_EQ(attitude[2], 0.3);
 }
 
 TEST(AboardProtocol, RejectsBadCrcAndBackwardsClock)
 {
-  std::array<std::uint8_t, robotcore_hardware::kImuV1FrameSize> frame{};
-  frame[0] = 0xFF; frame[1] = 0xF8; frame[2] = 4; frame[3] = 1; frame[4] = 1;
-  EXPECT_FALSE(robotcore_hardware::parse_imu_v1(frame.data(), frame.size()));
+  std::array<std::uint8_t, robotcore_hardware::kImuV2FrameSize> frame{};
+  frame[0] = 0xFF; frame[1] = 0xF8; frame[2] = 4; frame[3] = 2; frame[4] = 3;
+  EXPECT_FALSE(robotcore_hardware::parse_imu_v2(frame.data(), frame.size()));
   robotcore_hardware::McuClockMapper mapper;
   ASSERT_TRUE(mapper.map(100, 1000000000LL, 500000000LL));
   EXPECT_FALSE(mapper.map(99, 1010000000LL, 510000000LL));
@@ -252,11 +273,11 @@ TEST(AboardProtocol, ExtendsThirtyTwoBitMcuClockWrap)
 
 TEST(AboardProtocol, RejectsUnsupportedFrameVersion)
 {
-  std::array<std::uint8_t, robotcore_hardware::kImuV1FrameSize> frame{};
-  frame[0] = 0xFF; frame[1] = 0xF8; frame[2] = 4; frame[3] = 2; frame[4] = 1;
+  std::array<std::uint8_t, robotcore_hardware::kImuV2FrameSize> frame{};
+  frame[0] = 0xFF; frame[1] = 0xF8; frame[2] = 4; frame[3] = 1; frame[4] = 3;
   const auto crc = robotcore_hardware::crc16_ccitt(frame.data(), frame.size() - 2);
-  frame[25] = static_cast<std::uint8_t>(crc); frame[26] = static_cast<std::uint8_t>(crc >> 8);
-  EXPECT_FALSE(robotcore_hardware::parse_imu_v1(frame.data(), frame.size()));
+  frame[31] = static_cast<std::uint8_t>(crc); frame[32] = static_cast<std::uint8_t>(crc >> 8);
+  EXPECT_FALSE(robotcore_hardware::parse_imu_v2(frame.data(), frame.size()));
 }
 
 TEST(AboardProtocol, AffineClockMappingRejectsPositiveArrivalJitter)

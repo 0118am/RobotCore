@@ -4,8 +4,10 @@
 #include <boost/lockfree/spsc_queue.hpp>
 #include <diagnostic_msgs/msg/diagnostic_status.hpp>
 #include <diagnostic_updater/diagnostic_updater.hpp>
+#include <robotcore_interfaces/msg/april_tag_pose_estimate.hpp>
 #include <robotcore_interfaces/msg/board_status.hpp>
 #include <robotcore_interfaces/msg/board_runtime.hpp>
+#include <robotcore_interfaces/msg/body_state.hpp>
 #include <robotcore_interfaces/msg/thruster_command.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/imu.hpp>
@@ -32,6 +34,7 @@
 #include <mutex>
 #include <optional>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -58,6 +61,30 @@ constexpr auto kShutdownDeadline = 150ms;
 constexpr auto kImuCalibrationStartTimeout = 3s;
 constexpr auto kImuCalibrationOverallTimeout = 25s;
 constexpr char kAuthoritySourcePrefix[] = "command_authority:";
+constexpr double kDegreesToRadians = 0.017453292519943295769;
+constexpr double kTwoPi = 6.283185307179586476925;
+constexpr std::int64_t kHeadingAlignmentMaximumSkewNs = 100000000LL;
+
+struct RawHeadingSample
+{
+  std::int64_t stamp_ns{};
+  double yaw_rad{};
+};
+
+std::array<double, 4> quaternion_wxyz_from_rpy(const std::array<double, 3> & rpy)
+{
+  const double cr = std::cos(0.5 * rpy[0]);
+  const double sr = std::sin(0.5 * rpy[0]);
+  const double cp = std::cos(0.5 * rpy[1]);
+  const double sp = std::sin(0.5 * rpy[1]);
+  const double cy = std::cos(0.5 * rpy[2]);
+  const double sy = std::sin(0.5 * rpy[2]);
+  return {
+    cr * cp * cy + sr * sp * sy,
+    sr * cp * cy - cr * sp * sy,
+    cr * sp * cy + sr * cp * sy,
+    cr * cp * sy - sr * sp * cy};
+}
 
 bool sequence_newer(std::uint32_t candidate, std::uint32_t reference)
 {
@@ -149,13 +176,18 @@ public:
       "authority_node_name", "command_authority");
     authority_node_namespace_ = declare_parameter<std::string>(
       "authority_node_namespace", "/");
-    imu_frame_ = declare_parameter<std::string>("imu_frame_id", "aboard_imu_link");
-    imu_topic_ = declare_parameter<std::string>("imu_topic", "/hardware/aboard_imu_raw");
+    const double imu_yaw_offset_deg = declare_parameter<double>("imu_yaw_offset_deg", 0.0);
+    if (!std::isfinite(imu_yaw_offset_deg)) {
+      throw std::invalid_argument("imu_yaw_offset_deg must be finite");
+    }
+    imu_yaw_offset_rad_.store(
+      std::remainder(imu_yaw_offset_deg * kDegreesToRadians, kTwoPi),
+      std::memory_order_relaxed);
     gyro_stddev_ = declare_parameter<double>("imu_angular_velocity_stddev_rps", 0.05);
     accel_stddev_ = declare_parameter<double>("imu_linear_acceleration_stddev_mps2", 0.5);
 
     imu_pub_ = create_publisher<sensor_msgs::msg::Imu>(
-      imu_topic_, rclcpp::SensorDataQoS().keep_last(8));
+      "/sensors/external_imu", rclcpp::SensorDataQoS().keep_last(8));
     status_pub_ = create_publisher<robotcore_interfaces::msg::BoardStatus>("/hardware/board_status", 10);
     runtime_pub_ = create_publisher<robotcore_interfaces::msg::BoardRuntime>(
       "/hardware/board_runtime", 10);
@@ -165,6 +197,12 @@ public:
       {
         on_command(message);
       });
+    tag_pose_sub_ = create_subscription<robotcore_interfaces::msg::AprilTagPoseEstimate>(
+      "/localization/apriltag_pose", rclcpp::SensorDataQoS().keep_last(4),
+      std::bind(&AboardBridgeNode::on_tag_pose, this, std::placeholders::_1));
+    body_state_sub_ = create_subscription<robotcore_interfaces::msg::BodyState>(
+      "/robot/body_state", rclcpp::QoS(10),
+      std::bind(&AboardBridgeNode::on_body_state, this, std::placeholders::_1));
     imu_calibration_service_ = create_service<std_srvs::srv::Trigger>(
       "/hardware/aboard/calibrate_gyro",
       std::bind(
@@ -552,7 +590,7 @@ private:
         length = kStatusV2FrameSize;
       } else if (rx_buffer_[1] == 0xF8U) {
         if (rx_buffer_[2] == kImuFrameNumber) {
-          length = kImuV1FrameSize;
+          length = kImuV2FrameSize;
         } else if (rx_buffer_[2] == kRuntimeFrameNumber) {
           length = kRuntimeV1FrameSize;
         } else {
@@ -587,14 +625,14 @@ private:
         } else {
           ++runtime_crc_errors_;
         }
-      } else if (rx_buffer_[3] != 0x01U) {
+      } else if (rx_buffer_[3] != 0x02U) {
         ++imu_version_errors_;
         accepted = true;
       } else if ((rx_buffer_[4] & 0x01U) == 0U) {
         ++imu_invalid_flags_;
         accepted = true;
       } else {
-        const auto sample = parse_imu_v1(rx_buffer_.data(), length);
+        const auto sample = parse_imu_v2(rx_buffer_.data(), length);
         if (sample) {accepted = handle_imu_io(*sample);}
         else {++imu_crc_errors_;}
       }
@@ -891,14 +929,36 @@ private:
     const auto & sample = queued.sample;
     sensor_msgs::msg::Imu message;
     message.header.stamp = rclcpp::Time(queued.stamp_ns, RCL_ROS_TIME);
-    message.header.frame_id = imu_frame_;
-    message.orientation_covariance[0] = -1.0;
-    message.angular_velocity.x = sample.gyro_rad_s[0];
-    message.angular_velocity.y = sample.gyro_rad_s[1];
-    message.angular_velocity.z = sample.gyro_rad_s[2];
-    message.linear_acceleration.x = sample.accel_m_s2[0];
-    message.linear_acceleration.y = sample.accel_m_s2[1];
-    message.linear_acceleration.z = sample.accel_m_s2[2];
+    message.header.frame_id = "base_link";
+    if (sample.attitude_valid) {
+      {
+        std::lock_guard<std::mutex> lock(heading_history_mutex_);
+        raw_heading_history_.push_back({queued.stamp_ns, sample.attitude_rpy_rad[2]});
+        while (raw_heading_history_.size() > 256U) {raw_heading_history_.pop_front();}
+      }
+      auto aligned_rpy = imu_attitude_rpy_to_base_link(sample.attitude_rpy_rad);
+      // Rotate the corrected base_link attitude into the map heading reference.
+      aligned_rpy[2] = std::remainder(
+        aligned_rpy[2] + imu_yaw_offset_rad_.load(std::memory_order_relaxed), kTwoPi);
+      const auto orientation = quaternion_wxyz_from_rpy(aligned_rpy);
+      message.orientation.w = orientation[0];
+      message.orientation.x = orientation[1];
+      message.orientation.y = orientation[2];
+      message.orientation.z = orientation[3];
+      // The vendor protocol supplies an attitude estimate but no covariance.
+      // Per sensor_msgs/Imu, an all-zero covariance means covariance unknown.
+    } else {
+      message.orientation_covariance[0] = -1.0;
+    }
+    imu_attitude_valid_.store(sample.attitude_valid);
+    const auto angular_velocity = imu_vector_to_base_link(sample.gyro_rad_s);
+    const auto linear_acceleration = imu_vector_to_base_link(sample.accel_m_s2);
+    message.angular_velocity.x = angular_velocity[0];
+    message.angular_velocity.y = angular_velocity[1];
+    message.angular_velocity.z = angular_velocity[2];
+    message.linear_acceleration.x = linear_acceleration[0];
+    message.linear_acceleration.y = linear_acceleration[1];
+    message.linear_acceleration.z = linear_acceleration[2];
     message.angular_velocity_covariance[0] = gyro_stddev_ * gyro_stddev_;
     message.angular_velocity_covariance[4] = gyro_stddev_ * gyro_stddev_;
     message.angular_velocity_covariance[8] = gyro_stddev_ * gyro_stddev_;
@@ -917,6 +977,66 @@ private:
       while (imu_transport_ms_.size() > 500U) {imu_transport_ms_.pop_front();}
     }
     ++imu_frames_;
+  }
+
+  void on_tag_pose(
+    const robotcore_interfaces::msg::AprilTagPoseEstimate::SharedPtr message)
+  {
+    const bool map_changed = last_tag_map_generation_ != 0U &&
+      message->map_generation > last_tag_map_generation_;
+    if (message->map_generation >= last_tag_map_generation_) {
+      last_tag_map_generation_ = message->map_generation;
+    }
+    if (!message->relocalization_requested && !map_changed) {return;}
+
+    heading_alignment_after_ros_ns_ =
+      static_cast<std::int64_t>(message->header.stamp.sec) * 1000000000LL +
+      static_cast<std::int64_t>(message->header.stamp.nanosec);
+    heading_alignment_pending_ = true;
+    RCLCPP_INFO(
+      get_logger(), "AprilTag relocalization received; waiting for a fresh absolute map pose");
+  }
+
+  void on_body_state(const robotcore_interfaces::msg::BodyState::SharedPtr message)
+  {
+    if (!heading_alignment_pending_ || !message->state_valid ||
+      message->header.frame_id != "map")
+    {
+      return;
+    }
+    const auto body_stamp_ns =
+      static_cast<std::int64_t>(message->header.stamp.sec) * 1000000000LL +
+      static_cast<std::int64_t>(message->header.stamp.nanosec);
+    if (body_stamp_ns <= heading_alignment_after_ros_ns_) {return;}
+
+    const auto & orientation = message->pose.orientation;
+    const double body_yaw = std::atan2(
+      2.0 * (orientation.w * orientation.z + orientation.x * orientation.y),
+      1.0 - 2.0 * (orientation.y * orientation.y + orientation.z * orientation.z));
+    if (!std::isfinite(body_yaw)) {return;}
+
+    RawHeadingSample closest;
+    std::int64_t closest_skew_ns = std::numeric_limits<std::int64_t>::max();
+    {
+      std::lock_guard<std::mutex> lock(heading_history_mutex_);
+      for (const auto & candidate : raw_heading_history_) {
+        const auto skew_ns = candidate.stamp_ns >= body_stamp_ns ?
+          candidate.stamp_ns - body_stamp_ns : body_stamp_ns - candidate.stamp_ns;
+        if (skew_ns < closest_skew_ns) {
+          closest = candidate;
+          closest_skew_ns = skew_ns;
+        }
+      }
+    }
+    if (closest_skew_ns > kHeadingAlignmentMaximumSkewNs) {return;}
+
+    const double offset = std::remainder(body_yaw - closest.yaw_rad, kTwoPi);
+    imu_yaw_offset_rad_.store(offset, std::memory_order_relaxed);
+    heading_alignment_pending_ = false;
+    RCLCPP_INFO(
+      get_logger(),
+      "Aligned external IMU heading to live map pose: offset %.3f deg (sample skew %.1f ms)",
+      offset / kDegreesToRadians, closest_skew_ns * 1e-6);
   }
 
   void reset_arm_barrier_locked()
@@ -1642,6 +1762,11 @@ private:
       (snapshot.board.flags & kStatusFlagImuCalibrationOk) != 0U);
     status.add("imu_gyro_calibration_failed", snapshot.imu_calibration_local_failed ||
       (snapshot.board.flags & kStatusFlagImuCalibrationFail) != 0U);
+    status.add("external_imu_attitude_valid", imu_attitude_valid_.load());
+    status.add(
+      "imu_yaw_offset_deg",
+      imu_yaw_offset_rad_.load(std::memory_order_relaxed) / kDegreesToRadians);
+    status.add("imu_heading_alignment_pending", heading_alignment_pending_);
     status.add("command_source", snapshot.command_source);
     status.add("command_arm_generation", snapshot.arm_generation);
     status.add("authorized_arm_generation", snapshot.authorized_generation);
@@ -1650,9 +1775,16 @@ private:
     status.add("last_transition_reason", snapshot.transition_reason);
   }
 
-  std::string port_, imu_frame_, imu_topic_, authority_node_name_, authority_node_namespace_;
+  std::string port_, authority_node_name_, authority_node_namespace_;
   int baud_{}, span_us_{}, command_timeout_ms_{}, heartbeat_timeout_ms_{};
   double gyro_stddev_{}, accel_stddev_{};
+  std::atomic<double> imu_yaw_offset_rad_{0.0};
+  std::atomic<bool> imu_attitude_valid_{false};
+  bool heading_alignment_pending_{true};
+  std::int64_t heading_alignment_after_ros_ns_{0};
+  std::uint64_t last_tag_map_generation_{0U};
+  std::mutex heading_history_mutex_;
+  std::deque<RawHeadingSample> raw_heading_history_;
 
   // These buffers/requests precede serial_ so they outlive cancellation of
   // any operation that references them during member destruction.
@@ -1766,6 +1898,8 @@ private:
   rclcpp::Publisher<robotcore_interfaces::msg::BoardStatus>::SharedPtr status_pub_;
   rclcpp::Publisher<robotcore_interfaces::msg::BoardRuntime>::SharedPtr runtime_pub_;
   rclcpp::Subscription<robotcore_interfaces::msg::ThrusterCommand>::SharedPtr command_sub_;
+  rclcpp::Subscription<robotcore_interfaces::msg::AprilTagPoseEstimate>::SharedPtr tag_pose_sub_;
+  rclcpp::Subscription<robotcore_interfaces::msg::BodyState>::SharedPtr body_state_sub_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr imu_calibration_service_;
   rclcpp::TimerBase::SharedPtr command_timer_, status_timer_, diagnostic_timer_;
   diagnostic_updater::Updater updater_;

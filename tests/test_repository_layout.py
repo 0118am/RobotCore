@@ -18,7 +18,8 @@ def test_robot_core_owns_all_robot_and_host_components():
         "ros_ws/src/robotcore_hardware/package.xml",
         "host_manager/robotcore_host_manager/daemon.py",
         "host_manager/systemd/robotcore.service",
-        "host_manager/systemd/robotcore-camera-ipc-ready.service",
+        "host_manager/systemd/nvargus-robotcore.conf",
+        "host_manager/systemd/zed-x-robotcore.conf",
         "host_manager/systemd/control-interface.service",
         "scripts/robotcore_topic_check.sh",
     ]:
@@ -73,8 +74,8 @@ def test_apriltag_localizer_publishes_one_quality_gated_absolute_measurement():
     assert "if (tags_.empty())" not in localization
     assert '"/localization/apriltag_pose_degraded"' not in localization
     assert "aligned_vio" not in localization
-    assert "sample_at(tag_stamp_ns)" in fusion
-    assert "update_alignment(candidate" in fusion
+    assert "state_at(tag_stamp_ns)" in fusion
+    assert "add_alignment_candidate(candidate" in fusion
 
 
 def test_apriltag_reprojection_and_alignment_innovation_gates_are_explicit_in_cpp():
@@ -91,15 +92,15 @@ def test_apriltag_reprojection_and_alignment_innovation_gates_are_explicit_in_cp
     assert '"multi_tag_position_stddev_m": 0.05' in edge_launch
     assert "max_translation_jump_m" not in localization
     assert "max_translation_jump_m" not in edge_launch
-    assert '"tag_innovation_gate_m", 0.50' in fusion
-    assert "last_tag_translation_residual_ > tag_innovation_gate_m_" in fusion
+    assert '"tag_pose_gate_chi2", 16.266' in fusion
+    assert "tag_gate_chi2_" in fusion
     assert "++tag_gate_rejections_" in fusion
     assert '"use_vio"' not in edge_launch
-    assert '"vio_arrival_timeout_s": 0.30' in edge_launch
-    assert '"vio_prediction_horizon_s": 0.50' in edge_launch
+    assert '"vio_arrival_timeout_s": 0.80' in edge_launch
+    assert '"vio_prediction_horizon_s": 0.80' in edge_launch
     assert 'plugin="robotcore_sensors::VioTagFusionComponent"' in edge_launch
     assert "continuous_rejection_reanchor_required(" not in fusion
-    assert "replay_from(" not in fusion
+    assert "MeasurementResult replay(" in fusion
     assert "vio_reanchors" not in fusion
 
 
@@ -162,10 +163,9 @@ def test_apriltag_image_path_is_bounded_and_localizer_consumes_only_detections()
     assert "enable_24bit_output: true" in camera_config
     assert 'default_value="/zedx/zed_node/rgb/color/rect/image"' in edge_launch
     assert 'default_value="/zedx/zed_node/rgb/color/rect/image/compressed"' in edge_launch
-    assert '("image_raw", LaunchConfiguration("front_camera_raw_topic"))' in edge_launch
-    assert edge_launch.count(
-        '("image", LaunchConfiguration("apriltag_cuda_input_topic"))'
-    ) == 2
+    assert '("image", LaunchConfiguration("front_camera_raw_topic"))' in edge_launch
+    assert "apriltag_cuda_input_topic" not in edge_launch
+    assert "ImageFormatConverterNode" not in edge_launch
     assert '"front_camera_compressed_topic": LaunchConfiguration(' in edge_launch
     assert '".zed_node":' in camera_config
     assert "jpeg_quality: 80" in camera_config
@@ -286,8 +286,8 @@ def test_pool_bottom_frame_has_no_unvalidated_depth_sensor_path():
 
 
 def test_operator_telemetry_uses_canonical_body_and_imu_topics():
-    conditioner = (
-        CORE_ROOT / "ros_ws/src/robotcore_sensors/src/imu_conditioner_component.cpp"
+    bridge = (
+        CORE_ROOT / "ros_ws/src/robotcore_hardware/src/aboard_bridge_node.cpp"
     ).read_text(encoding="utf-8")
     fusion = (
         CORE_ROOT / "ros_ws/src/robotcore_sensors/src/vio_tag_fusion_component.cpp"
@@ -299,12 +299,22 @@ def test_operator_telemetry_uses_canonical_body_and_imu_topics():
         WEB_ROOT / "control_interface/control_interface/web_operator_node.py"
     ).read_text(encoding="utf-8")
 
-    assert '"/ui/external_imu"' not in conditioner
+    assert '"/sensors/external_imu"' in bridge
+    assert 'message.header.frame_id = "base_link"' in bridge
+    assert "/hardware/aboard_imu_raw" not in bridge
+    assert '"/ui/external_imu"' not in bridge
     assert '"/ui/body_state"' not in fusion
-    assert '"ui_command_topic", "/ui/thruster_cmd"' in authority
+    assert '"/ui/thruster_cmd"' not in authority
+    assert "ui_command_pub_" not in authority
     assert 'self.declare_parameter("body_topic", "/robot/body_state")' in web
     assert 'self.declare_parameter("imu_topic", "/sensors/external_imu")' in web
-    assert 'self.declare_parameter("thruster_command_topic", "/ui/thruster_cmd")' in web
+    assert 'self.declare_parameter("thruster_command_topic", "/control/thruster_cmd")' in web
+    assert (
+        '"manual_thruster_command_topic", "/control/manual/thruster_cmd"'
+        in web
+    )
+    assert '"/control/pwm_limit_us"' not in authority
+    assert '"/control/pwm_limit_us"' not in web
 
 
 def test_cpp_localization_has_no_uninstalled_python_shadow_implementation():

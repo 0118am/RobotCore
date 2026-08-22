@@ -8,13 +8,13 @@
 
 ```text
 ZED 960x600@30
-  -> NITROS GPU BGR/RGB 转换
+  -> ZED BGR8 NITROS GPU 直连
   -> Isaac ROS CUDA AprilTag
   -> C++ 多 Tag 地图 PnP
-  -> C++ map->odom 对齐更新
+  -> C++ EKF Tag 位置延迟测量更新
 
-ZED VIO @30 Hz -> C++ VIO/Tag fusion @60 Hz
-Aquaboard IMU @100 Hz -> C++ 条件化 -> 遥测
+ZED VIO @30 Hz -> C++ EKF 位姿/twist 观测更新
+Aquaboard IMU @100 Hz -> C++ bridge -> PID/轨迹航向直接输入（绕过 EKF）
 
 BodyState @60 Hz
   -> Python 六自由度 PID/推进器分配 @60 Hz（显式启用 pool tracking 时）
@@ -23,8 +23,9 @@ BodyState @60 Hz
   -> MCU PWM/watchdog
 ```
 
-图像格式转换和 AprilTag 检测留在 GPU；6 自由度地图对齐、6x8 推进器分配及安全状态机
-留在 CPU。对这些小矩阵使用 GPU 会增加传输、同步和 kernel launch 延迟。
+ZED 直接取 GPU BGR8，cuAprilTags 原生接受该格式，因此图像链不再包含额外格式转换；
+AprilTag 检测留在 GPU。6 自由度地图对齐、6x8 推进器分配及安全状态机留在 CPU。
+对这些小矩阵使用 GPU 会增加传输、同步和 kernel launch 延迟。
 
 ## 理论吞吐与延迟下限
 
@@ -33,9 +34,9 @@ BodyState @60 Hz
 | 环节 | 固定速率/大小 | 理论边界 |
 |---|---:|---:|
 | ZED 图像 | 960x600x3, 30 Hz | 帧周期 33.33 ms；未压缩像素流约 51.84 MB/s，必须保持 NITROS/GPU 路径 |
-| 外部 IMU | 27 B, 100 Hz | 10 ms 采样周期；115200 8N1 串行时间 2.34 ms |
-| IMU+状态同批上行 | 27 B + 48 B | 最坏连续串行时间 6.51 ms |
-| 上行 UART 占用 | IMU 100 Hz + 状态 20 Hz | 3660 B/s，占单向 11520 B/s 的 31.8% |
+| 外部 IMU | 33 B, 100 Hz | 10 ms 采样周期；115200 8N1 串行时间 2.86 ms |
+| IMU+状态同批上行 | 33 B + 48 B | 最坏连续串行时间 7.03 ms |
+| 上行 UART 占用 | IMU 100 Hz + 状态 20 Hz + 运行状态 2 Hz | 4334 B/s，占单向 11520 B/s 的 37.6% |
 | 下行 UART 占用 | 34 B 命令，50 Hz | 1700 B/s，占 14.8%；单帧串行时间 2.95 ms |
 | VIO/Tag fusion、BodyState | 60 Hz | 输出周期 16.67 ms |
 | PID | 60 Hz | 调度相位最多 16.67 ms |
@@ -58,10 +59,9 @@ BodyState @60 Hz
 Python AprilTag、Tag/VIO 对齐、IMU 条件化、ZED 适配、融合和坐标数学实现，以及重复的
 Python ZED 子进程启动器。连同只验证旧实现的测试，共减少约 4,500 行。
 
-生产可执行入口现在只有 C++：
+`robotcore_sensors` 的生产可执行入口现在只有：
 
 - `apriltag_localization_node`
-- `imu_conditioning_node`
 - `vio_tag_fusion_node`
 
 注意：colcon 增量安装不会自动删除已经取消的 console script。部署升级必须使用干净的
@@ -120,9 +120,9 @@ CPU/GPU/EMC 时同时停止动态风扇服务并固定 PWM 255。该 unit 明确
 这些设置。该 unit 必须随部署脚本安装并在安全停机窗口重启后才生效；不要在推进器可能
 活动时为验证温度而重启整个 robot stack。
 
-`robotcore-camera-ipc-ready.service` 每次 RobotCore 启动都重新执行，要求
-`nvargus-daemon` 的 PID 与两个 IPC socket 连续稳定 3 秒。这避免 ZED 客户端退出
-导致 Argus 崩溃/自动重启时，新的定位图误把残留 socket 路径当成“相机已就绪”。
+`nvargus-daemon` 和 `zed_x_daemon` 通过 `PartOf=robotcore.service` 与机器人图绑定。
+每次重启 RobotCore 都先停止 ZED 客户端，再依次重启 ZED X 和 Argus 后端，最后启动
+新的机器人图；不再用 PID 或 IPC socket 采样代替完整的相机生命周期重启。
 
 ### ZED 图像质量
 
@@ -137,15 +137,15 @@ journal 有 117 条 degraded/noisy-keyframe 警告、3 条 duplicate-frame 和 6
 | 节点 | 结论 | 触发重写的证据 |
 |---|---|---|
 | `command_authority` | 已迁移到 `robotcore_control_cpp` | C++ 节点以 100 Hz 评估安全状态、50 Hz 发布推进器心跳、10 Hz 发布状态；旧 Python 实现已删除 |
-| `pid_controller` | 保留 Python+NumPy/SciPy | 60 Hz callback p99 超过 4 ms，或状态到候选命令 p95 超预算 |
+| `pid_controller` | 保留 Python+NumPy/SciPy | 60 Hz callback p99 超过 4 ms，或状态到 PID 命令 p95 超预算 |
 | trajectory/tracking/safety | 保留 Python编排 | 明确的 CPU 热点或调度丢期，而不是仅凭语言判断 |
 | `run_logger` | 保留独立低优先级 Python 进程 | 缓冲、限频、best-effort 后仍影响控制 trace |
 | ONNX policy | 模型大时使用 ONNX Runtime CUDA/TensorRT | 先完成 provider 安装并记录推理 p50/p95/p99；当前生产 launch 未启用 policy |
 
 如果必须继续迁移，优先把 PID 和分配器改为 C++ 组件，再与仲裁节点合成一个
-`rclcpp_components` 容器并保持
-`/control/candidates/*` 与 `/control/thruster_cmd` 接口不变；不要重写日志、任务管理或
-launch Python。
+`rclcpp_components` 容器，并保持 PID 专用输入
+`/control/pid/thruster_cmd`、中央仲裁和唯一最终输出 `/control/thruster_cmd` 的边界；不要重写
+日志、任务管理或 launch Python。
 
 ## 已验证与待验证
 
@@ -155,8 +155,7 @@ launch Python。
 - Python/静态回归 95 项通过。
 - C++ 协议、IMU、地图与定位组件测试通过，无失败。
 - 隔离 CycloneDDS 域内的合成 VIO+Tag 锚点闭环：
-  `fused_odom` 与 `BodyState` 各 336 条、59.998 Hz、时间戳严格递增、速度中值
-  0.2500 m/s。
+  `BodyState` 共 336 条、59.998 Hz、时间戳严格递增、速度中值 0.2500 m/s。
 - 生产 raw Aquaboard IMU：100.00 Hz，累计 192,242 帧时序号缺口、CRC、版本、重复、
   队列溢出均为 0，传输 p95 1.94 ms。
 - 生产 ZED odometry 约 30.00 Hz，CUDA AprilTag detections 约 29.85–30.00 Hz。

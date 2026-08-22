@@ -16,15 +16,15 @@ This file defines the first-stage system-chain acceptance target.
 - [ ] The host trusts the IMU's factory calibration and does not load or compute
       a second acceleration calibration. The optional operator gyro-calibration
       action executes and saves only the device's own `0x5a` procedure.
-- [ ] Aquaboard UART8 runs at 115200 baud and CRC-valid version-1 frame 4 reports
+- [ ] Aquaboard UART8 runs at 115200 baud and CRC-valid 33-byte version-2 frame 4 reports
       unique external-IMU samples at approximately 100 Hz. The observed
       invalid/all-zero 19.3 Hz baseline and repeated-sample forwarding are
       failures, not acceptable fallbacks.
-- [ ] `/hardware/aboard_imu_raw` contains only valid frame-4 samples and
-      `/sensors/external_imu` is its only corrected data output. It publishes
-      calibrated angular velocity and ROS-standard, gravity-preserving specific
-      force in `base_link`; `web_operator_ui` consumes this telemetry, but it is
-      not integrated into position.
+- [ ] `aboard_bridge` publishes only CRC-valid, uniquely sequenced frame-4
+      samples directly on `/sensors/external_imu`. The stream carries
+      factory-calibrated angular velocity, ROS-standard gravity-preserving
+      specific force, and the device's native VG/AH/MINS orientation in
+      `base_link`; neither MCU nor host adds an AHRS.
 - [ ] The browser consumes the ZED compressed image directly; localisation does
       not copy or JPEG-encode camera frames for display.
 - [ ] `/localization/apriltag/detections` is produced by
@@ -37,13 +37,18 @@ This file defines the first-stage system-chain acceptance target.
       `relocalize_event` topics.
 - [ ] `/zedx/zed_node/odom` is consumed directly as the sole local motion source;
       no adapter or `/localization/zed_odom` duplicate is present.
-- [ ] `/localization/fused_odom` and `/robot/body_state` each sustain
-      59--61 Hz for at least 60 seconds, with strictly increasing source
-      timestamps, no duplicate samples, and no growing DDS queue.
-- [ ] `/localization/fused_odom` is the only downstream position/velocity
-      odometry publisher. Before the first accepted Tag it is in `odom`; one
-      quality-gated Tag establishes `map -> odom` immediately.
-- [ ] `/localization/status` reports VIO/Tag/fused rates, source ages,
+- [ ] `/robot/body_state` sustains 59--61 Hz for at least 60 seconds, with
+      strictly increasing source timestamps, no duplicate samples, and no
+      growing DDS queue.
+- [ ] `/robot/body_state` is the only downstream position/velocity state
+      publisher. Before the first accepted Tag its frame is `odom`; one
+      four-sample consistency gate establishes `map -> odom`.
+- [ ] `/robot/body_state` dynamic orientation and angular velocity come only
+      from `/sensors/external_imu`. ZED and Tag only update position/linear
+      velocity; their orientation fields may be used for camera geometry,
+      residual checking, and the fixed `map -> odom` alignment, never as a
+      live attitude correction.
+- [ ] `/localization/status` reports VIO/Tag/body-state rates, source ages,
       transport delays, detected/mapped/inlier Tag counts, reprojection RMS,
       Tag/VIO translation and angle residuals, rejection reasons, and finite
       6x6 pose/twist covariance while sources are healthy.
@@ -51,7 +56,9 @@ This file defines the first-stage system-chain acceptance target.
       with an independent distance/time reference within the test tolerance;
       it is not obtained by finite-differencing AprilTag detections.
 - [ ] `/sensors/external_imu` remains approximately `0, 0, +9.80665 m/s²` at
-      rest; no host-side zeroing/calibration or position-integration topic exists.
+      rest; its quaternion is finite and unit length, level roll/pitch/yaw have
+      the verified FLU signs, and no host-side AHRS, zeroing/calibration, or
+      position-integration topic exists.
 - [ ] The ZED launch publishes only its internal static camera-frame TF tree;
       it does not publish dynamic `odom` or `map` transforms.
 - [ ] Isaac's raw single-size Tag TF is remapped to

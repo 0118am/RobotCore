@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "kind": "tracking_task",
+  "name": "station_hold",
+  "label": "定点模式",
+  "mode": "station_hold",
+  "trajectory_name": "none",
+  "controller": "pid",
+  "control_law": "pd",
+  "duration_s": 86400.0,
+  "run_until_stopped": true,
+  "trajectory": {
+    "trajectory_type": "station_hold",
+    "attitude_mode": "level_heading",
+    "relative_to_initial_pose": false,
+    "center_z": 0.9,
+    "hold_before_motion_s": 0.0,
+    "manual_vertical_speed_mps": 0.2,
+    "station_linear_input_gain_mps": 0.3,
+    "station_yaw_input_gain_rps": 0.6
+  }
+}

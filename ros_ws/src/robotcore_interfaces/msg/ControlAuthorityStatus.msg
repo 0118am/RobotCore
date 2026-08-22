@@ -6,10 +6,9 @@ bool abort_active
 bool fault_latched
 string fault_code
 string message
-float64 candidate_age_s
+float64 selected_command_age_s
 float64 body_state_age_s
 float64 target_age_s
 float64 command_limit
 float64 command_slew_rate
 string localization_source
-bool pool_bounds_configured

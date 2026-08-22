@@ -31,3 +31,12 @@ def test_safety_and_experiment_events_force_a_buffer_flush():
     assert source.count("flush=True,") >= 3
     assert "self.stop_rosbag()" in source
     assert "self.event_log_handle.close()" in source
+
+
+def test_task_snapshot_uses_the_same_installed_fallback_as_execution():
+    source = LOGGER.read_text(encoding="utf-8")
+
+    assert "def task_path(self, task_name):" in source
+    assert 'get_package_share_directory("robotcore_runtime")' in source
+    assert "task_path = self.task_path(task_name)" in source
+    assert 'Path(str(self.get_parameter("task_config_dir").value)) / filename' in source

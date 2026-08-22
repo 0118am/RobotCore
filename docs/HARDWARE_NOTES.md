@@ -24,9 +24,9 @@ RoboMaster Aboard candidate:
 There is one production propulsion path:
 
 ```text
-ControlInterface manual candidate
-  -> /control/candidates/manual
-  -> command_authority
+ControlInterface -> /control/manual/thruster_cmd --\
+PID controller  -> /control/pid/thruster_cmd ------> command_authority
+RL adapter      -> /control/rl/thruster_cmd -------/
   -> /control/thruster_cmd
   -> aboard_bridge (normalized limit and UART-v2 framing)
   -> Aquaboard synchronized PWM latch (logical 0..7 -> physical PWM 8..15)
@@ -45,31 +45,38 @@ or thrust feedback.
 The IMU is wired to the Aquaboard's UART8. Jetson does not access that UART
 directly and must not run a USB/CH340 IMU driver. The Aquaboard samples UART8 and
 forwards its values in the `FF F8` telemetry stream carried over the shared
-Aquaboard UART6/USB link. Frame 3 contains three-axis gyro, three-axis
-acceleration, and a validity flag. The bridge publishes only valid samples as
-`/hardware/aboard_imu_raw`; invalid or stale values are not fabricated into a
-60 Hz stream.
+Aquaboard UART6/USB link. CRC-valid 33-byte version-2 frame 4 contains the
+three-axis gyro, acceleration, native roll/pitch/yaw, acquisition tick, source
+counter and separate sample/attitude-valid flags. The bridge
+rejects invalid, duplicate, or backwards samples and publishes accepted samples
+directly on `/sensors/external_imu`; it does not fabricate a fixed-rate stream.
 
 Frame 5 is a separate 2 Hz runtime-budget channel. The bridge publishes it as
 `/hardware/board_runtime`, including MCU CPU idle, control/UART WCET and
 deadline misses, stack margins, watchdog misses, and UART error/drop counters.
 It is diagnostic-only and cannot alter command or safety state.
 
-The conditioning node trusts the IMU's factory-calibrated physical-unit output.
-It performs only mounting rotation, timestamp-aware low-pass filtering and
-covariance flooring. The Status panel's **IMU Calibration** action executes the
-external IMU's own saved `0x5a` gyro calibration through Aquaboard. The action
-is rejected unless propulsion is disarmed and all PWM outputs report neutral.
-`/sensors/external_imu` is the only corrected output: it preserves the expected
-gravity vector, uses `base_link`, and is consumed as telemetry by the browser. The
-host does not load a calibration file, estimate bias, or disable acceleration.
+The bridge trusts the IMU's factory-calibrated physical-unit output and native
+VG/AH/MINS attitude. It applies the measured UART8 mounting conversion
+(`base X=sensor Y`, `base Y=-sensor X`, `base Z=sensor Z`), corrects the native
+pitch sign, and converts roll/pitch/yaw to a ROS `base_link` quaternion. It does
+not estimate a second bias, remove gravity, apply another low-pass filter, or
+run a software AHRS. The Status panel's
+**IMU Calibration** action executes the external IMU's own saved `0x5a` gyro
+calibration through Aquaboard and is rejected unless propulsion is disarmed and
+all PWM outputs report neutral. `/sensors/external_imu` bypasses localization:
+PID consumes its native attitude and angular rate directly, the trajectory node
+uses it to latch the station-hold heading, and the browser displays it as raw
+IMU telemetry. It is not subscribed by the VIO/Tag EKF.
 
 The fixed-rate state chain is:
 
 ```text
-AprilTag absolute pose ----> map->odom alignment --\
-ZED VIO pose + velocity ---------------------------> 60 Hz fused_odom/BodyState
-external IMU 100 Hz ------------------------------> telemetry only
+ZED VIO pose + covariance --------> delayed EKF pose update -------------\
+ZED VIO twist + covariance -------> delayed EKF twist update ------------> 60 Hz BodyState
+AprilTag absolute pose -----------> static map alignment + pose update --/
+
+external IMU attitude + gyro ----> PID/trajectory/UI directly (no EKF)
 ```
 
 ZED X Mini uses one fixed 30 Hz clock for camera grab/VIO and AprilTag image
@@ -84,8 +91,8 @@ eight payload values equal to zero. No process held the serial endpoint and the
 RobotCore service was inactive. Therefore the current firmware/IMU path does
 not yet supply usable external IMU samples.
 
-A separate, clean STM32 project at `/home/nvidia/aquaboard` identifies UART8 as a
-Bewei IMU link. Its current source:
+A separate STM32 project at `/home/nvidia/aquaboard` identified UART8 as a
+Bewei IMU link. Its source at that historical baseline:
 
 - initializes UART8 as 9600 8N1;
 - selects Bewei automatic float gyro+acceleration output (`0x56 = 0x03`);
@@ -100,7 +107,7 @@ defines 5, 10, 20, 25, 50, 100, 200, and 500 Hz output selections, although
 the highest supported rate depends on the exact product. A `0x70` sample is 33
 wire bytes, so 9600 baud has a theoretical ceiling below 30 Hz. The appropriate
 robot target is 115200 baud and 100 Hz external-IMU samples; 60 Hz is the
-canonical fused-state output. Going to 200/500 Hz adds load without improving
+canonical BodyState output. Going to 200/500 Hz adds load without improving
 the 60 Hz control/state contract.
 
 This paragraph records the 2026-07-30 baseline. On 2026-08-02 the separate
@@ -111,8 +118,11 @@ the deployment must still:
 
 - confirm the exact external IMU model and UART protocol;
 - confirm its physical +X/+Y/+Z axes relative to ROS `base_link` FLU;
-- verify the sensor persisted at 115200 baud and acknowledges 100 Hz float
-  gyro+acceleration output;
+- verify the sensor persisted at 115200 baud and acknowledges 100 Hz mode
+  `0x06` attitude+acceleration+gyro float output;
+- verify `/sensors/external_imu` quaternion norm and physical roll/pitch/yaw
+  signs; an attitude-free `0x70` fallback is not acceptable for closed-loop
+  pose hold;
 - restart the RobotCore service to load the rebuilt bridge's STM32-reset
   handling and repeat the end-to-end frame-4 timing check;
 - reject duplicate, dropped, stale or time-regressing samples rather than
@@ -130,9 +140,7 @@ Validate all estimator inputs after launch:
 
 ```bash
 ros2 topic hz /zedx/zed_node/odom
-ros2 topic hz /hardware/aboard_imu_raw
 ros2 topic hz /sensors/external_imu
-ros2 topic hz /localization/fused_odom
 ros2 topic hz /robot/body_state
 ros2 topic echo /localization/status --once
 ros2 topic delay /zedx/zed_node/odom

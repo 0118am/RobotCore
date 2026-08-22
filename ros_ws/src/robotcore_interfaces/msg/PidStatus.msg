@@ -3,6 +3,7 @@ bool ready
 bool producing_command
 string[] missing_inputs
 float64 body_state_age_s
+float64 imu_age_s
 float64 target_age_s
 uint32 allocation_rank
 float64 allocation_condition

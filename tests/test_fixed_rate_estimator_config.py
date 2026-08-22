@@ -30,21 +30,53 @@ def test_zed_camera_uses_one_fixed_30_hz_frame_rate():
     assert parameters["pos_tracking"]["area_memory"] is False
     assert parameters["pos_tracking"]["reset_odom_with_loop_closure"] is False
     assert parameters["pos_tracking"]["publish_odom_pose"] is True
+    assert parameters["pos_tracking"]["publish_pose_cov"] is True
 
 
-def test_vio_tag_fusion_is_native_cpp_and_old_eskf_is_removed():
+def test_vio_tag_fusion_is_one_native_cpp_ekf():
     source = (SENSORS / "src/vio_tag_fusion_component.cpp").read_text()
     cmake = (SENSORS / "CMakeLists.txt").read_text()
 
     assert "VioTagFusionComponent" in source
+    assert 'Node("ekf", options)' in source
     assert "map_from_odom_" in source
-    assert "update_alignment(" in source
+    assert "class VioTagEkf" in source
+    assert "update_linear_velocity(" in source
+    assert "update_orientation(" in source
+    assert "update_angular_velocity(" in source
+    assert '"vio_linear_velocity_stddev_floor_mps", 0.10' in source
+    assert '"vio_linear_velocity_correction_limit_mps", 0.04' in source
+    assert '"vio_linear_velocity_innovation_limit_mps", 0.25' in source
+    assert "event.source == MeasurementSource::Tag" in source
+    assert "position_state_only" in source
+    assert "MeasurementResult replay(" in source
+    assert "state_at(" in source
     assert "alignment_covariance_" in source
-    assert "SensorDataQoS().keep_last(1)" in source
+    assert "SensorDataQoS().keep_last(8)" in source
+    assert "enforce_covariance_floors" not in source
+    assert "use_vio_velocity_covariance_fallback" not in source
+    assert "vio_velocity_fallback_stddev_mps" not in source
+    assert "sensor_msgs::msg::Imu" not in source
+    assert "MeasurementSource::Imu" not in source
+    assert "gain.template block<6, Size>(6, 0).setZero()" in source
+    assert "gain.template block<6, Size>(0, 0).setZero()" in source
+    apply_measurement = source[
+        source.index("MeasurementResult apply_measurement"):
+        source.index("void insert_measurement")
+    ]
+    assert apply_measurement.count("filter.update_orientation(") == 1
+    assert apply_measurement.count("filter.update_angular_velocity(") == 1
+    assert apply_measurement.count("filter.update_position(") == 1
+    assert apply_measurement.count("filter.update_linear_velocity(") == 1
+    assert "event.pose_covariance.block<3, 3>(0, 0), pose_gate, true" in apply_measurement
+    assert "linear_velocity_correction_limit_mps_" in apply_measurement
+    assert 'status.add(\n      "vio_linear_velocity_correction_limits"' in source
+    assert 'status.add(\n      "vio_linear_velocity_rejections"' in source
+    assert "external_imu" not in apply_measurement
     assert "-O3" in cmake
     assert "CMAKE_INTERPROCEDURAL_OPTIMIZATION" in cmake
     assert "ffast-math" not in cmake
-    assert "FixedLagEskf" not in cmake
+    assert "robotcore_localization_core" not in cmake
     assert not (SENSORS / "include/robotcore_sensors/fixed_lag_eskf.hpp").exists()
     assert not (SENSORS / "src/fixed_lag_eskf.cpp").exists()
     assert not (SENSORS / "src/fixed_lag_eskf_component.cpp").exists()
@@ -52,36 +84,24 @@ def test_vio_tag_fusion_is_native_cpp_and_old_eskf_is_removed():
     assert not (SENSORS / "config/tag_vio_external_imu_ekf.yaml").exists()
 
 
-def test_external_imu_trusts_factory_calibration_and_filters_by_timestamp():
-    config = load_yaml("config/external_imu.yaml")
-    parameters = config["imu_conditioning"]["ros__parameters"]
-    conditioner = (SENSORS / "src/imu_conditioner_component.cpp").read_text()
+def test_aboard_bridge_publishes_the_single_factory_calibrated_base_imu():
+    bridge = (
+        ROOT / "ros_ws/src/robotcore_hardware/src/aboard_bridge_node.cpp"
+    ).read_text(encoding="utf-8")
+    cmake = (SENSORS / "CMakeLists.txt").read_text(encoding="utf-8")
 
-    assert parameters["input_topic"] == "/hardware/aboard_imu_raw"
-    assert parameters["output_topic"] == "/sensors/external_imu"
-    assert "ui_output_topic" not in parameters
-    assert "ui_publish_rate_hz" not in parameters
-    assert "fusion_output_topic" not in parameters
-    assert "zeroed_output_topic" not in parameters
-    assert parameters["gyro_low_pass_cutoff_hz"] == 20.0
-    assert parameters["accel_low_pass_cutoff_hz"] == 15.0
-    assert parameters["filter_reset_gap_s"] == 0.2
-    assert "zero_vertical_acceleration" not in parameters
-    assert len(parameters["base_to_imu_rpy_rad"]) == 3
-    assert parameters["base_frame_id"] == "base_link"
-    assert "output_pub_->publish(output)" in conditioner
-    assert '"/ui/external_imu"' not in conditioner
-    assert "fusion_output_pub_" not in conditioner
-    assert "zeroed_output_pub_" not in conditioner
-    assert "constrain_vertical_acceleration" not in conditioner
-    assert "output.header.frame_id = base_frame_id_" in conditioner
-    assert "rotate_imu_vector_to_base(raw_gyro, base_from_imu_)" in conditioner
-    assert "gyro_filter_->update(base_gyro, stamp)" in conditioner
-    for removed in (
-        "calibration_file", "trust_device_factory", "restart_calibration",
-        "runtime_gyro_bias", "runtime_accel_residual", "gyro-only fallback",
-    ):
-        assert removed not in conditioner
+    assert '"/sensors/external_imu", rclcpp::SensorDataQoS().keep_last(8)' in bridge
+    assert 'message.header.frame_id = "base_link"' in bridge
+    assert "sample.gyro_rad_s" in bridge
+    assert "sample.accel_m_s2" in bridge
+    assert "sample.attitude_rpy_rad" in bridge
+    assert "message.orientation.w" in bridge
+    assert "imu_duplicate_or_backwards_" in bridge
+    assert "/hardware/aboard_imu_raw" not in bridge
+    assert "ImuConditionerComponent" not in cmake
+    assert not (SENSORS / "src/imu_conditioner_component.cpp").exists()
+    assert not (SENSORS / "include/robotcore_sensors/imu_conditioning.hpp").exists()
+    assert not (SENSORS / "config/external_imu.yaml").exists()
 
 
 def test_edge_launch_wires_one_canonical_fixed_rate_output():
@@ -89,8 +109,12 @@ def test_edge_launch_wires_one_canonical_fixed_rate_output():
         ROOT / "ros_ws/src/robotcore_bringup/launch/robotcore_edge_system.launch.py"
     ).read_text(encoding="utf-8")
 
-    assert 'plugin="robotcore_sensors::ImuConditionerComponent"' in launch
+    assert "ImuConditionerComponent" not in launch
+    assert "imu_raw_topic" not in launch
+    assert "external_imu_topic" not in launch
     assert 'plugin="robotcore_sensors::VioTagFusionComponent"' in launch
+    assert 'name="ekf"' in launch
+    assert 'name="vio_tag_fusion"' not in launch
     assert "ZedOdometryAdapterComponent" not in launch
     assert "FixedLagEskfComponent" not in launch
     assert '"vio_topic": "/zedx/zed_node/odom"' in launch
@@ -99,16 +123,36 @@ def test_edge_launch_wires_one_canonical_fixed_rate_output():
         SENSORS / "src/vio_tag_fusion_component.cpp"
     ).read_text(encoding="utf-8")
     assert '"use_vio"' not in launch
-    assert '"vio_arrival_timeout_s": 0.30' in launch
-    assert '"vio_prediction_horizon_s": 0.50' in launch
-    assert "external_imu_fusion_topic" not in launch
+    assert '"vio_arrival_timeout_s": 0.80' in launch
+    assert '"vio_prediction_horizon_s": 0.80' in launch
+    assert '"vio_linear_velocity_stddev_floor_mps": 0.10' in launch
+    assert '"vio_linear_velocity_correction_limit_mps": 0.04' in launch
+    assert '"vio_linear_velocity_innovation_limit_mps": 0.25' in launch
+    fusion_parameters = launch[
+        launch.index('plugin="robotcore_sensors::VioTagFusionComponent"'):
+        launch.index('extra_arguments=[{"use_intra_process_comms": True}]',
+                     launch.index('plugin="robotcore_sensors::VioTagFusionComponent"'))
+    ]
+    assert '"imu_topic"' not in fusion_parameters
+    assert "imu_arrival_timeout_s" not in fusion_parameters
+    trajectory_parameters = launch[
+        launch.index('executable="trajectory_command_node"'):
+        launch.index('executable="tracking_monitor_node"')
+    ]
+    pid_parameters = launch[
+        launch.index('executable="pid_controller"'):
+        launch.index('executable="command_authority"')
+    ]
+    assert '"imu_topic": "/sensors/external_imu"' in trajectory_parameters
+    assert '"imu_topic": "/sensors/external_imu"' in pid_parameters
+    assert "use_vio_velocity_covariance_fallback" not in fusion_parameters
     assert "base_to_aboard_imu" not in launch
     assert '"tag_topic": "/localization/apriltag_pose"' in launch
     assert "constrain_vertical_acceleration" not in launch
     assert '"tag_fresh_s": 0.35' in launch
-    assert '"tag_innovation_gate_m": 0.50' in launch
+    assert '"tag_innovation_gate_m": 0.50' not in launch
+    assert '"require_zed_tracking_ok": True' in launch
     assert '"output_rate_hz": 60.0' in launch
-    assert launch.count('"/localization/fused_odom"') == 0
     assert "pressure_depth_odometry_node" not in launch
     assert "/localization/pressure_depth_odom" not in launch
     assert 'package="robot_localization"' not in launch
@@ -146,6 +190,7 @@ def test_estimator_rate_probe_drives_current_cpp_inputs():
 
     assert 'Odometry, "/zedx/zed_node/odom", 10' in probe
     assert 'Imu, "/sensors/external_imu", 50' not in probe
+    assert 'PosTrackStatus, "/zedx/zed_node/pose/status", 10' in probe
     assert "publish_imu" not in probe
     assert "self.create_timer(1.0 / 30.0, self.publish_vio)" in probe
     assert 'AprilTagPoseEstimate, "/localization/apriltag_pose", 10' in probe
@@ -166,22 +211,22 @@ def test_body_state_uses_vio_for_local_tracking_and_tag_for_absolute_validity():
 
     assert "body.linear_velocity_valid = vio_usable" in fusion
     assert "body.position_estimated = estimated" in fusion
-    assert '"ZED VIO after Tag loss"' in fusion
-    assert "arrival_age_s <= vio_arrival_timeout_s_" in fusion
-    assert "measurement_age_s <= vio_prediction_horizon_s_" in fusion
+    assert '"ZED VIO EKF after Tag loss"' in fusion
+    assert "vio_arrival_age_s <= vio_arrival_timeout_s_" in fusion
+    assert "vio_measurement_age_s <= vio_prediction_horizon_s_" in fusion
     assert "tag_arrival_age_s <= tag_fresh_s_" in fusion
     assert "create_wall_timer" in fusion
     assert "1.0 / std::max(1.0, output_hz)" in fusion
     assert "body_pub_->publish(body)" in fusion
     assert "IMU calibrating" not in fusion
     assert "sensor_msgs::msg::Imu" not in fusion
-    assert "filter_.propagate(" not in fusion
-    assert "predicted_odom_from_base(" in fusion
-    assert "update_alignment(" in fusion
-    assert "sample_at(tag_stamp_ns)" in fusion
+    assert "output_filter.propagate_to(now_ns)" in fusion
+    assert "update_linear_velocity(" in fusion
+    assert "filter.update_orientation(" in fusion
+    assert "filter.update_angular_velocity(" in fusion
+    assert "state_at(tag_stamp_ns)" in fusion
     assert "continuous_rejection_reanchor_required" not in fusion
-    assert "replay_from(" not in fusion
-    assert "fused_pub_ = create_publisher<nav_msgs::msg::Odometry>(" in fusion
+    assert "MeasurementResult replay(" in fusion
     assert "body_pub_ = create_publisher<robotcore_interfaces::msg::BodyState>(" in fusion
     assert '"/ui/body_state"' not in fusion
     assert "aligned_pub_" not in fusion
@@ -204,7 +249,7 @@ def test_localization_status_exposes_rate_age_innovation_and_covariance():
         "tag_age_s",
         "vio_rate_hz",
         "tag_rate_hz",
-        "fused_rate_hz",
+        "body_state_rate_hz",
         "apriltag_frame_rate_hz",
         "apriltag_frame_age_s",
         "tag_vio_translation_residual_m",
@@ -229,9 +274,9 @@ def test_estimator_rates_and_diagnostics_follow_live_freshness():
         encoding="utf-8"
     )
 
-    fused_publish = fusion.index("fused_pub_->publish(odometry)")
-    fused_arrival = fusion.index("fused_arrivals_.push_back(now_ns)")
-    assert fused_publish < fused_arrival
+    body_publish = fusion.index("body_pub_->publish(body)")
+    body_arrival = fusion.index("body_state_arrivals_.push_back(now_ns)")
+    assert body_publish < body_arrival
     assert "arrival_rate_hz(" in fusion
-    assert 'summary = "local VIO estimate after Tag loss"' in fusion
-    assert 'status.add("absolute_fix_valid", absolute_valid)' in fusion
+    assert '"AprilTag/ZED VIO EKF estimating in map"' in fusion
+    assert 'status.absolute_fix_valid = absolute_valid' in fusion

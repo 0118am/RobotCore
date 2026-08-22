@@ -11,9 +11,11 @@
 #include <tf2_eigen/tf2_eigen.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
+#include <zed_msgs/msg/pos_track_status.hpp>
 
 #include <Eigen/Cholesky>
 #include <Eigen/Core>
+#include <Eigen/Eigenvalues>
 #include <Eigen/Geometry>
 
 #include <algorithm>
@@ -23,19 +25,21 @@
 #include <cstdint>
 #include <cstdlib>
 #include <deque>
-#include <iterator>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 namespace robotcore_sensors
 {
 namespace
 {
+using Matrix12d = Eigen::Matrix<double, 12, 12>;
 constexpr std::int64_t kArrivalWindowNs = 5000000000LL;
 
 std::int64_t stamp_ns(const builtin_interfaces::msg::Time & stamp)
@@ -45,15 +49,17 @@ std::int64_t stamp_ns(const builtin_interfaces::msg::Time & stamp)
 
 Eigen::Isometry3d pose(const geometry_msgs::msg::Pose & message)
 {
+  const Eigen::Vector3d position(
+    message.position.x, message.position.y, message.position.z);
   Eigen::Quaterniond orientation(
     message.orientation.w, message.orientation.x,
     message.orientation.y, message.orientation.z);
-  if (!orientation.coeffs().allFinite() || orientation.norm() < 1e-9) {
-    throw std::runtime_error("invalid pose quaternion");
+  if (!position.allFinite() || !orientation.coeffs().allFinite() ||
+    orientation.norm() < 1e-9)
+  {
+    throw std::runtime_error("invalid pose");
   }
-  return pose_transform(
-    {message.position.x, message.position.y, message.position.z},
-    orientation.normalized());
+  return pose_transform(position, orientation.normalized());
 }
 
 void set_pose(geometry_msgs::msg::Pose & message, const Eigen::Isometry3d & transform)
@@ -74,11 +80,18 @@ Eigen::Matrix<double, 6, 6> covariance6(const Array & values)
   Eigen::Matrix<double, 6, 6> covariance;
   for (int row = 0; row < 6; ++row) {
     for (int column = 0; column < 6; ++column) {
-      const double value = values[6 * row + column];
-      covariance(row, column) = std::isfinite(value) ? value : 0.0;
+      covariance(row, column) = values[6 * row + column];
     }
   }
   return 0.5 * (covariance + covariance.transpose());
+}
+
+template<int Size>
+bool valid_covariance(const Eigen::Matrix<double, Size, Size> & covariance)
+{
+  if (!covariance.allFinite()) {return false;}
+  const Eigen::LDLT<Eigen::Matrix<double, Size, Size>> decomposition(covariance);
+  return decomposition.info() == Eigen::Success && decomposition.isPositive();
 }
 
 Eigen::Matrix<double, 6, 6> adjoint(const Eigen::Isometry3d & target_from_source)
@@ -91,14 +104,31 @@ Eigen::Matrix<double, 6, 6> adjoint(const Eigen::Isometry3d & target_from_source
   return result;
 }
 
-void enforce_covariance_floors(
-  Eigen::Matrix<double, 6, 6> & covariance,
-  const std::array<double, 6> & floors)
+Eigen::Matrix<double, 6, 6> pose_covariance_at_base(
+  const Eigen::Matrix<double, 6, 6> & source_covariance,
+  const Eigen::Isometry3d & odom_from_source,
+  const Eigen::Isometry3d & source_from_base)
 {
-  covariance = 0.5 * (covariance + covariance.transpose());
-  for (int index = 0; index < 6; ++index) {
-    covariance(index, index) = std::max(covariance(index, index), floors[index]);
-  }
+  const Eigen::Vector3d lever_arm_odom =
+    odom_from_source.linear() * source_from_base.translation();
+  Eigen::Matrix<double, 6, 6> jacobian =
+    Eigen::Matrix<double, 6, 6>::Identity();
+  jacobian.block<3, 3>(0, 3) = -skew(lever_arm_odom);
+  const Eigen::Matrix<double, 6, 6> result =
+    jacobian * source_covariance * jacobian.transpose();
+  return 0.5 * (result + result.transpose());
+}
+
+Eigen::Matrix<double, 6, 6> pose_covariance_in_filter_coordinates(
+  const Eigen::Matrix<double, 6, 6> & fixed_axis_covariance,
+  const Eigen::Quaterniond & orientation)
+{
+  Eigen::Matrix<double, 6, 6> jacobian =
+    Eigen::Matrix<double, 6, 6>::Identity();
+  jacobian.block<3, 3>(3, 3) = orientation.conjugate().toRotationMatrix();
+  const Eigen::Matrix<double, 6, 6> result =
+    jacobian * fixed_axis_covariance * jacobian.transpose();
+  return 0.5 * (result + result.transpose());
 }
 
 template<typename Array>
@@ -108,6 +138,13 @@ void store_covariance(Array & output, const Eigen::Matrix<double, 6, 6> & covari
     for (int column = 0; column < 6; ++column) {
       output[6 * row + column] = covariance(row, column);
     }
+  }
+}
+
+void prune_arrivals(std::deque<std::int64_t> & arrivals, std::int64_t now_ns)
+{
+  while (!arrivals.empty() && now_ns - arrivals.front() > kArrivalWindowNs) {
+    arrivals.pop_front();
   }
 }
 
@@ -125,81 +162,435 @@ double arrival_rate_hz(
     static_cast<double>(duration_ns) : 0.0;
 }
 
-void prune_arrivals(std::deque<std::int64_t> & arrivals, std::int64_t now_ns)
+struct EkfState
 {
-  while (!arrivals.empty() && now_ns - arrivals.front() > kArrivalWindowNs) {
-    arrivals.pop_front();
+  std::int64_t stamp_ns{};
+  Eigen::Vector3d position{Eigen::Vector3d::Zero()};
+  Eigen::Vector3d velocity{Eigen::Vector3d::Zero()};
+  Eigen::Quaterniond orientation{Eigen::Quaterniond::Identity()};
+  Eigen::Vector3d angular_velocity{Eigen::Vector3d::Zero()};
+  Matrix12d covariance{Matrix12d::Identity()};
+};
+
+struct EkfNoise
+{
+  double linear_acceleration{0.30};
+  double angular_acceleration{0.20};
+};
+
+class VioTagEkf
+{
+public:
+  explicit VioTagEkf(EkfNoise noise = {}) : noise_(noise) {}
+
+  void initialize(const EkfState & state)
+  {
+    state_ = state;
+    state_.orientation.normalize();
+    stabilize_covariance();
+    initialized_ = true;
   }
-}
+
+  void set_state(const EkfState & state)
+  {
+    state_ = state;
+    initialized_ = true;
+  }
+
+  bool propagate_to(std::int64_t stamp)
+  {
+    if (!initialized_ || stamp < state_.stamp_ns) {return false;}
+    if (stamp == state_.stamp_ns) {return true;}
+    const double dt = static_cast<double>(stamp - state_.stamp_ns) * 1e-9;
+    if (!std::isfinite(dt) || dt <= 0.0 || dt > 1.0) {return false;}
+
+    state_.position += state_.velocity * dt;
+    state_.orientation =
+      (state_.orientation * exp_quaternion(state_.angular_velocity * dt)).normalized();
+
+    Matrix12d dynamics = Matrix12d::Zero();
+    dynamics.block<3, 3>(0, 3).setIdentity();
+    dynamics.block<3, 3>(6, 6) = -skew(state_.angular_velocity);
+    dynamics.block<3, 3>(6, 9).setIdentity();
+    const Matrix12d transition =
+      Matrix12d::Identity() + dynamics * dt + 0.5 * dynamics * dynamics * dt * dt;
+
+    Matrix12d process_covariance = Matrix12d::Zero();
+    const double linear_variance =
+      noise_.linear_acceleration * noise_.linear_acceleration;
+    const double angular_variance =
+      noise_.angular_acceleration * noise_.angular_acceleration;
+    const double dt2 = dt * dt;
+    const double dt3 = dt2 * dt;
+    process_covariance.block<3, 3>(0, 0).diagonal().setConstant(
+      linear_variance * dt3 / 3.0);
+    process_covariance.block<3, 3>(0, 3).diagonal().setConstant(
+      linear_variance * dt2 / 2.0);
+    process_covariance.block<3, 3>(3, 0) =
+      process_covariance.block<3, 3>(0, 3).transpose();
+    process_covariance.block<3, 3>(3, 3).diagonal().setConstant(
+      linear_variance * dt);
+    process_covariance.block<3, 3>(6, 6).diagonal().setConstant(
+      angular_variance * dt3 / 3.0);
+    process_covariance.block<3, 3>(6, 9).diagonal().setConstant(
+      angular_variance * dt2 / 2.0);
+    process_covariance.block<3, 3>(9, 6) =
+      process_covariance.block<3, 3>(6, 9).transpose();
+    process_covariance.block<3, 3>(9, 9).diagonal().setConstant(
+      angular_variance * dt);
+
+    state_.covariance = transition * state_.covariance * transition.transpose() +
+      process_covariance;
+    state_.stamp_ns = stamp;
+    stabilize_covariance();
+    return true;
+  }
+
+  bool update_position(
+    const Eigen::Vector3d & position,
+    const Eigen::Matrix3d & covariance,
+    double gate_chi2,
+    bool position_state_only = false)
+  {
+    Eigen::Matrix<double, 3, 12> observation =
+      Eigen::Matrix<double, 3, 12>::Zero();
+    observation.block<3, 3>(0, 0).setIdentity();
+    const bool accepted = update<3>(
+      position - state_.position, observation, covariance, gate_chi2, false,
+      position_state_only);
+    last_pose_nis_ = last_nis_;
+    return accepted;
+  }
+
+  bool update_orientation(
+    const Eigen::Quaterniond & orientation,
+    const Eigen::Matrix3d & covariance,
+    double gate_chi2)
+  {
+    Eigen::Matrix<double, 3, 12> observation =
+      Eigen::Matrix<double, 3, 12>::Zero();
+    observation.block<3, 3>(0, 6).setIdentity();
+    return update<3>(
+      log_quaternion(state_.orientation.conjugate() * orientation.normalized()),
+      observation, covariance, gate_chi2, true);
+  }
+
+  bool update_linear_velocity(
+    const Eigen::Vector3d & body_velocity,
+    const Eigen::Matrix3d & covariance,
+    double gate_chi2,
+    double correction_limit_mps,
+    double innovation_rejection_limit_mps)
+  {
+    last_linear_velocity_innovation_mps_ = NAN;
+    last_linear_velocity_correction_mps_ = NAN;
+    last_linear_velocity_correction_limited_ = false;
+    const Eigen::Matrix3d body_from_odom =
+      state_.orientation.conjugate().toRotationMatrix();
+    const Eigen::Vector3d predicted_linear = body_from_odom * state_.velocity;
+    const Eigen::Vector3d innovation = body_velocity - predicted_linear;
+    last_linear_velocity_innovation_mps_ = innovation.norm();
+    if (!std::isfinite(correction_limit_mps) || correction_limit_mps <= 0.0 ||
+      !std::isfinite(innovation_rejection_limit_mps) ||
+      innovation_rejection_limit_mps <= 0.0 ||
+      last_linear_velocity_innovation_mps_ > innovation_rejection_limit_mps)
+    {
+      last_twist_nis_ = INFINITY;
+      return false;
+    }
+    Eigen::Matrix<double, 3, 12> observation =
+      Eigen::Matrix<double, 3, 12>::Zero();
+    observation.block<3, 3>(0, 3) = body_from_odom;
+    observation.block<3, 3>(0, 6) = skew(predicted_linear);
+    const bool accepted = update<3>(
+      innovation, observation, covariance, gate_chi2, false, false,
+      correction_limit_mps);
+    last_twist_nis_ = last_nis_;
+    return accepted;
+  }
+
+  bool update_angular_velocity(
+    const Eigen::Vector3d & angular_velocity,
+    const Eigen::Matrix3d & covariance,
+    double gate_chi2)
+  {
+    Eigen::Matrix<double, 3, 12> observation =
+      Eigen::Matrix<double, 3, 12>::Zero();
+    observation.block<3, 3>(0, 9).setIdentity();
+    return update<3>(
+      angular_velocity - state_.angular_velocity,
+      observation, covariance, gate_chi2, true);
+  }
+
+  const EkfState & state() const {return state_;}
+  bool initialized() const {return initialized_;}
+  double last_pose_nis() const {return last_pose_nis_;}
+  double last_twist_nis() const {return last_twist_nis_;}
+  double last_linear_velocity_innovation_mps() const
+  {
+    return last_linear_velocity_innovation_mps_;
+  }
+  double last_linear_velocity_correction_mps() const
+  {
+    return last_linear_velocity_correction_mps_;
+  }
+  bool last_linear_velocity_correction_limited() const
+  {
+    return last_linear_velocity_correction_limited_;
+  }
+
+private:
+  template<int Size>
+  bool update(
+    const Eigen::Matrix<double, Size, 1> & innovation,
+    const Eigen::Matrix<double, Size, 12> & observation,
+    const Eigen::Matrix<double, Size, Size> & measurement_covariance,
+    double gate_chi2,
+    bool attitude_state_only,
+    bool position_state_only = false,
+    double velocity_correction_limit_mps = INFINITY)
+  {
+    if (!innovation.allFinite() || !measurement_covariance.allFinite() ||
+      !std::isfinite(gate_chi2) || gate_chi2 <= 0.0)
+    {
+      return false;
+    }
+    const Eigen::LDLT<Eigen::Matrix<double, Size, Size>> measurement_decomposition(
+      measurement_covariance);
+    if (measurement_decomposition.info() != Eigen::Success ||
+      !measurement_decomposition.isPositive())
+    {
+      return false;
+    }
+    const Eigen::Matrix<double, Size, Size> innovation_covariance =
+      observation * state_.covariance * observation.transpose() +
+      measurement_covariance;
+    const Eigen::LDLT<Eigen::Matrix<double, Size, Size>> decomposition(
+      innovation_covariance);
+    if (decomposition.info() != Eigen::Success || !decomposition.isPositive()) {
+      return false;
+    }
+    last_nis_ = innovation.dot(decomposition.solve(innovation));
+    if (!std::isfinite(last_nis_) || last_nis_ > gate_chi2) {return false;}
+
+    Eigen::Matrix<double, 12, Size> gain =
+      state_.covariance * observation.transpose() *
+      decomposition.solve(Eigen::Matrix<double, Size, Size>::Identity());
+    if (attitude_state_only) {
+      gain.template block<6, Size>(0, 0).setZero();
+    } else if (position_state_only) {
+      // Pose and twist from one odometry message are correlated, while ROS
+      // Odometry has no pose/twist cross-covariance. Position measurements
+      // therefore update position only; VIO twist is the velocity observer.
+      gain.template block<9, Size>(3, 0).setZero();
+    } else {
+      gain.template block<6, Size>(6, 0).setZero();
+    }
+    Eigen::Matrix<double, 12, 1> correction = gain * innovation;
+    if (std::isfinite(velocity_correction_limit_mps)) {
+      const double velocity_correction_mps = correction.segment<3>(3).norm();
+      last_linear_velocity_correction_mps_ = velocity_correction_mps;
+      if (velocity_correction_mps > velocity_correction_limit_mps) {
+        const double bounded_influence =
+          velocity_correction_limit_mps / velocity_correction_mps;
+        gain *= bounded_influence;
+        correction *= bounded_influence;
+        last_linear_velocity_correction_mps_ = velocity_correction_limit_mps;
+        last_linear_velocity_correction_limited_ = true;
+      }
+    }
+    const Matrix12d identity = Matrix12d::Identity();
+    const Matrix12d residual = identity - gain * observation;
+    state_.covariance = residual * state_.covariance * residual.transpose() +
+      gain * measurement_covariance * gain.transpose();
+    inject(correction);
+    stabilize_covariance();
+    return true;
+  }
+
+  void inject(const Eigen::Matrix<double, 12, 1> & correction)
+  {
+    state_.position += correction.segment<3>(0);
+    state_.velocity += correction.segment<3>(3);
+    state_.orientation =
+      (state_.orientation * exp_quaternion(correction.segment<3>(6))).normalized();
+    state_.angular_velocity += correction.segment<3>(9);
+    Matrix12d reset = Matrix12d::Identity();
+    reset.block<3, 3>(6, 6) -= 0.5 * skew(correction.segment<3>(6));
+    state_.covariance = reset * state_.covariance * reset.transpose();
+  }
+
+  void stabilize_covariance()
+  {
+    state_.covariance = 0.5 * (state_.covariance + state_.covariance.transpose());
+    Eigen::SelfAdjointEigenSolver<Matrix12d> solver(state_.covariance);
+    if (solver.info() != Eigen::Success) {
+      state_.covariance = Matrix12d::Identity();
+      return;
+    }
+    const auto eigenvalues = solver.eigenvalues().cwiseMax(1e-12);
+    state_.covariance = solver.eigenvectors() * eigenvalues.asDiagonal() *
+      solver.eigenvectors().transpose();
+  }
+
+  EkfState state_;
+  EkfNoise noise_;
+  bool initialized_{false};
+  double last_nis_{NAN};
+  double last_pose_nis_{NAN};
+  double last_twist_nis_{NAN};
+  double last_linear_velocity_innovation_mps_{NAN};
+  double last_linear_velocity_correction_mps_{NAN};
+  bool last_linear_velocity_correction_limited_{false};
+};
+
+class RosClockOffsetJumpDetector
+{
+public:
+  bool update(std::int64_t ros_ns, std::int64_t steady_ns)
+  {
+    if (!initialized_) {
+      initialized_ = true;
+      last_ros_ns_ = ros_ns;
+      last_steady_ns_ = steady_ns;
+      return false;
+    }
+    const auto offset_change =
+      (ros_ns - last_ros_ns_) - (steady_ns - last_steady_ns_);
+    last_ros_ns_ = ros_ns;
+    last_steady_ns_ = steady_ns;
+    return std::llabs(offset_change) > 100000000LL;
+  }
+
+private:
+  std::int64_t last_ros_ns_{};
+  std::int64_t last_steady_ns_{};
+  bool initialized_{false};
+};
 }  // namespace
 
 class VioTagFusionComponent final : public rclcpp::Node
 {
 public:
   explicit VioTagFusionComponent(const rclcpp::NodeOptions & options)
-  : Node("vio_tag_fusion", options), tf_buffer_(get_clock()), tf_listener_(tf_buffer_),
+  : Node("ekf", options), tf_buffer_(get_clock()), tf_listener_(tf_buffer_),
     updater_(this)
   {
     history_duration_s_ = declare_parameter<double>("history_duration_s", 3.0);
-    vio_arrival_timeout_s_ = declare_parameter<double>("vio_arrival_timeout_s", 0.30);
-    vio_prediction_horizon_s_ = declare_parameter<double>("vio_prediction_horizon_s", 0.50);
+    vio_arrival_timeout_s_ = declare_parameter<double>("vio_arrival_timeout_s", 0.80);
+    vio_prediction_horizon_s_ = declare_parameter<double>(
+      "vio_prediction_horizon_s", 0.80);
     tag_fresh_s_ = declare_parameter<double>("tag_fresh_s", 0.35);
-    tag_innovation_gate_m_ = declare_parameter<double>("tag_innovation_gate_m", 0.50);
-    alignment_translation_walk_ = declare_parameter<double>(
-      "alignment_translation_walk_m_sqrt_s", 0.01);
-    alignment_rotation_walk_ = declare_parameter<double>(
-      "alignment_rotation_walk_rad_sqrt_s", 0.005);
+    zed_status_timeout_s_ = declare_parameter<double>("zed_status_timeout_s", 0.20);
+    // Every live correction below is three-dimensional.  16.266 is the
+    // 99.9-percent chi-square threshold for three degrees of freedom.
+    pose_gate_chi2_ = declare_parameter<double>("vio_pose_gate_chi2", 16.266);
+    twist_gate_chi2_ = declare_parameter<double>("vio_twist_gate_chi2", 16.266);
+    linear_velocity_stddev_floor_mps_ = declare_parameter<double>(
+      "vio_linear_velocity_stddev_floor_mps", 0.10);
+    linear_velocity_correction_limit_mps_ = declare_parameter<double>(
+      "vio_linear_velocity_correction_limit_mps", 0.04);
+    linear_velocity_innovation_limit_mps_ = declare_parameter<double>(
+      "vio_linear_velocity_innovation_limit_mps", 0.25);
+    tag_gate_chi2_ = declare_parameter<double>("tag_pose_gate_chi2", 16.266);
+    require_zed_tracking_ok_ = declare_parameter<bool>("require_zed_tracking_ok", true);
+    initial_velocity_stddev_ = declare_parameter<double>(
+      "initial_velocity_stddev_mps", 0.25);
+    initial_angular_velocity_stddev_ = declare_parameter<double>(
+      "initial_angular_velocity_stddev_rps", 0.25);
+    noise_.linear_acceleration = declare_parameter<double>(
+      "linear_acceleration_noise_mps2_sqrt_hz", 0.30);
+    noise_.angular_acceleration = declare_parameter<double>(
+      "angular_acceleration_noise_rps2_sqrt_hz", 0.20);
+    filter_ = VioTagEkf(noise_);
+
     map_frame_ = declare_parameter<std::string>("map_frame", "map");
     odom_frame_ = declare_parameter<std::string>("odom_frame", "odom");
     base_frame_ = declare_parameter<std::string>("base_frame", "base_link");
-
-    if (history_duration_s_ <= 0.0 || vio_arrival_timeout_s_ <= 0.0 ||
+    if (history_duration_s_ <= 0.5 || vio_arrival_timeout_s_ <= 0.0 ||
       vio_prediction_horizon_s_ <= 0.0 || tag_fresh_s_ <= 0.0 ||
-      tag_innovation_gate_m_ <= 0.0 || alignment_translation_walk_ < 0.0 ||
-      alignment_rotation_walk_ < 0.0)
+      zed_status_timeout_s_ <= 0.0 || pose_gate_chi2_ <= 0.0 ||
+      twist_gate_chi2_ <= 0.0 || tag_gate_chi2_ <= 0.0 ||
+      linear_velocity_stddev_floor_mps_ <= 0.0 ||
+      linear_velocity_correction_limit_mps_ <= 0.0 ||
+      linear_velocity_innovation_limit_mps_ <= 0.0 ||
+      linear_velocity_correction_limit_mps_ >
+      linear_velocity_innovation_limit_mps_ ||
+      initial_velocity_stddev_ <= 0.0 || initial_angular_velocity_stddev_ <= 0.0 ||
+      noise_.linear_acceleration <= 0.0 || noise_.angular_acceleration <= 0.0)
     {
-      throw std::runtime_error("VIO/Tag fusion timing, gate and noise parameters are invalid");
+      throw std::runtime_error("VIO/Tag EKF timing, gate, or noise parameters are invalid");
     }
 
-    const auto sensor_qos = rclcpp::SensorDataQoS().keep_last(1);
+    const auto sensor_qos = rclcpp::SensorDataQoS().keep_last(8);
     vio_sub_ = create_subscription<nav_msgs::msg::Odometry>(
       declare_parameter<std::string>("vio_topic", "/zedx/zed_node/odom"), sensor_qos,
       std::bind(&VioTagFusionComponent::on_vio, this, std::placeholders::_1));
     tag_sub_ = create_subscription<robotcore_interfaces::msg::AprilTagPoseEstimate>(
       declare_parameter<std::string>("tag_topic", "/localization/apriltag_pose"), sensor_qos,
       std::bind(&VioTagFusionComponent::on_tag, this, std::placeholders::_1));
+    zed_status_sub_ = create_subscription<zed_msgs::msg::PosTrackStatus>(
+      declare_parameter<std::string>(
+        "zed_tracking_status_topic", "/zedx/zed_node/pose/status"), sensor_qos,
+      std::bind(&VioTagFusionComponent::on_zed_status, this, std::placeholders::_1));
 
-    fused_pub_ = create_publisher<nav_msgs::msg::Odometry>(
-      "/localization/fused_odom", rclcpp::QoS(1).reliable());
     body_pub_ = create_publisher<robotcore_interfaces::msg::BodyState>(
       "/robot/body_state", rclcpp::QoS(1).reliable());
     status_pub_ = create_publisher<robotcore_interfaces::msg::LocalizationStatus>(
       "/localization/status", rclcpp::QoS(1).reliable());
 
     const double output_hz = declare_parameter<double>("output_rate_hz", 60.0);
-    const double status_hz = declare_parameter<double>("status_rate_hz", 10.0);
-    status_period_ns_ = static_cast<std::int64_t>(1e9 / std::max(1.0, status_hz));
     output_timer_ = create_wall_timer(
       std::chrono::duration<double>(1.0 / std::max(1.0, output_hz)),
       std::bind(&VioTagFusionComponent::publish, this));
-
-    updater_.setHardwareID("vio-tag-fusion");
-    updater_.add("Localization fusion", this, &VioTagFusionComponent::diagnose);
+    updater_.setHardwareID("vio-tag-ekf");
+    updater_.add("Localization estimator", this, &VioTagFusionComponent::diagnose);
   }
 
 private:
-  struct VioSample
+  enum class MeasurementSource {Vio, Tag};
+
+  struct Measurement
   {
+    std::uint64_t id{};
+    MeasurementSource source{MeasurementSource::Vio};
     std::int64_t stamp_ns{};
-    std::int64_t arrival_ns{};
-    Eigen::Isometry3d odom_from_base{Eigen::Isometry3d::Identity()};
-    Eigen::Vector3d body_linear_velocity{Eigen::Vector3d::Zero()};
-    Eigen::Vector3d body_angular_velocity{Eigen::Vector3d::Zero()};
+    bool has_pose{false};
+    Eigen::Vector3d position{Eigen::Vector3d::Zero()};
+    Eigen::Quaterniond orientation{Eigen::Quaterniond::Identity()};
     Eigen::Matrix<double, 6, 6> pose_covariance{
       Eigen::Matrix<double, 6, 6>::Identity()};
+    bool has_twist{false};
+    Eigen::Matrix<double, 6, 1> body_twist{
+      Eigen::Matrix<double, 6, 1>::Zero()};
     Eigen::Matrix<double, 6, 6> twist_covariance{
       Eigen::Matrix<double, 6, 6>::Identity()};
   };
+
+  struct MeasurementResult
+  {
+    bool pose_accepted{false};
+    bool twist_accepted{false};
+    bool linear_velocity_accepted{false};
+    bool linear_velocity_correction_limited{false};
+    double linear_velocity_innovation_mps{NAN};
+    double linear_velocity_correction_mps{NAN};
+    bool any() const {return pose_accepted || twist_accepted;}
+  };
+
+  struct AlignmentCandidate
+  {
+    std::int64_t stamp_ns{};
+    Eigen::Isometry3d map_from_odom{Eigen::Isometry3d::Identity()};
+    Eigen::Matrix<double, 6, 6> covariance{
+      Eigen::Matrix<double, 6, 6>::Identity()};
+  };
+
+  static std::int64_t steady_now_ns()
+  {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+  }
 
   bool current_epoch(std::int64_t measurement_ns, std::int64_t arrival_ns) const
   {
@@ -207,6 +598,72 @@ private:
     return measurement_ns > 0 &&
            measurement_ns >= arrival_ns - maximum_age_ns &&
            measurement_ns <= arrival_ns + maximum_age_ns;
+  }
+
+  Eigen::Matrix3d regularized_linear_velocity_covariance(
+    const Eigen::Matrix3d & covariance) const
+  {
+    const Eigen::Matrix3d symmetric = 0.5 * (covariance + covariance.transpose());
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(symmetric);
+    if (solver.info() != Eigen::Success) {return symmetric;}
+    const double variance_floor = linear_velocity_stddev_floor_mps_ *
+      linear_velocity_stddev_floor_mps_;
+    return solver.eigenvectors() *
+           solver.eigenvalues().cwiseMax(variance_floor).asDiagonal() *
+           solver.eigenvectors().transpose();
+  }
+
+  bool reset_on_clock_jump(std::int64_t ros_now_ns)
+  {
+    if (!clock_jump_detector_.update(ros_now_ns, steady_now_ns())) {return false;}
+    clear_filter_and_alignment();
+    ++clock_discontinuities_;
+    RCLCPP_WARN(
+      get_logger(), "ROS clock discontinuity detected; VIO/Tag EKF history reset");
+    return true;
+  }
+
+  void clear_filter_and_alignment()
+  {
+    filter_ = VioTagEkf(noise_);
+    anchor_state_.reset();
+    measurements_.clear();
+    latest_vio_.reset();
+    map_from_odom_.reset();
+    alignment_covariance_.setZero();
+    alignment_candidates_.clear();
+    last_vio_measurement_stamp_ns_ = 0;
+    last_vio_accepted_stamp_ns_ = 0;
+    last_vio_accepted_arrival_ns_ = 0;
+    last_tag_candidate_stamp_ns_ = 0;
+    last_tag_stamp_ns_ = 0;
+    last_tag_arrival_ns_ = 0;
+    last_absolute_stamp_ns_ = 0;
+    last_tag_translation_residual_ = NAN;
+    last_tag_angle_residual_deg_ = NAN;
+    last_zed_status_arrival_ns_ = 0;
+    have_zed_status_ = false;
+    last_vio_linear_velocity_innovation_mps_ = NAN;
+    last_vio_linear_velocity_correction_mps_ = NAN;
+  }
+
+  void reset_for_new_tag_map()
+  {
+    map_from_odom_.reset();
+    alignment_covariance_.setZero();
+    alignment_candidates_.clear();
+    last_tag_candidate_stamp_ns_ = 0;
+    last_tag_stamp_ns_ = 0;
+    last_tag_arrival_ns_ = 0;
+    last_absolute_stamp_ns_ = 0;
+    last_tag_translation_residual_ = NAN;
+    last_tag_angle_residual_deg_ = NAN;
+    measurements_.clear();
+    if (latest_vio_) {initialize_filter(*latest_vio_);}
+    else {
+      filter_ = VioTagEkf(noise_);
+      anchor_state_.reset();
+    }
   }
 
   bool update_cached_extrinsic(const std::string & source_frame)
@@ -233,226 +690,343 @@ private:
     }
   }
 
+  void on_zed_status(const zed_msgs::msg::PosTrackStatus::SharedPtr message)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    last_zed_status_arrival_ns_ = now().nanoseconds();
+    last_zed_odometry_status_ = message->odometry_status;
+    have_zed_status_ = true;
+  }
+
+  bool zed_tracking_allows_measurement(std::int64_t arrival_ns) const
+  {
+    if (!require_zed_tracking_ok_) {return true;}
+    return have_zed_status_ &&
+      last_zed_odometry_status_ == zed_msgs::msg::PosTrackStatus::OK &&
+      arrival_ns >= last_zed_status_arrival_ns_ &&
+      (arrival_ns - last_zed_status_arrival_ns_) * 1e-9 <= zed_status_timeout_s_;
+  }
+
+  void initialize_filter(const Measurement & vio)
+  {
+    EkfState state;
+    state.stamp_ns = vio.stamp_ns;
+    state.position = vio.position;
+    state.orientation = vio.orientation;
+    if (vio.has_twist) {
+      state.velocity = state.orientation * vio.body_twist.head<3>();
+      state.angular_velocity = vio.body_twist.tail<3>();
+    }
+    state.covariance.setZero();
+
+    state.covariance.block<3, 3>(0, 0) = vio.pose_covariance.block<3, 3>(0, 0);
+    state.covariance.block<3, 3>(6, 6) = vio.pose_covariance.block<3, 3>(3, 3);
+    if (vio.has_twist) {
+      const Eigen::Matrix3d rotation = state.orientation.toRotationMatrix();
+      state.covariance.block<3, 3>(3, 3) = rotation *
+        regularized_linear_velocity_covariance(
+        vio.twist_covariance.block<3, 3>(0, 0)) *
+        rotation.transpose();
+      state.covariance.block<3, 3>(9, 9) =
+        vio.twist_covariance.block<3, 3>(3, 3);
+    } else {
+      state.covariance.block<3, 3>(3, 3).diagonal().setConstant(
+        initial_velocity_stddev_ * initial_velocity_stddev_);
+      state.covariance.block<3, 3>(9, 9).diagonal().setConstant(
+        initial_angular_velocity_stddev_ * initial_angular_velocity_stddev_);
+    }
+    filter_ = VioTagEkf(noise_);
+    filter_.initialize(state);
+    anchor_state_ = filter_.state();
+    measurements_.clear();
+  }
+
   void on_vio(const nav_msgs::msg::Odometry::SharedPtr message)
   {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto arrival_ns = now().nanoseconds();
+    reset_on_clock_jump(arrival_ns);
     const auto measurement_ns = stamp_ns(message->header.stamp);
     if (!current_epoch(measurement_ns, arrival_ns)) {
       ++timestamp_epoch_rejections_;
       return;
     }
-    if (measurement_ns <= last_vio_stamp_ns_) {
-      ++duplicate_or_old_vio_drops_;
+    if (measurement_ns <= last_vio_measurement_stamp_ns_) {
+      ++old_vio_drops_;
       return;
     }
-    if (message->child_frame_id.empty() || !update_cached_extrinsic(message->child_frame_id)) {
+    last_vio_measurement_stamp_ns_ = measurement_ns;
+    if (!zed_tracking_allows_measurement(arrival_ns)) {
+      ++zed_status_rejections_;
+      return;
+    }
+    if (message->child_frame_id.empty() ||
+      !update_cached_extrinsic(message->child_frame_id))
+    {
       return;
     }
 
-    VioSample sample;
+    Eigen::Isometry3d odom_from_source;
+    Eigen::Isometry3d odom_from_base;
     try {
-      const Eigen::Isometry3d odom_from_source = pose(message->pose.pose);
-      sample.odom_from_base = odom_from_source * base_from_vio_source_->inverse();
+      odom_from_source = pose(message->pose.pose);
+      odom_from_base = odom_from_source * base_from_vio_source_->inverse();
     } catch (...) {
       ++invalid_vio_drops_;
       return;
     }
-
     Eigen::Matrix<double, 6, 1> source_twist;
     source_twist <<
-      message->twist.twist.linear.x, message->twist.twist.linear.y,
-      message->twist.twist.linear.z, message->twist.twist.angular.x,
-      message->twist.twist.angular.y, message->twist.twist.angular.z;
+      message->twist.twist.linear.x,
+      message->twist.twist.linear.y,
+      message->twist.twist.linear.z,
+      message->twist.twist.angular.x,
+      message->twist.twist.angular.y,
+      message->twist.twist.angular.z;
+    const auto twist_transform = adjoint(*base_from_vio_source_);
     const Eigen::Matrix<double, 6, 1> body_twist =
-      adjoint(*base_from_vio_source_) * source_twist;
+      twist_transform * source_twist;
     if (!body_twist.allFinite()) {
       ++invalid_vio_drops_;
       return;
     }
 
-    sample.stamp_ns = measurement_ns;
-    sample.arrival_ns = arrival_ns;
-    sample.body_linear_velocity = body_twist.head<3>();
-    sample.body_angular_velocity = body_twist.tail<3>();
-    const auto covariance_transform = adjoint(*base_from_vio_source_);
-    sample.pose_covariance = covariance_transform *
-      covariance6(message->pose.covariance) * covariance_transform.transpose();
-    sample.twist_covariance = covariance_transform *
-      covariance6(message->twist.covariance) * covariance_transform.transpose();
-    enforce_covariance_floors(
-      sample.pose_covariance,
-      {1e-4, 1e-4, 1e-4, 1e-5, 1e-5, 1e-5});
-    enforce_covariance_floors(
-      sample.twist_covariance,
-      {9e-4, 9e-4, 9e-4, 1e-3, 1e-3, 1e-3});
+    const auto pose_covariance_fixed = pose_covariance_at_base(
+      covariance6(message->pose.covariance), odom_from_source,
+      base_from_vio_source_->inverse());
+    if (!valid_covariance<6>(pose_covariance_fixed)) {
+      ++invalid_vio_pose_covariance_drops_;
+      return;
+    }
+    const Eigen::Matrix<double, 6, 6> body_twist_covariance =
+      twist_transform * covariance6(message->twist.covariance) *
+      twist_transform.transpose();
 
-    last_vio_stamp_ns_ = measurement_ns;
-    last_vio_arrival_ns_ = arrival_ns;
-    vio_transport_s_ = (arrival_ns - measurement_ns) * 1e-9;
-    history_.push_back(sample);
-    vio_arrivals_.push_back(arrival_ns);
+    Measurement event;
+    event.id = ++measurement_sequence_;
+    event.source = MeasurementSource::Vio;
+    event.stamp_ns = measurement_ns;
+    event.has_pose = true;
+    event.position = odom_from_base.translation();
+    event.orientation = Eigen::Quaterniond(odom_from_base.linear()).normalized();
+    event.pose_covariance = pose_covariance_in_filter_coordinates(
+      pose_covariance_fixed, event.orientation);
+    event.has_twist = valid_covariance<6>(body_twist_covariance);
+    event.body_twist = body_twist;
+    if (event.has_twist) {
+      event.twist_covariance = body_twist_covariance;
+      twist_covariance_source_ = "ZED SDK";
+    } else {
+      ++invalid_vio_twist_covariance_drops_;
+      twist_covariance_source_ = "unavailable; twist update skipped";
+    }
+    latest_vio_ = event;
+
+    if (!filter_.initialized()) {
+      initialize_filter(event);
+      record_accepted_vio(measurement_ns, arrival_ns);
+      return;
+    }
+    if (!anchor_state_ || measurement_ns <= anchor_state_->stamp_ns) {
+      ++measurement_outside_history_drops_;
+      return;
+    }
+    if (measurement_ns - filter_.state().stamp_ns > 1000000000LL) {
+      initialize_filter(event);
+      record_accepted_vio(measurement_ns, arrival_ns);
+      return;
+    }
+
+    insert_measurement(event);
+    const auto result = replay(event.id);
+    ++delayed_measurement_replays_;
+    if (event.has_twist) {
+      last_vio_linear_velocity_innovation_mps_ =
+        result.linear_velocity_innovation_mps;
+      last_vio_linear_velocity_correction_mps_ =
+        result.linear_velocity_correction_mps;
+      if (result.linear_velocity_correction_limited) {
+        ++vio_linear_velocity_correction_limits_;
+      }
+      if (!result.linear_velocity_accepted) {
+        ++vio_linear_velocity_rejections_;
+      }
+    }
+    if (!result.any()) {
+      erase_measurement(event.id);
+      replay(0U);
+      ++vio_pose_gate_rejections_;
+      if (event.has_twist) {++vio_twist_gate_rejections_;}
+      return;
+    }
+    if (!result.pose_accepted) {++vio_pose_gate_rejections_;}
+    if (event.has_twist && !result.twist_accepted) {++vio_twist_gate_rejections_;}
+    record_accepted_vio(measurement_ns, arrival_ns);
     prune_history();
+  }
+
+  void record_accepted_vio(std::int64_t measurement_ns, std::int64_t arrival_ns)
+  {
+    last_vio_accepted_stamp_ns_ = measurement_ns;
+    last_vio_accepted_arrival_ns_ = arrival_ns;
+    vio_transport_s_ = (arrival_ns - measurement_ns) * 1e-9;
+    vio_arrivals_.push_back(arrival_ns);
     prune_arrivals(vio_arrivals_, arrival_ns);
   }
 
-  void reset_alignment()
+  MeasurementResult apply_measurement(VioTagEkf & filter, const Measurement & event) const
   {
-    map_from_odom_.reset();
-    alignment_covariance_.setIdentity();
-    last_alignment_stamp_ns_ = 0;
-    last_tag_stamp_ns_ = 0;
-    last_tag_measurement_stamp_ns_ = 0;
-    last_tag_arrival_ns_ = 0;
-    last_absolute_stamp_ns_ = 0;
-    last_tag_translation_residual_ = NAN;
-    last_tag_angle_residual_deg_ = NAN;
-  }
-
-  std::optional<VioSample> sample_at(std::int64_t target_ns) const
-  {
-    if (history_.empty()) {return std::nullopt;}
-    constexpr std::int64_t tolerance_ns = 150000000LL;
-    const auto upper = std::lower_bound(
-      history_.begin(), history_.end(), target_ns,
-      [](const VioSample & sample, std::int64_t stamp) {
-        return sample.stamp_ns < stamp;
-      });
-
-    if (upper == history_.begin()) {
-      return std::llabs(upper->stamp_ns - target_ns) <= tolerance_ns ?
-        std::optional<VioSample>(*upper) : std::nullopt;
+    MeasurementResult result;
+    const double pose_gate =
+      event.source == MeasurementSource::Tag ? tag_gate_chi2_ : pose_gate_chi2_;
+    if (event.has_pose) {
+      const bool position_accepted = filter.update_position(
+        event.position, event.pose_covariance.block<3, 3>(0, 0), pose_gate, true);
+      const bool orientation_accepted = filter.update_orientation(
+        event.orientation, event.pose_covariance.block<3, 3>(3, 3), pose_gate);
+      result.pose_accepted = position_accepted || orientation_accepted;
     }
-    if (upper == history_.end()) {
-      const auto & sample = history_.back();
-      return std::llabs(sample.stamp_ns - target_ns) <= tolerance_ns ?
-        std::optional<VioSample>(sample) : std::nullopt;
+    if (event.has_twist) {
+      const Eigen::Matrix3d linear_velocity_covariance =
+        regularized_linear_velocity_covariance(
+        event.twist_covariance.block<3, 3>(0, 0));
+      const bool linear_velocity_accepted = filter.update_linear_velocity(
+        event.body_twist.head<3>(), linear_velocity_covariance,
+        twist_gate_chi2_, linear_velocity_correction_limit_mps_,
+        linear_velocity_innovation_limit_mps_);
+      result.linear_velocity_accepted = linear_velocity_accepted;
+      result.linear_velocity_innovation_mps =
+        filter.last_linear_velocity_innovation_mps();
+      result.linear_velocity_correction_mps =
+        filter.last_linear_velocity_correction_mps();
+      result.linear_velocity_correction_limited =
+        filter.last_linear_velocity_correction_limited();
+      const bool angular_velocity_accepted = filter.update_angular_velocity(
+        event.body_twist.tail<3>(), event.twist_covariance.block<3, 3>(3, 3),
+        twist_gate_chi2_);
+      result.twist_accepted = linear_velocity_accepted || angular_velocity_accepted;
     }
-
-    const auto lower = std::prev(upper);
-    if (target_ns - lower->stamp_ns > tolerance_ns ||
-      upper->stamp_ns - target_ns > tolerance_ns)
-    {
-      const auto lower_error = std::llabs(target_ns - lower->stamp_ns);
-      const auto upper_error = std::llabs(upper->stamp_ns - target_ns);
-      const auto & nearest = lower_error <= upper_error ? *lower : *upper;
-      return std::min(lower_error, upper_error) <= tolerance_ns ?
-        std::optional<VioSample>(nearest) : std::nullopt;
-    }
-
-    const double denominator = static_cast<double>(upper->stamp_ns - lower->stamp_ns);
-    const double alpha = denominator > 0.0 ?
-      static_cast<double>(target_ns - lower->stamp_ns) / denominator : 0.0;
-    VioSample interpolated;
-    interpolated.stamp_ns = target_ns;
-    interpolated.arrival_ns = std::max(lower->arrival_ns, upper->arrival_ns);
-    interpolated.odom_from_base = blend_transform(
-      lower->odom_from_base, upper->odom_from_base, alpha);
-    interpolated.body_linear_velocity =
-      (1.0 - alpha) * lower->body_linear_velocity + alpha * upper->body_linear_velocity;
-    interpolated.body_angular_velocity =
-      (1.0 - alpha) * lower->body_angular_velocity + alpha * upper->body_angular_velocity;
-    interpolated.pose_covariance =
-      (1.0 - alpha) * lower->pose_covariance + alpha * upper->pose_covariance;
-    interpolated.twist_covariance =
-      (1.0 - alpha) * lower->twist_covariance + alpha * upper->twist_covariance;
-    return interpolated;
-  }
-
-  Eigen::Matrix<double, 6, 6> alignment_measurement_covariance(
-    const Eigen::Matrix<double, 6, 6> & tag_covariance,
-    const VioSample & vio,
-    const Eigen::Matrix3d & map_from_odom_rotation) const
-  {
-    Eigen::Matrix<double, 6, 6> rotation = Eigen::Matrix<double, 6, 6>::Zero();
-    rotation.block<3, 3>(0, 0) = map_from_odom_rotation;
-    rotation.block<3, 3>(3, 3) = map_from_odom_rotation;
-    Eigen::Matrix<double, 6, 6> result =
-      tag_covariance + rotation * vio.pose_covariance * rotation.transpose();
-    enforce_covariance_floors(result, {1e-4, 1e-4, 1e-4, 1e-5, 1e-5, 1e-5});
     return result;
   }
 
-  void update_alignment(
-    const Eigen::Isometry3d & candidate,
-    const Eigen::Matrix<double, 6, 6> & measurement_covariance,
-    std::int64_t stamp_ns)
+  void insert_measurement(const Measurement & event)
   {
-    if (!map_from_odom_) {
-      map_from_odom_ = candidate;
-      alignment_covariance_ = measurement_covariance;
-      last_alignment_stamp_ns_ = stamp_ns;
-      return;
-    }
+    const auto insertion = std::upper_bound(
+      measurements_.begin(), measurements_.end(), event,
+      [](const Measurement & left, const Measurement & right) {
+        return std::tie(left.stamp_ns, left.id) < std::tie(right.stamp_ns, right.id);
+      });
+    measurements_.insert(insertion, event);
+    history_high_water_ = std::max(history_high_water_, measurements_.size());
+  }
 
-    if (last_alignment_stamp_ns_ > 0 && stamp_ns > last_alignment_stamp_ns_) {
-      const double dt = static_cast<double>(stamp_ns - last_alignment_stamp_ns_) * 1e-9;
-      alignment_covariance_.block<3, 3>(0, 0).diagonal().array() +=
-        alignment_translation_walk_ * alignment_translation_walk_ * dt;
-      alignment_covariance_.block<3, 3>(3, 3).diagonal().array() +=
-        alignment_rotation_walk_ * alignment_rotation_walk_ * dt;
-    }
+  void erase_measurement(std::uint64_t id)
+  {
+    measurements_.erase(
+      std::remove_if(
+        measurements_.begin(), measurements_.end(),
+        [id](const Measurement & event) {return event.id == id;}),
+      measurements_.end());
+  }
 
-    Eigen::Matrix<double, 6, 1> innovation;
-    innovation.head<3>() = candidate.translation() - map_from_odom_->translation();
-    innovation.tail<3>() = log_quaternion(
-      Eigen::Quaterniond(map_from_odom_->linear()).conjugate() *
-      Eigen::Quaterniond(candidate.linear()));
-    const Eigen::Matrix<double, 6, 6> innovation_covariance =
-      alignment_covariance_ + measurement_covariance;
-    const Eigen::LDLT<Eigen::Matrix<double, 6, 6>> decomposition(innovation_covariance);
-    if (decomposition.info() != Eigen::Success || !decomposition.isPositive()) {
-      ++alignment_update_failures_;
-      return;
+  MeasurementResult replay(std::uint64_t tracked_id)
+  {
+    MeasurementResult tracked;
+    if (!anchor_state_) {return tracked;}
+    VioTagEkf replay_filter(noise_);
+    replay_filter.initialize(*anchor_state_);
+    for (const auto & event : measurements_) {
+      if (!replay_filter.propagate_to(event.stamp_ns)) {break;}
+      const auto result = apply_measurement(replay_filter, event);
+      if (event.id == tracked_id) {tracked = result;}
     }
-    const Eigen::Matrix<double, 6, 6> gain =
-      alignment_covariance_ * decomposition.solve(
-      Eigen::Matrix<double, 6, 6>::Identity());
-    const Eigen::Matrix<double, 6, 1> correction = gain * innovation;
-    map_from_odom_->translation() += correction.head<3>();
-    map_from_odom_->linear() =
-      (Eigen::Quaterniond(map_from_odom_->linear()) *
-      exp_quaternion(correction.tail<3>())).normalized().toRotationMatrix();
+    filter_ = replay_filter;
+    return tracked;
+  }
 
-    const Eigen::Matrix<double, 6, 6> identity =
-      Eigen::Matrix<double, 6, 6>::Identity();
-    const Eigen::Matrix<double, 6, 6> residual = identity - gain;
-    alignment_covariance_ =
-      residual * alignment_covariance_ * residual.transpose() +
-      gain * measurement_covariance * gain.transpose();
-    alignment_covariance_ = 0.5 *
-      (alignment_covariance_ + alignment_covariance_.transpose());
-    last_alignment_stamp_ns_ = stamp_ns;
+  std::optional<EkfState> state_at(std::int64_t target_ns) const
+  {
+    if (!anchor_state_ || target_ns < anchor_state_->stamp_ns ||
+      target_ns > filter_.state().stamp_ns)
+    {
+      return std::nullopt;
+    }
+    VioTagEkf temporary(noise_);
+    temporary.initialize(*anchor_state_);
+    for (const auto & event : measurements_) {
+      if (event.stamp_ns > target_ns) {break;}
+      if (!temporary.propagate_to(event.stamp_ns)) {return std::nullopt;}
+      apply_measurement(temporary, event);
+    }
+    if (!temporary.propagate_to(target_ns)) {return std::nullopt;}
+    return temporary.state();
+  }
+
+  void prune_history()
+  {
+    if (!anchor_state_ || measurements_.empty()) {return;}
+    const auto cutoff_ns = filter_.state().stamp_ns -
+      static_cast<std::int64_t>(history_duration_s_ * 1e9);
+    if (cutoff_ns <= anchor_state_->stamp_ns) {return;}
+    VioTagEkf anchor_filter(noise_);
+    anchor_filter.initialize(*anchor_state_);
+    while (!measurements_.empty() && measurements_.front().stamp_ns <= cutoff_ns) {
+      if (!anchor_filter.propagate_to(measurements_.front().stamp_ns)) {break;}
+      apply_measurement(anchor_filter, measurements_.front());
+      measurements_.pop_front();
+    }
+    if (anchor_filter.state().stamp_ns < cutoff_ns) {
+      anchor_filter.propagate_to(cutoff_ns);
+    }
+    anchor_state_ = anchor_filter.state();
+    history_high_water_ = std::max(history_high_water_, measurements_.size());
+  }
+
+  Eigen::Matrix<double, 6, 6> state_pose_covariance_fixed(
+    const EkfState & state) const
+  {
+    Eigen::Matrix<double, 6, 12> jacobian =
+      Eigen::Matrix<double, 6, 12>::Zero();
+    jacobian.block<3, 3>(0, 0).setIdentity();
+    jacobian.block<3, 3>(3, 6) = state.orientation.toRotationMatrix();
+    const Eigen::Matrix<double, 6, 6> result =
+      jacobian * state.covariance * jacobian.transpose();
+    return 0.5 * (result + result.transpose());
   }
 
   void on_tag(const robotcore_interfaces::msg::AprilTagPoseEstimate::SharedPtr message)
   {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto arrival_ns = now().nanoseconds();
+    reset_on_clock_jump(arrival_ns);
     if (message->map_generation < last_tag_map_generation_) {return;}
     const bool map_changed = last_tag_map_generation_ != 0U &&
       message->map_generation > last_tag_map_generation_;
-    if (message->relocalization_requested || map_changed) {reset_alignment();}
+    if (message->relocalization_requested || map_changed) {reset_for_new_tag_map();}
     last_tag_map_generation_ = message->map_generation;
     last_tag_estimate_ = *message;
     last_tag_frame_arrival_ns_ = arrival_ns;
     tag_frame_arrivals_.push_back(arrival_ns);
     prune_arrivals(tag_frame_arrivals_, arrival_ns);
-    if (!message->pose_valid || message->header.frame_id != map_frame_) {return;}
+    if (!message->pose_valid || message->header.frame_id != map_frame_ ||
+      !filter_.initialized())
+    {
+      return;
+    }
 
     const auto tag_stamp_ns = stamp_ns(message->header.stamp);
     if (!current_epoch(tag_stamp_ns, arrival_ns)) {
       ++timestamp_epoch_rejections_;
       return;
     }
-    if (tag_stamp_ns <= last_tag_measurement_stamp_ns_) {
-      ++duplicate_or_old_tag_drops_;
+    if (tag_stamp_ns <= last_tag_candidate_stamp_ns_) {
+      ++old_tag_drops_;
       return;
     }
-    last_tag_measurement_stamp_ns_ = tag_stamp_ns;
-    const auto vio = sample_at(tag_stamp_ns);
-    if (!vio) {
-      ++tag_without_vio_drops_;
+    last_tag_candidate_stamp_ns_ = tag_stamp_ns;
+    const auto local_state = state_at(tag_stamp_ns);
+    if (!local_state) {
+      ++measurement_outside_history_drops_;
       return;
     }
 
@@ -460,133 +1034,220 @@ private:
     try {
       map_from_base = pose(message->pose.pose);
     } catch (...) {
+      ++invalid_tag_drops_;
       return;
     }
-    const Eigen::Isometry3d candidate =
-      map_from_base * vio->odom_from_base.inverse();
-    if (map_from_odom_) {
-      const Eigen::Isometry3d predicted_map_from_base =
-        *map_from_odom_ * vio->odom_from_base;
-      last_tag_translation_residual_ =
-        (map_from_base.translation() - predicted_map_from_base.translation()).norm();
-      constexpr double radians_to_degrees = 180.0 / 3.14159265358979323846;
-      last_tag_angle_residual_deg_ = rotation_distance(
-        map_from_base.linear(), predicted_map_from_base.linear()) * radians_to_degrees;
-      if (last_tag_translation_residual_ > tag_innovation_gate_m_) {
-        ++tag_gate_rejections_;
-        return;
-      }
-    } else {
-      last_tag_translation_residual_ = 0.0;
-      last_tag_angle_residual_deg_ = 0.0;
+    const auto tag_covariance_map = covariance6(message->pose.covariance);
+    if (!valid_covariance<6>(tag_covariance_map)) {
+      ++invalid_tag_covariance_drops_;
+      return;
+    }
+    const Eigen::Isometry3d odom_from_base = pose_transform(
+      local_state->position, local_state->orientation);
+    if (!map_from_odom_) {
+      const Eigen::Isometry3d candidate = map_from_base * odom_from_base.inverse();
+      Eigen::Matrix<double, 6, 6> rotation =
+        Eigen::Matrix<double, 6, 6>::Zero();
+      rotation.block<3, 3>(0, 0) = candidate.linear();
+      rotation.block<3, 3>(3, 3) = candidate.linear();
+      const auto candidate_covariance = tag_covariance_map +
+        rotation * state_pose_covariance_fixed(*local_state) * rotation.transpose();
+      add_alignment_candidate(candidate, candidate_covariance, tag_stamp_ns);
+      if (alignment_candidates_.size() < 4U) {return;}
+      establish_alignment();
+      record_accepted_tag(tag_stamp_ns, arrival_ns);
+      return;
     }
 
-    const auto tag_covariance = covariance6(message->pose.covariance);
-    const auto measurement_covariance = alignment_measurement_covariance(
-      tag_covariance, *vio, candidate.linear());
-    update_alignment(candidate, measurement_covariance, tag_stamp_ns);
-    if (!map_from_odom_) {return;}
-    last_tag_stamp_ns_ = tag_stamp_ns;
-    last_absolute_stamp_ns_ = tag_stamp_ns;
+    const Eigen::Isometry3d predicted_map_from_base =
+      *map_from_odom_ * odom_from_base;
+    last_tag_translation_residual_ =
+      (map_from_base.translation() - predicted_map_from_base.translation()).norm();
+    last_tag_angle_residual_deg_ = rotation_distance(
+      map_from_base.linear(), predicted_map_from_base.linear()) * 180.0 / M_PI;
+
+    const Eigen::Isometry3d measured_odom_from_base =
+      map_from_odom_->inverse() * map_from_base;
+    Eigen::Matrix<double, 6, 6> map_to_odom_rotation =
+      Eigen::Matrix<double, 6, 6>::Zero();
+    map_to_odom_rotation.block<3, 3>(0, 0) = map_from_odom_->linear().transpose();
+    map_to_odom_rotation.block<3, 3>(3, 3) = map_from_odom_->linear().transpose();
+    const auto tag_covariance_odom = map_to_odom_rotation *
+      tag_covariance_map * map_to_odom_rotation.transpose();
+
+    Measurement event;
+    event.id = ++measurement_sequence_;
+    event.source = MeasurementSource::Tag;
+    event.stamp_ns = tag_stamp_ns;
+    event.has_pose = true;
+    event.position = measured_odom_from_base.translation();
+    event.orientation = Eigen::Quaterniond(measured_odom_from_base.linear()).normalized();
+    event.pose_covariance = pose_covariance_in_filter_coordinates(
+      tag_covariance_odom, event.orientation);
+    insert_measurement(event);
+    const auto result = replay(event.id);
+    ++delayed_measurement_replays_;
+    if (!result.pose_accepted) {
+      erase_measurement(event.id);
+      replay(0U);
+      ++tag_gate_rejections_;
+      return;
+    }
+    record_accepted_tag(tag_stamp_ns, arrival_ns);
+    prune_history();
+  }
+
+  void record_accepted_tag(std::int64_t measurement_ns, std::int64_t arrival_ns)
+  {
+    last_tag_stamp_ns_ = measurement_ns;
     last_tag_arrival_ns_ = arrival_ns;
-    tag_transport_s_ = (arrival_ns - tag_stamp_ns) * 1e-9;
+    last_absolute_stamp_ns_ = measurement_ns;
+    tag_transport_s_ = (arrival_ns - measurement_ns) * 1e-9;
     tag_arrivals_.push_back(arrival_ns);
     prune_arrivals(tag_arrivals_, arrival_ns);
   }
 
-  void prune_history()
+  void add_alignment_candidate(
+    const Eigen::Isometry3d & transform,
+    const Eigen::Matrix<double, 6, 6> & covariance,
+    std::int64_t stamp)
   {
-    if (history_.empty()) {return;}
-    const auto newest_ns = history_.back().stamp_ns;
-    while (history_.size() > 2U &&
-      newest_ns - history_.front().stamp_ns > history_duration_s_ * 1e9)
+    if (!alignment_candidates_.empty() &&
+      stamp - alignment_candidates_.back().stamp_ns > 500000000LL)
     {
-      history_.pop_front();
+      alignment_candidates_.clear();
     }
+    if (!alignment_candidates_.empty()) {
+      const auto & reference = alignment_candidates_.front().map_from_odom;
+      if ((transform.translation() - reference.translation()).norm() > 0.20 ||
+        rotation_distance(transform.linear(), reference.linear()) > 12.0 * M_PI / 180.0)
+      {
+        alignment_candidates_.clear();
+      }
+    }
+    alignment_candidates_.push_back({stamp, transform, covariance});
+    while (alignment_candidates_.size() > 4U) {alignment_candidates_.pop_front();}
   }
 
-  Eigen::Isometry3d predicted_odom_from_base(
-    const VioSample & sample, double prediction_age_s) const
+  void establish_alignment()
   {
-    Eigen::Isometry3d predicted = sample.odom_from_base;
-    if (prediction_age_s <= 0.0) {return predicted;}
-    predicted.translation() +=
-      predicted.linear() * sample.body_linear_velocity * prediction_age_s;
-    predicted.linear() =
-      (Eigen::Quaterniond(predicted.linear()) *
-      exp_quaternion(sample.body_angular_velocity * prediction_age_s))
-      .normalized().toRotationMatrix();
-    return predicted;
+    Eigen::Vector3d translation = Eigen::Vector3d::Zero();
+    Eigen::Quaterniond orientation(alignment_candidates_.front().map_from_odom.linear());
+    for (std::size_t index = 0; index < alignment_candidates_.size(); ++index) {
+      translation += alignment_candidates_[index].map_from_odom.translation();
+      if (index > 0U) {
+        orientation = orientation.slerp(
+          1.0 / static_cast<double>(index + 1U),
+          Eigen::Quaterniond(alignment_candidates_[index].map_from_odom.linear())).normalized();
+      }
+    }
+    map_from_odom_ = pose_transform(
+      translation / static_cast<double>(alignment_candidates_.size()), orientation);
+    alignment_covariance_.setZero();
+    const double count = static_cast<double>(alignment_candidates_.size());
+    for (const auto & candidate : alignment_candidates_) {
+      alignment_covariance_ += candidate.covariance / (count * count);
+      Eigen::Matrix<double, 6, 1> residual;
+      residual.head<3>() = candidate.map_from_odom.translation() -
+        map_from_odom_->translation();
+      residual.tail<3>() = log_quaternion(
+        Eigen::Quaterniond(map_from_odom_->linear()).conjugate() *
+        Eigen::Quaterniond(candidate.map_from_odom.linear()));
+      alignment_covariance_ +=
+        residual * residual.transpose() / (count * (count - 1.0));
+    }
+    alignment_covariance_ = 0.5 *
+      (alignment_covariance_ + alignment_covariance_.transpose());
+    alignment_candidates_.clear();
   }
 
-  Eigen::Matrix<double, 6, 6> output_pose_covariance(
-    const VioSample & sample, double prediction_age_s, bool map_output) const
+  std::string localization_source(bool absolute) const
   {
-    Eigen::Matrix<double, 6, 6> covariance = sample.pose_covariance;
-    const double age = std::max(0.0, prediction_age_s);
-    covariance.block<3, 3>(0, 0).diagonal().array() += 0.04 * age * age;
-    covariance.block<3, 3>(3, 3).diagonal().array() += 0.01 * age * age;
-    if (!map_output) {return covariance;}
-    Eigen::Matrix<double, 6, 6> rotation = Eigen::Matrix<double, 6, 6>::Zero();
-    rotation.block<3, 3>(0, 0) = map_from_odom_->linear();
-    rotation.block<3, 3>(3, 3) = map_from_odom_->linear();
-    return rotation * covariance * rotation.transpose() + alignment_covariance_;
+    if (absolute) {return "AprilTag+ZED VIO EKF";}
+    if (map_from_odom_) {return "ZED VIO EKF after Tag loss";}
+    return "ZED VIO EKF (local odom)";
   }
 
-  static std::string localization_source(bool absolute)
+  void fill_covariances(nav_msgs::msg::Odometry & odometry, const EkfState & state) const
   {
-    return absolute ? "AprilTag+ZED VIO" : "ZED VIO after Tag loss";
+    Eigen::Matrix3d odom_to_output_rotation = Eigen::Matrix3d::Identity();
+    if (map_from_odom_) {odom_to_output_rotation = map_from_odom_->linear();}
+    const Eigen::Matrix3d output_from_body =
+      odom_to_output_rotation * state.orientation.toRotationMatrix();
+    Eigen::Matrix<double, 6, 12> pose_jacobian =
+      Eigen::Matrix<double, 6, 12>::Zero();
+    pose_jacobian.block<3, 3>(0, 0) = odom_to_output_rotation;
+    pose_jacobian.block<3, 3>(3, 6) = output_from_body;
+    Eigen::Matrix<double, 6, 6> pose_covariance =
+      pose_jacobian * state.covariance * pose_jacobian.transpose();
+    if (map_from_odom_) {
+      Eigen::Matrix<double, 6, 6> alignment_jacobian =
+        Eigen::Matrix<double, 6, 6>::Identity();
+      alignment_jacobian.block<3, 3>(0, 3) = -skew(
+        map_from_odom_->linear() * state.position);
+      pose_covariance += alignment_jacobian * alignment_covariance_ *
+        alignment_jacobian.transpose();
+    }
+    pose_covariance = 0.5 * (pose_covariance + pose_covariance.transpose());
+    store_covariance(odometry.pose.covariance, pose_covariance);
+
+    const Eigen::Vector3d body_velocity =
+      state.orientation.conjugate() * state.velocity;
+    Eigen::Matrix<double, 6, 12> twist_jacobian =
+      Eigen::Matrix<double, 6, 12>::Zero();
+    twist_jacobian.block<3, 3>(0, 3) =
+      state.orientation.conjugate().toRotationMatrix();
+    twist_jacobian.block<3, 3>(0, 6) = skew(body_velocity);
+    twist_jacobian.block<3, 3>(3, 9).setIdentity();
+    const Eigen::Matrix<double, 6, 6> twist_covariance =
+      twist_jacobian * state.covariance * twist_jacobian.transpose();
+    store_covariance(odometry.twist.covariance, twist_covariance);
   }
 
   void publish()
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (history_.empty()) {return;}
-    const auto stamp = now();
-    const auto now_ns = stamp.nanoseconds();
-    prune_arrivals(vio_arrivals_, now_ns);
-    prune_arrivals(tag_arrivals_, now_ns);
-    prune_arrivals(tag_frame_arrivals_, now_ns);
-    prune_arrivals(fused_arrivals_, now_ns);
+    const auto now_time = now();
+    const auto now_ns = now_time.nanoseconds();
+    if (reset_on_clock_jump(now_ns) || !filter_.initialized()) {return;}
 
-    const auto & sample = history_.back();
-    const double arrival_age_s = (now_ns - sample.arrival_ns) * 1e-9;
-    const double measurement_age_s = (now_ns - sample.stamp_ns) * 1e-9;
+    VioTagEkf output_filter = filter_;
+    const bool prediction_ok = output_filter.propagate_to(now_ns);
+    if (!prediction_ok) {return;}
+    const auto & state = output_filter.state();
+    const double vio_measurement_age_s = last_vio_accepted_stamp_ns_ > 0 ?
+      (now_ns - last_vio_accepted_stamp_ns_) * 1e-9 : INFINITY;
+    const double vio_arrival_age_s = last_vio_accepted_arrival_ns_ > 0 ?
+      (now_ns - last_vio_accepted_arrival_ns_) * 1e-9 : INFINITY;
+    const double tag_age_s = last_tag_stamp_ns_ > 0 ?
+      (now_ns - last_tag_stamp_ns_) * 1e-9 : INFINITY;
     const double tag_arrival_age_s = last_tag_arrival_ns_ > 0 ?
       (now_ns - last_tag_arrival_ns_) * 1e-9 : INFINITY;
-    const double tag_measurement_age_s = last_tag_stamp_ns_ > 0 ?
-      (now_ns - last_tag_stamp_ns_) * 1e-9 : INFINITY;
-    const bool vio_usable = arrival_age_s >= 0.0 &&
-      arrival_age_s <= vio_arrival_timeout_s_ && measurement_age_s >= 0.0 &&
-      measurement_age_s <= vio_prediction_horizon_s_;
+    const bool vio_usable = vio_arrival_age_s <= vio_arrival_timeout_s_ &&
+      vio_measurement_age_s <= vio_prediction_horizon_s_;
     const bool absolute_valid = vio_usable && map_from_odom_ &&
       tag_arrival_age_s <= tag_fresh_s_;
     const bool estimated = vio_usable && !absolute_valid;
 
-    const Eigen::Isometry3d odom_from_base = predicted_odom_from_base(
-      sample, std::clamp(measurement_age_s, 0.0, vio_prediction_horizon_s_));
-    const bool map_output = map_from_odom_.has_value();
-    const Eigen::Isometry3d output_from_base = map_output ?
+    const Eigen::Isometry3d odom_from_base = pose_transform(
+      state.position, state.orientation);
+    const Eigen::Isometry3d output_from_base = map_from_odom_ ?
       *map_from_odom_ * odom_from_base : odom_from_base;
+    const Eigen::Vector3d body_velocity =
+      state.orientation.conjugate() * state.velocity;
 
     nav_msgs::msg::Odometry odometry;
-    odometry.header.stamp = stamp;
-    odometry.header.frame_id = map_output ? map_frame_ : odom_frame_;
+    odometry.header.stamp = rclcpp::Time(state.stamp_ns, RCL_ROS_TIME);
+    odometry.header.frame_id = map_from_odom_ ? map_frame_ : odom_frame_;
     odometry.child_frame_id = base_frame_;
     set_pose(odometry.pose.pose, output_from_base);
-    odometry.twist.twist.linear.x = sample.body_linear_velocity.x();
-    odometry.twist.twist.linear.y = sample.body_linear_velocity.y();
-    odometry.twist.twist.linear.z = sample.body_linear_velocity.z();
-    odometry.twist.twist.angular.x = sample.body_angular_velocity.x();
-    odometry.twist.twist.angular.y = sample.body_angular_velocity.y();
-    odometry.twist.twist.angular.z = sample.body_angular_velocity.z();
-    store_covariance(
-      odometry.pose.covariance,
-      output_pose_covariance(sample, measurement_age_s, map_output));
-    store_covariance(odometry.twist.covariance, sample.twist_covariance);
-    fused_pub_->publish(odometry);
-    fused_arrivals_.push_back(now_ns);
-
+    odometry.twist.twist.linear.x = body_velocity.x();
+    odometry.twist.twist.linear.y = body_velocity.y();
+    odometry.twist.twist.linear.z = body_velocity.z();
+    odometry.twist.twist.angular.x = state.angular_velocity.x();
+    odometry.twist.twist.angular.y = state.angular_velocity.y();
+    odometry.twist.twist.angular.z = state.angular_velocity.z();
+    fill_covariances(odometry, state);
     robotcore_interfaces::msg::BodyState body;
     body.header = odometry.header;
     body.pose = odometry.pose.pose;
@@ -594,46 +1255,50 @@ private:
     body.linear_velocity_valid = vio_usable;
     body.state_valid = absolute_valid;
     body.position_estimated = estimated;
-    body.localization_source = vio_usable ? localization_source(absolute_valid) : "";
+    body.localization_source = localization_source(absolute_valid);
     body_pub_->publish(body);
-
-    if (last_status_publish_ns_ == 0 ||
-      now_ns - last_status_publish_ns_ >= status_period_ns_)
-    {
-      publish_status(
-        stamp, odometry, measurement_age_s, arrival_age_s,
-        tag_measurement_age_s, tag_arrival_age_s,
-        vio_usable, absolute_valid, estimated);
-      last_status_publish_ns_ = now_ns;
-    }
+    body_state_arrivals_.push_back(now_ns);
+    prune_arrivals(body_state_arrivals_, now_ns);
+    publish_status(
+      now_time, odometry, vio_measurement_age_s, tag_age_s,
+      vio_usable, absolute_valid, estimated);
+    updater_.force_update();
   }
 
   void publish_status(
-    const rclcpp::Time & stamp, const nav_msgs::msg::Odometry & odometry,
-    double vio_measurement_age_s, double vio_arrival_age_s,
-    double tag_measurement_age_s, double tag_arrival_age_s,
-    bool vio_usable, bool absolute_valid, bool estimated)
+    const rclcpp::Time & now_time,
+    const nav_msgs::msg::Odometry & odometry,
+    double vio_age_s,
+    double tag_age_s,
+    bool vio_usable,
+    bool absolute_valid,
+    bool estimated)
   {
     robotcore_interfaces::msg::LocalizationStatus status;
-    status.header.stamp = stamp;
+    status.header.stamp = now_time;
     status.header.frame_id = odometry.header.frame_id;
-    if (last_vio_stamp_ns_ > 0) {
-      status.last_vio_stamp = rclcpp::Time(last_vio_stamp_ns_, RCL_ROS_TIME);
+    if (last_vio_accepted_stamp_ns_ > 0) {
+      status.last_vio_stamp = rclcpp::Time(last_vio_accepted_stamp_ns_, RCL_ROS_TIME);
     }
     if (last_tag_stamp_ns_ > 0) {
       status.last_tag_stamp = rclcpp::Time(last_tag_stamp_ns_, RCL_ROS_TIME);
-      status.last_absolute_fix_stamp = rclcpp::Time(last_absolute_stamp_ns_, RCL_ROS_TIME);
     }
-    status.vio_age_s = vio_measurement_age_s;
-    status.tag_age_s = tag_measurement_age_s;
-    status.absolute_fix_age_s = tag_measurement_age_s;
+    if (last_absolute_stamp_ns_ > 0) {
+      status.last_absolute_fix_stamp =
+        rclcpp::Time(last_absolute_stamp_ns_, RCL_ROS_TIME);
+    }
+    status.vio_age_s = vio_age_s;
+    status.tag_age_s = tag_age_s;
+    status.absolute_fix_age_s = last_absolute_stamp_ns_ > 0 ?
+      (now_time.nanoseconds() - last_absolute_stamp_ns_) * 1e-9 : INFINITY;
     status.apriltag_frame_age_s = last_tag_frame_arrival_ns_ > 0 ?
-      (stamp.nanoseconds() - last_tag_frame_arrival_ns_) * 1e-9 : INFINITY;
-    status.vio_rate_hz = arrival_rate_hz(vio_arrivals_, stamp.nanoseconds());
-    status.tag_rate_hz = arrival_rate_hz(tag_arrivals_, stamp.nanoseconds());
-    status.fused_rate_hz = arrival_rate_hz(fused_arrivals_, stamp.nanoseconds());
-    status.apriltag_frame_rate_hz = arrival_rate_hz(
-      tag_frame_arrivals_, stamp.nanoseconds());
+      (now_time.nanoseconds() - last_tag_frame_arrival_ns_) * 1e-9 : INFINITY;
+    status.vio_rate_hz = arrival_rate_hz(vio_arrivals_, now_time.nanoseconds());
+    status.tag_rate_hz = arrival_rate_hz(tag_arrivals_, now_time.nanoseconds());
+    status.body_state_rate_hz =
+      arrival_rate_hz(body_state_arrivals_, now_time.nanoseconds());
+    status.apriltag_frame_rate_hz =
+      arrival_rate_hz(tag_frame_arrivals_, now_time.nanoseconds());
     status.vio_transport_delay_s = vio_transport_s_;
     status.tag_transport_delay_s = tag_transport_s_;
     status.tag_vio_translation_residual_m = last_tag_translation_residual_;
@@ -647,125 +1312,161 @@ private:
     status.minimum_tag_edge_px = last_tag_estimate_.minimum_tag_edge_px;
     status.tag_pose_published = last_tag_estimate_.pose_valid;
     status.vio_fresh = vio_usable;
-    status.tag_fresh = tag_arrival_age_s <= tag_fresh_s_;
+    status.tag_fresh = tag_age_s <= tag_fresh_s_;
     status.tag_consistent = std::isfinite(last_tag_translation_residual_) &&
-      last_tag_translation_residual_ <= tag_innovation_gate_m_;
+      std::isfinite(last_tag_angle_residual_deg_) &&
+      last_tag_translation_residual_ <= 0.50 && last_tag_angle_residual_deg_ <= 10.0;
     status.absolute_fix_valid = absolute_valid;
     status.position_estimated = estimated;
-    status.localization_source = vio_usable ? localization_source(absolute_valid) : "";
+    status.localization_source = localization_source(absolute_valid);
     status.tag_observation_class = last_tag_estimate_.pose_valid ? "primary" : "";
     status.apriltag_rejection_reason = last_tag_estimate_.rejection_reason;
-    if (vio_arrival_age_s > vio_arrival_timeout_s_) {
-      status.rejection_reason = "ZED VIO stream is stale";
-    } else if (vio_measurement_age_s > vio_prediction_horizon_s_) {
-      status.rejection_reason = "ZED VIO measurement latency exceeds prediction horizon";
-    } else if (!absolute_valid) {
-      status.rejection_reason = "absolute Tag fix is stale; using local VIO";
-    }
+    if (!vio_usable) {status.rejection_reason = "ZED VIO/EKF state is stale";}
+    else if (!map_from_odom_) {status.rejection_reason = "waiting for Tag map alignment";}
+    else {status.rejection_reason = "";}
     status_pub_->publish(status);
   }
 
   void diagnose(diagnostic_updater::DiagnosticStatusWrapper & status)
   {
-    std::lock_guard<std::mutex> lock(mutex_);
     const auto now_ns = now().nanoseconds();
-    prune_arrivals(vio_arrivals_, now_ns);
-    prune_arrivals(tag_arrivals_, now_ns);
-    prune_arrivals(tag_frame_arrivals_, now_ns);
-    prune_arrivals(fused_arrivals_, now_ns);
-    const double arrival_age_s = last_vio_arrival_ns_ > 0 ?
-      (now_ns - last_vio_arrival_ns_) * 1e-9 : INFINITY;
-    const double measurement_age_s = last_vio_stamp_ns_ > 0 ?
-      (now_ns - last_vio_stamp_ns_) * 1e-9 : INFINITY;
-    const double tag_arrival_age_s = last_tag_arrival_ns_ > 0 ?
-      (now_ns - last_tag_arrival_ns_) * 1e-9 : INFINITY;
-    const bool vio_usable = arrival_age_s <= vio_arrival_timeout_s_ &&
-      measurement_age_s <= vio_prediction_horizon_s_;
-    const bool absolute_valid = vio_usable && map_from_odom_ &&
-      tag_arrival_age_s <= tag_fresh_s_;
-    int level = diagnostic_msgs::msg::DiagnosticStatus::OK;
-    std::string summary = "AprilTag-aligned ZED VIO";
-    if (history_.empty()) {
-      level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
-      summary = "waiting for ZED VIO";
-    } else if (!vio_usable) {
-      level = diagnostic_msgs::msg::DiagnosticStatus::ERROR;
-      summary = "ZED VIO is stale or too delayed";
-    } else if (!absolute_valid) {
-      level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
-      summary = "local VIO estimate after Tag loss";
-    }
-    status.summary(level, summary);
+    const bool tracking_ok = zed_tracking_allows_measurement(now_ns);
+    const int level = filter_.initialized() && tracking_ok ?
+      diagnostic_msgs::msg::DiagnosticStatus::OK :
+      diagnostic_msgs::msg::DiagnosticStatus::WARN;
+    status.summary(
+      level,
+      map_from_odom_ ? "AprilTag/ZED VIO EKF estimating in map" :
+      "ZED VIO EKF waiting for Tag map alignment");
+    status.add("filter_initialized", filter_.initialized());
+    status.add("map_alignment_initialized", static_cast<bool>(map_from_odom_));
     status.add("vio_rate_hz", arrival_rate_hz(vio_arrivals_, now_ns));
-    status.add("vio_arrival_age_s", arrival_age_s);
-    status.add("vio_measurement_age_s", measurement_age_s);
-    status.add("vio_transport_delay_s", vio_transport_s_);
     status.add("tag_rate_hz", arrival_rate_hz(tag_arrivals_, now_ns));
-    status.add("apriltag_frame_rate_hz", arrival_rate_hz(tag_frame_arrivals_, now_ns));
-    status.add("fused_publish_rate_hz", arrival_rate_hz(fused_arrivals_, now_ns));
-    status.add("absolute_fix_valid", absolute_valid);
-    status.add("history_size", history_.size());
-    status.add("duplicate_or_old_vio_drops", duplicate_or_old_vio_drops_);
-    status.add("invalid_vio_drops", invalid_vio_drops_);
-    status.add("transform_failures", transform_failures_);
-    status.add("timestamp_epoch_rejections", timestamp_epoch_rejections_);
-    status.add("tag_without_vio_drops", tag_without_vio_drops_);
-    status.add("duplicate_or_old_tag_drops", duplicate_or_old_tag_drops_);
+    status.add("zed_tracking_status_received", have_zed_status_);
+    status.add("zed_odometry_status", static_cast<int>(last_zed_odometry_status_));
+    status.add("zed_tracking_measurement_allowed", tracking_ok);
+    status.add("twist_covariance_source", twist_covariance_source_);
+    status.add("last_pose_nis", filter_.last_pose_nis());
+    status.add("last_twist_nis", filter_.last_twist_nis());
+    status.add("delayed_measurement_replays", delayed_measurement_replays_);
+    status.add("measurement_history_size", measurements_.size());
+    status.add("history_high_water", history_high_water_);
+    status.add("measurement_outside_history_drops", measurement_outside_history_drops_);
+    status.add("invalid_vio_pose_covariance_drops", invalid_vio_pose_covariance_drops_);
+    status.add("invalid_vio_twist_covariance_drops", invalid_vio_twist_covariance_drops_);
+    status.add("vio_linear_velocity_stddev_floor_mps", linear_velocity_stddev_floor_mps_);
+    status.add(
+      "vio_linear_velocity_correction_limit_mps",
+      linear_velocity_correction_limit_mps_);
+    status.add(
+      "vio_linear_velocity_innovation_limit_mps",
+      linear_velocity_innovation_limit_mps_);
+    status.add(
+      "last_vio_linear_velocity_innovation_mps",
+      last_vio_linear_velocity_innovation_mps_);
+    status.add(
+      "last_vio_linear_velocity_correction_mps",
+      last_vio_linear_velocity_correction_mps_);
+    status.add(
+      "vio_linear_velocity_correction_limits",
+      vio_linear_velocity_correction_limits_);
+    status.add(
+      "vio_linear_velocity_rejections",
+      vio_linear_velocity_rejections_);
+    status.add("invalid_tag_covariance_drops", invalid_tag_covariance_drops_);
+    status.add("vio_pose_gate_rejections", vio_pose_gate_rejections_);
+    status.add("vio_twist_gate_rejections", vio_twist_gate_rejections_);
     status.add("tag_gate_rejections", tag_gate_rejections_);
-    status.add("alignment_update_failures", alignment_update_failures_);
+    status.add("clock_discontinuities", clock_discontinuities_);
   }
 
   std::mutex mutex_;
-  tf2_ros::Buffer tf_buffer_;
-  tf2_ros::TransformListener tf_listener_;
-  diagnostic_updater::Updater updater_;
-  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr vio_sub_;
-  rclcpp::Subscription<robotcore_interfaces::msg::AprilTagPoseEstimate>::SharedPtr tag_sub_;
-  rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr fused_pub_;
-  rclcpp::Publisher<robotcore_interfaces::msg::BodyState>::SharedPtr body_pub_;
-  rclcpp::Publisher<robotcore_interfaces::msg::LocalizationStatus>::SharedPtr status_pub_;
-  rclcpp::TimerBase::SharedPtr output_timer_;
-
-  std::deque<VioSample> history_;
-  std::deque<std::int64_t> vio_arrivals_, tag_arrivals_, tag_frame_arrivals_, fused_arrivals_;
-  std::optional<Eigen::Isometry3d> base_from_vio_source_;
+  EkfNoise noise_;
+  VioTagEkf filter_;
+  std::optional<EkfState> anchor_state_;
+  std::deque<Measurement> measurements_;
+  std::optional<Measurement> latest_vio_;
   std::optional<Eigen::Isometry3d> map_from_odom_;
   Eigen::Matrix<double, 6, 6> alignment_covariance_{
-    Eigen::Matrix<double, 6, 6>::Identity()};
-  robotcore_interfaces::msg::AprilTagPoseEstimate last_tag_estimate_;
-  std::string cached_source_frame_, map_frame_, odom_frame_, base_frame_;
+    Eigen::Matrix<double, 6, 6>::Zero()};
+  std::deque<AlignmentCandidate> alignment_candidates_;
+  std::optional<Eigen::Isometry3d> base_from_vio_source_;
+  std::string cached_source_frame_;
+  tf2_ros::Buffer tf_buffer_;
+  tf2_ros::TransformListener tf_listener_;
 
   double history_duration_s_{};
   double vio_arrival_timeout_s_{};
   double vio_prediction_horizon_s_{};
   double tag_fresh_s_{};
-  double tag_innovation_gate_m_{};
-  double alignment_translation_walk_{};
-  double alignment_rotation_walk_{};
-  double vio_transport_s_{NAN};
-  double tag_transport_s_{NAN};
-  double last_tag_translation_residual_{NAN};
-  double last_tag_angle_residual_deg_{NAN};
+  double zed_status_timeout_s_{};
+  double pose_gate_chi2_{};
+  double twist_gate_chi2_{};
+  double linear_velocity_stddev_floor_mps_{};
+  double linear_velocity_correction_limit_mps_{};
+  double linear_velocity_innovation_limit_mps_{};
+  double tag_gate_chi2_{};
+  double initial_velocity_stddev_{};
+  double initial_angular_velocity_stddev_{};
+  bool require_zed_tracking_ok_{true};
+  std::string map_frame_;
+  std::string odom_frame_;
+  std::string base_frame_;
+  std::string twist_covariance_source_{"not received"};
 
-  std::int64_t last_vio_stamp_ns_{};
-  std::int64_t last_vio_arrival_ns_{};
-  std::int64_t last_tag_measurement_stamp_ns_{};
+  std::int64_t last_vio_measurement_stamp_ns_{};
+  std::int64_t last_vio_accepted_stamp_ns_{};
+  std::int64_t last_vio_accepted_arrival_ns_{};
+  std::int64_t last_zed_status_arrival_ns_{};
+  std::int64_t last_tag_candidate_stamp_ns_{};
   std::int64_t last_tag_stamp_ns_{};
   std::int64_t last_tag_arrival_ns_{};
   std::int64_t last_absolute_stamp_ns_{};
   std::int64_t last_tag_frame_arrival_ns_{};
-  std::int64_t last_alignment_stamp_ns_{};
-  std::int64_t status_period_ns_{100000000LL};
-  std::int64_t last_status_publish_ns_{};
+  std::uint8_t last_zed_odometry_status_{zed_msgs::msg::PosTrackStatus::UNAVAILABLE};
+  bool have_zed_status_{false};
+  double vio_transport_s_{NAN};
+  double tag_transport_s_{NAN};
+  double last_tag_translation_residual_{NAN};
+  double last_tag_angle_residual_deg_{NAN};
+  double last_vio_linear_velocity_innovation_mps_{NAN};
+  double last_vio_linear_velocity_correction_mps_{NAN};
   std::uint64_t last_tag_map_generation_{};
-  std::uint64_t duplicate_or_old_vio_drops_{};
-  std::uint64_t invalid_vio_drops_{};
-  std::uint64_t transform_failures_{};
+  std::uint64_t measurement_sequence_{};
+  std::uint64_t delayed_measurement_replays_{};
   std::uint64_t timestamp_epoch_rejections_{};
-  std::uint64_t tag_without_vio_drops_{};
-  std::uint64_t duplicate_or_old_tag_drops_{};
+  std::uint64_t old_vio_drops_{};
+  std::uint64_t zed_status_rejections_{};
+  std::uint64_t invalid_vio_drops_{};
+  std::uint64_t invalid_vio_pose_covariance_drops_{};
+  std::uint64_t invalid_vio_twist_covariance_drops_{};
+  std::uint64_t measurement_outside_history_drops_{};
+  std::uint64_t old_tag_drops_{};
+  std::uint64_t invalid_tag_drops_{};
+  std::uint64_t invalid_tag_covariance_drops_{};
+  std::uint64_t vio_pose_gate_rejections_{};
+  std::uint64_t vio_twist_gate_rejections_{};
+  std::uint64_t vio_linear_velocity_correction_limits_{};
+  std::uint64_t vio_linear_velocity_rejections_{};
   std::uint64_t tag_gate_rejections_{};
-  std::uint64_t alignment_update_failures_{};
+  std::uint64_t transform_failures_{};
+  std::uint64_t clock_discontinuities_{};
+  std::size_t history_high_water_{};
+  RosClockOffsetJumpDetector clock_jump_detector_;
+
+  std::deque<std::int64_t> vio_arrivals_;
+  std::deque<std::int64_t> tag_arrivals_;
+  std::deque<std::int64_t> tag_frame_arrivals_;
+  std::deque<std::int64_t> body_state_arrivals_;
+  robotcore_interfaces::msg::AprilTagPoseEstimate last_tag_estimate_;
+
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr vio_sub_;
+  rclcpp::Subscription<robotcore_interfaces::msg::AprilTagPoseEstimate>::SharedPtr tag_sub_;
+  rclcpp::Subscription<zed_msgs::msg::PosTrackStatus>::SharedPtr zed_status_sub_;
+  rclcpp::Publisher<robotcore_interfaces::msg::BodyState>::SharedPtr body_pub_;
+  rclcpp::Publisher<robotcore_interfaces::msg::LocalizationStatus>::SharedPtr status_pub_;
+  rclcpp::TimerBase::SharedPtr output_timer_;
+  diagnostic_updater::Updater updater_;
 };
 }  // namespace robotcore_sensors
 

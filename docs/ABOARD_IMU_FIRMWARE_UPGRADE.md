@@ -29,17 +29,23 @@ RobotCore does not treat this legacy frame-3 path as a production IMU input.
 | Sensor rate | 100 Hz (`0x0C = 0x06`) |
 | Aquaboard to Jetson | UART6 at 115200 baud |
 | Frame-4 delivery | once per new IMU sample, approximately 100 Hz |
-| Integrity | version 1, valid flag, CRC16-CCITT |
+| Integrity | version 2, sample-valid and attitude-valid flags, CRC16-CCITT |
 | Time/sequence | uint32 extension of the source counter and uint32 MCU sample tick |
 
-The versioned 27-byte wire layout is:
+The versioned 33-byte wire layout is:
 
-`FF F8 04 | version=1 | flags | uint32 counter | uint32 tick_ms | 3×int16 gyro | 3×int16 accel | CRC16-CCITT`
+`FF F8 04 | version=2 | flags | uint32 counter | uint32 tick_ms | 3×int16 gyro | 3×int16 accel | 3×int16 RPY | CRC16-CCITT`
 
-The six data values use:
+The data words use:
 
 - words 0--2: gyro xyz in centi-degrees/second;
 - words 3--5: acceleration xyz in milli-g.
+- words 6--8: roll, pitch, yaw in centi-degrees.
+
+Flag bit 0 marks a valid inertial sample and bit 1 marks valid native attitude.
+The 33-byte IMU-family `0x70` input has no attitude, so bit 1 is clear. The
+connected VG/AH/MINS mode `0x06` packet supplies PITCH/ROLL/YAW and sets bit 1;
+neither firmware nor host synthesizes missing attitude with an AHRS.
 
 ## Safe baud transition
 
@@ -62,7 +68,8 @@ maximum rate is product-dependent.
 - For the connected sensor, decode the packed-BCD `000`--`255` counter from
   bytes 43--44 of the 48-byte `0x59` packet and extend its 8-bit wrap to
   uint32. The IMU-family 33-byte `0x70` packet uses bytes 28--29 similarly.
-- Atomically copy gyro, acceleration, source counter, and receive tick.
+- Atomically copy gyro, acceleration, canonical roll/pitch/yaw, both validity
+  flags, source counter, and receive tick.
 - Enqueue frame 4 only when that counter changes. Do not publish the latest
   sample from an unrelated periodic telemetry loop.
 - Production UART6 emits only frame 4 at up to 100 Hz and protocol-v2 status at
@@ -72,9 +79,10 @@ maximum rate is product-dependent.
 
 At 100 Hz, the connected sensor's 48-byte receive packet uses about 48 kbit/s
 on UART8. A
-27-byte frame 4 at 100 Hz uses about 27 kbit/s on UART6. Together with the
-48-byte status at 20 Hz, UART6 TX uses 31.8% of an 8N1 115200-baud line; a
-coincident 75-byte burst serializes in 6.51 ms.
+33-byte frame 4 at 100 Hz uses about 33 kbit/s on UART6. Together with the
+48-byte status at 20 Hz and 37-byte runtime frame at 2 Hz, UART6 TX uses 37.6%
+of an 8N1 115200-baud line; a coincident 81-byte IMU/status burst serializes in
+7.03 ms.
 
 ## Hardware acceptance
 
@@ -85,9 +93,12 @@ With thrusters disarmed and the vehicle stationary:
    25 ms.
 3. Verify no duplicate counter, and account for every counter skip.
 4. Verify acceleration norm is close to local gravity and gyro is stationary.
-5. Rotate each physical positive axis separately and confirm its ROS FLU sign.
-6. Record gyro bias/noise, mounting RPY, and end-to-end arrival latency.
-7. Run the RobotCore 60 Hz estimator check for at least 60 seconds.
+5. Verify attitude-valid is set, quaternion norm is one, and level RPY is near
+   the independently measured mounting attitude.
+6. Rotate each physical positive axis separately and confirm gyro and native
+   roll/pitch/yaw ROS FLU signs.
+7. Record gyro bias/noise, attitude noise, mounting RPY, and end-to-end arrival latency.
+8. Run the RobotCore 60 Hz estimator check for at least 60 seconds.
 
 ## Historical 2026-08-02 baseline (superseded)
 

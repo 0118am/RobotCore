@@ -8,10 +8,8 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <stdexcept>
 #include <unordered_map>
 #include <utility>
-#include <vector>
 
 #include "rclcpp/rclcpp.hpp"
 #include "robotcore_interfaces/msg/body_state.hpp"
@@ -20,7 +18,6 @@
 #include "robotcore_interfaces/msg/thruster_command.hpp"
 #include "robotcore_interfaces/msg/trajectory_target.hpp"
 #include "robotcore_interfaces/srv/set_control_authority.hpp"
-#include "std_msgs/msg/float64.hpp"
 
 using namespace std::chrono_literals;
 
@@ -43,43 +40,24 @@ public:
     evaluation_rate_hz_ = std::max(1.0, declare_parameter("evaluation_rate_hz", 100.0));
     publish_rate_hz_ = std::max(1.0, declare_parameter("publish_rate_hz", 50.0));
     status_rate_hz_ = std::max(0.1, declare_parameter("status_publish_rate_hz", 10.0));
-    candidate_timeout_s_ = declare_parameter("candidate_timeout_s", 0.10);
+    source_command_timeout_s_ = declare_parameter("source_command_timeout_s", 0.10);
     state_timeout_s_ = declare_parameter("state_timeout_s", 0.15);
     target_timeout_s_ = declare_parameter("target_timeout_s", 0.15);
     safety_timeout_s_ = declare_parameter("safety_heartbeat_timeout_s", 0.25);
     const auto pwm_limit_us = declare_parameter("pwm_limit_us", 200.0);
     automatic_limit_ = std::clamp(std::abs(pwm_limit_us) / 500.0, 0.0, 0.4);
     allow_rl_ = declare_parameter("allow_rl_hardware", false);
-    pool_configured_ = declare_parameter("pool_bounds_configured", false);
-    pool_min_ = vector3_parameter("pool_min_xyz");
-    pool_max_ = vector3_parameter("pool_max_xyz");
 
     command_pub_ = create_publisher<ThrusterCommand>(
       "/control/thruster_cmd", rclcpp::QoS(rclcpp::KeepLast(1)).reliable());
-    ui_command_pub_ = create_publisher<ThrusterCommand>(
-      declare_parameter<std::string>("ui_command_topic", "/ui/thruster_cmd"),
-      rclcpp::QoS(rclcpp::KeepLast(1)).reliable());
     status_pub_ = create_publisher<AuthorityStatus>(
       "/control/authority/status", rclcpp::QoS(rclcpp::KeepLast(1)).reliable());
-    pwm_limit_sub_ = create_subscription<std_msgs::msg::Float64>(
-      "/control/pwm_limit_us",
-      rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local(),
-      [this](const std_msgs::msg::Float64::SharedPtr message) {
-        if (!std::isfinite(message->data) || message->data < 0.0 || message->data > 200.0) {
-          RCLCPP_WARN(get_logger(), "ignored invalid PWM limit %.3f us", message->data);
-          return;
-        }
-        automatic_limit_ = message->data / 500.0;
-      });
-
-    for (std::size_t i = 0; i < sources_.size(); ++i) {
-      const auto source = sources_[i];
-      candidate_subs_[i] = create_subscription<ThrusterCommand>(
-        "/control/candidates/" + source, rclcpp::QoS(rclcpp::KeepLast(1)),
-        [this, source](ThrusterCommand::SharedPtr message) {
-          candidates_[source] = TimedCandidate{std::move(message), SteadyClock::now()};
-        });
-    }
+    manual_command_sub_ = create_source_subscription(
+      "/control/manual/thruster_cmd", "manual", "web_operator");
+    pid_command_sub_ = create_source_subscription(
+      "/control/pid/thruster_cmd", "pid", "pid_controller");
+    rl_command_sub_ = create_source_subscription(
+      "/control/rl/thruster_cmd", "rl", "rl_action_adapter");
     body_sub_ = create_subscription<BodyState>(
       "/robot/body_state", rclcpp::QoS(rclcpp::KeepLast(1)),
       [this](BodyState::SharedPtr message) {
@@ -116,18 +94,9 @@ public:
   }
 
 private:
-  struct TimedCandidate {ThrusterCommand::SharedPtr message; SteadyClock::time_point stamp;};
+  struct TimedSourceCommand {ThrusterCommand::SharedPtr message; SteadyClock::time_point stamp;};
   struct TimedBody {BodyState::SharedPtr message; SteadyClock::time_point stamp;};
   struct TimedTarget {TrajectoryTarget::SharedPtr message; SteadyClock::time_point stamp;};
-
-  std::array<double, 3> vector3_parameter(const std::string & name)
-  {
-    const auto values = declare_parameter<std::vector<double>>(name, {0.0, 0.0, 0.0});
-    if (values.size() != 3U) {
-      throw std::invalid_argument(name + " must contain exactly three values");
-    }
-    return {values[0], values[1], values[2]};
-  }
 
   static double age_s(
     const std::optional<SteadyClock::time_point> & stamp, SteadyClock::time_point now)
@@ -148,30 +117,52 @@ private:
     return source == "manual" || source == "pid" || source == "rl";
   }
 
-  std::string candidate_integrity_failure(
+  rclcpp::Subscription<ThrusterCommand>::SharedPtr create_source_subscription(
+    const std::string & topic, const std::string & source, const std::string & producer)
+  {
+    return create_subscription<ThrusterCommand>(
+      topic, rclcpp::QoS(rclcpp::KeepLast(1)).reliable(),
+      [this, source, producer](ThrusterCommand::SharedPtr message) {
+        if (message->source != producer) {
+          RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 2000,
+            "ignored %s command from unexpected producer '%s'",
+            source.c_str(), message->source.c_str());
+          return;
+        }
+        source_commands_[source] =
+          TimedSourceCommand{std::move(message), SteadyClock::now()};
+      });
+  }
+
+  std::string source_command_integrity_failure(
     const std::string & source, SteadyClock::time_point now) const
   {
-    const auto item = candidates_.find(source);
-    if (item == candidates_.end() ||
-      std::chrono::duration<double>(now - item->second.stamp).count() > candidate_timeout_s_)
+    const auto item = source_commands_.find(source);
+    if (item == source_commands_.end() ||
+      std::chrono::duration<double>(now - item->second.stamp).count() >
+      source_command_timeout_s_)
     {
-      return source + " candidate is missing or stale";
+      return source + " command is missing or stale";
     }
     const auto expected = expected_producers_.find(source);
     if (expected == expected_producers_.end() || item->second.message->source != expected->second) {
-      return "unexpected candidate producer: " + item->second.message->source;
+      return "unexpected command producer: " + item->second.message->source;
     }
     for (const auto value : item->second.message->normalized) {
-      if (!std::isfinite(value)) {return "candidate command is not eight finite values";}
+      if (!std::isfinite(value)) {return "source command is not eight finite values";}
     }
     return {};
   }
 
-  std::string candidate_failure(const std::string & source, SteadyClock::time_point now) const
+  std::string source_command_failure(
+    const std::string & source, SteadyClock::time_point now) const
   {
-    auto reason = candidate_integrity_failure(source, now);
+    auto reason = source_command_integrity_failure(source, now);
     if (!reason.empty()) {return reason;}
-    if (!candidates_.at(source).message->enable) {return source + " candidate is not ready";}
+    if (!source_commands_.at(source).message->enable) {
+      return source + " command is not ready";
+    }
     return {};
   }
 
@@ -185,21 +176,8 @@ private:
     return {};
   }
 
-  bool inside_pool() const
-  {
-    if (!body_) {return false;}
-    const auto & p = body_->message->pose.position;
-    const std::array<double, 3> point{p.x, p.y, p.z};
-    for (std::size_t i = 0; i < 3; ++i) {
-      if (!std::isfinite(point[i]) || !(pool_min_[i] < pool_max_[i]) ||
-        point[i] < pool_min_[i] || point[i] > pool_max_[i]) {return false;}
-    }
-    return true;
-  }
-
   std::string automatic_failure(SteadyClock::time_point now) const
   {
-    if (!pool_configured_) {return "pool bounds are not configured";}
     if (!body_ || std::chrono::duration<double>(now - body_->stamp).count() > state_timeout_s_) {
       return "body state is missing or stale";
     }
@@ -211,7 +189,6 @@ private:
     if (!body.linear_velocity_valid) {return "linear velocity is invalid";}
     if (!body.state_valid && !body.position_estimated) {return "localization is invalid";}
     if (!target_->message->valid) {return "trajectory target is invalid";}
-    if (!inside_pool()) {return "vehicle is outside configured pool bounds";}
     return {};
   }
 
@@ -219,7 +196,7 @@ private:
   {
     auto reason = common_failure(now);
     if (!reason.empty()) {return reason;}
-    reason = candidate_failure(selected_source_, now);
+    reason = source_command_failure(selected_source_, now);
     if (!reason.empty()) {return reason;}
     return selected_source_ == "manual" ? std::string{} : automatic_failure(now);
   }
@@ -227,13 +204,14 @@ private:
   std::string manual_idle_reason(SteadyClock::time_point now) const
   {
     if (selected_source_ != "manual") {return {};}
-    const auto item = candidates_.find("manual");
-    if (item == candidates_.end() ||
-      std::chrono::duration<double>(now - item->second.stamp).count() > candidate_timeout_s_)
+    const auto item = source_commands_.find("manual");
+    if (item == source_commands_.end() ||
+      std::chrono::duration<double>(now - item->second.stamp).count() >
+      source_command_timeout_s_)
     {
-      return "manual candidate is missing or stale";
+      return "manual command is missing or stale";
     }
-    if (!item->second.message->enable) {return "manual candidate is not ready";}
+    if (!item->second.message->enable) {return "manual command is not ready";}
     return {};
   }
 
@@ -242,6 +220,16 @@ private:
     return target_ &&
       std::chrono::duration<double>(now - target_->stamp).count() <= target_timeout_s_ &&
       target_->message->valid && lower(target_->message->trajectory_type) == "altitude_hold";
+  }
+
+  static std::array<double, 8> altitude_manual_surge_yaw(
+    const ThrusterCommand & manual)
+  {
+    const auto & values = manual.normalized;
+    const double surge = 0.25 * (-values[4] - values[5] + values[6] + values[7]);
+    const double yaw = 0.25 * (-values[4] + values[5] + values[6] - values[7]);
+    return {0.0, 0.0, 0.0, 0.0,
+      -surge - yaw, -surge + yaw, surge + yaw, surge - yaw};
   }
 
   void trip(const std::string & code, const std::string & message, bool publish = true)
@@ -271,11 +259,29 @@ private:
     response.selected_source = selected_source_;
     response.armed = armed_;
     response.fault_latched = fault_latched_;
+    response.pwm_limit_us = automatic_limit_ * 500.0;
     response.message = text;
   }
 
   void on_set_authority(const SetAuthority::Request & request, SetAuthority::Response & response)
   {
+    if (request.update_pwm_limit) {
+      if (!request.source.empty() || request.arm || request.clear_fault) {
+        fill_response(response, false, "PWM limit update cannot change authority state");
+        return;
+      }
+      if (!std::isfinite(request.pwm_limit_us) ||
+        request.pwm_limit_us < 0.0 || request.pwm_limit_us > 200.0)
+      {
+        fill_response(response, false, "PWM limit must be finite and within 0..200 us");
+        return;
+      }
+      automatic_limit_ = request.pwm_limit_us / 500.0;
+      message_ = "PWM limit set to " + std::to_string(request.pwm_limit_us) + " us";
+      fill_response(response, true, message_);
+      publish_status(SteadyClock::now());
+      return;
+    }
     auto requested = lower(request.source.empty() ? selected_source_ : request.source);
     if (!supported(requested)) {
       message_ = "unsupported source: " + requested;
@@ -316,14 +322,15 @@ private:
   {
     const auto steady_now = SteadyClock::now();
 
-    const auto manual_reason = candidate_integrity_failure("manual", steady_now);
-    const auto manual_item = candidates_.find("manual");
+    const auto manual_reason = source_command_integrity_failure("manual", steady_now);
+    const auto manual_item = source_commands_.find("manual");
     const bool manual_active = manual_reason.empty() && manual_item->second.message->enable;
     const bool hybrid_altitude_hold = armed_ && selected_source_ == "pid" &&
       manual_active && altitude_hold_target_active(steady_now);
     const bool manual_override = armed_ && selected_source_ != "manual" && manual_active &&
       !hybrid_altitude_hold;
-    active_source_ = manual_override ? "manual" : selected_source_;
+    active_source_ = hybrid_altitude_hold ? "pid+manual" :
+      (manual_override ? "manual" : selected_source_);
     bool output_allowed = armed_;
     std::string idle_reason;
 
@@ -339,10 +346,16 @@ private:
       }
     }
     if (output_allowed && idle_reason.empty()) {
-      const auto & values = candidates_.at(active_source_).message->normalized;
       const auto limit = std::abs(automatic_limit_);
+      const auto altitude_manual = hybrid_altitude_hold ?
+        altitude_manual_surge_yaw(*source_commands_.at("manual").message) :
+        std::array<double, 8>{};
+      const auto & selected_values = source_commands_.at(
+        hybrid_altitude_hold ? "pid" : active_source_).message->normalized;
       for (std::size_t i = 0; i < output_.size(); ++i) {
-        output_[i] = std::clamp(static_cast<double>(values[i]), -limit, limit);
+        const double value = hybrid_altitude_hold && i >= 4U ?
+          altitude_manual[i] : static_cast<double>(selected_values[i]);
+        output_[i] = std::clamp(value, -limit, limit);
       }
       message_ = manual_override ?
         "armed " + selected_source_ + "; manual LB override" :
@@ -378,9 +391,9 @@ private:
     status.armed = armed_; status.arm_generation = arm_generation_;
     status.abort_active = abort_active_; status.fault_latched = fault_latched_;
     status.fault_code = fault_code_; status.message = message_;
-    const auto selected = candidates_.find(selected_source_);
-    status.candidate_age_s = age_s(
-      selected == candidates_.end() ? std::optional<SteadyClock::time_point>{} :
+    const auto selected = source_commands_.find(selected_source_);
+    status.selected_command_age_s = age_s(
+      selected == source_commands_.end() ? std::optional<SteadyClock::time_point>{} :
       std::optional<SteadyClock::time_point>{selected->second.stamp}, steady_now);
     status.body_state_age_s = age_s(
       body_ ? std::optional<SteadyClock::time_point>{body_->stamp} : std::nullopt, steady_now);
@@ -388,40 +401,34 @@ private:
       target_ ? std::optional<SteadyClock::time_point>{target_->stamp} : std::nullopt, steady_now);
     status.command_limit = automatic_limit_; status.command_slew_rate = 0.0;
     status.localization_source = body_ ? body_->message->localization_source : "";
-    status.pool_bounds_configured = pool_configured_;
     status_pub_->publish(status);
-    if (ui_command_pub_->get_subscription_count() > 0U) {
-      ui_command_pub_->publish(make_command(output_enabled_));
-    }
   }
 
-  const std::array<std::string, 3> sources_{"manual", "pid", "rl"};
   const std::unordered_map<std::string, std::string> expected_producers_{
     {"manual", "web_operator"}, {"pid", "pid_controller"}, {"rl", "rl_action_adapter"}};
-  std::unordered_map<std::string, TimedCandidate> candidates_;
+  std::unordered_map<std::string, TimedSourceCommand> source_commands_;
   std::optional<TimedBody> body_;
   std::optional<TimedTarget> target_;
   std::optional<SteadyClock::time_point> safety_stamp_;
   std::array<double, 8> output_{};
-  std::array<double, 3> pool_min_{}, pool_max_{};
   std::string selected_source_{"manual"}, active_source_{"manual"};
   std::string fault_code_, message_{"disarmed"};
   bool armed_{false}, abort_active_{false}, fault_latched_{false};
   bool output_enabled_{false};
-  bool absolute_localization_seen_{false}, allow_rl_{false}, pool_configured_{false};
+  bool absolute_localization_seen_{false}, allow_rl_{false};
   std::uint64_t arm_generation_{0U};
   double evaluation_rate_hz_{}, publish_rate_hz_{}, status_rate_hz_{};
-  double candidate_timeout_s_{}, state_timeout_s_{}, target_timeout_s_{}, safety_timeout_s_{};
+  double source_command_timeout_s_{}, state_timeout_s_{}, target_timeout_s_{}, safety_timeout_s_{};
   double automatic_limit_{};
 
   rclcpp::Publisher<ThrusterCommand>::SharedPtr command_pub_;
-  rclcpp::Publisher<ThrusterCommand>::SharedPtr ui_command_pub_;
   rclcpp::Publisher<AuthorityStatus>::SharedPtr status_pub_;
-  std::array<rclcpp::Subscription<ThrusterCommand>::SharedPtr, 3> candidate_subs_;
+  rclcpp::Subscription<ThrusterCommand>::SharedPtr manual_command_sub_;
+  rclcpp::Subscription<ThrusterCommand>::SharedPtr pid_command_sub_;
+  rclcpp::Subscription<ThrusterCommand>::SharedPtr rl_command_sub_;
   rclcpp::Subscription<BodyState>::SharedPtr body_sub_;
   rclcpp::Subscription<TrajectoryTarget>::SharedPtr target_sub_;
   rclcpp::Subscription<SafetyEvent>::SharedPtr safety_sub_;
-  rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr pwm_limit_sub_;
   rclcpp::Service<SetAuthority>::SharedPtr authority_service_;
   rclcpp::TimerBase::SharedPtr evaluation_timer_, command_timer_, status_timer_;
 };

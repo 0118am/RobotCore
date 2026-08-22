@@ -16,7 +16,6 @@
   <exec_depend>robotcore_runtime</exec_depend>
   <exec_depend>robotcore_sensors</exec_depend>
   <exec_depend>isaac_ros_apriltag</exec_depend>
-  <exec_depend>isaac_ros_image_proc</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>rclcpp_components</exec_depend>

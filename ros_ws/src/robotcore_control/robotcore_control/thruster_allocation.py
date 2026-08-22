@@ -105,6 +105,25 @@ class VectorThruster:
         pwm_offset = math.copysign(self.deadband_us + abs(value), value)
         return float(np.clip(pwm_offset / self.hardware_span_us, -1.0, 1.0))
 
+    def normalized_effective_bounds(
+        self, command_limit: float
+    ) -> tuple[float, float]:
+        """Convert a live normalized PWM bound into nonlinear-solver bounds."""
+
+        limit_us = abs(float(command_limit)) * self.hardware_span_us
+        reverse_effective = max(
+            0.0,
+            min(self.reverse_effective_limit_us, limit_us - self.deadband_us),
+        )
+        forward_effective = max(
+            0.0,
+            min(self.forward_effective_limit_us, limit_us - self.deadband_us),
+        )
+        return (
+            -reverse_effective / self.reverse_effective_limit_us,
+            forward_effective / self.forward_effective_limit_us,
+        )
+
     def wrench_for_effective(self, effective_us: float) -> np.ndarray:
         force = self.force_vector_for_effective(effective_us)
         return np.concatenate([force, np.cross(self.position_m, force)])
@@ -265,14 +284,65 @@ class ThrusterAllocator:
             config_hash=config_hash,
         )
 
-    def allocate(self, wrench: Iterable[float]) -> AllocationResult:
+    def allocate(
+        self,
+        wrench: Iterable[float],
+        *,
+        command_limit: float | None = None,
+    ) -> AllocationResult:
         target = vec(wrench, 6)
+        if command_limit is not None and (
+            not math.isfinite(command_limit) or command_limit < 0.0
+        ):
+            raise ValueError("command_limit must be finite and non-negative")
         if self.vector_mode:
-            return self._allocate_vector_model(target)
+            return self._allocate_vector_model(
+                target, command_limit=command_limit
+            )
         weighted_target = self.axis_weights * target
+        lower_bounds = self.lower_bounds
+        upper_bounds = self.upper_bounds
+        if command_limit is not None:
+            native_limit = abs(float(command_limit))
+            lower_bounds = np.asarray(
+                [
+                    np.interp(
+                        max(float(item.command_curve[0]), -native_limit),
+                        item.command_curve,
+                        item.thrust_curve_n,
+                    )
+                    for item in self.thrusters
+                ],
+                dtype=np.float64,
+            )
+            upper_bounds = np.asarray(
+                [
+                    np.interp(
+                        min(float(item.command_curve[-1]), native_limit),
+                        item.command_curve,
+                        item.thrust_curve_n,
+                    )
+                    for item in self.thrusters
+                ],
+                dtype=np.float64,
+            )
+            if np.allclose(lower_bounds, upper_bounds, atol=1e-12):
+                forces = 0.5 * (lower_bounds + upper_bounds)
+                achieved = self.matrix @ forces
+                return AllocationResult(
+                    commands=tuple(
+                        item.force_to_command(float(forces[index]))
+                        for index, item in enumerate(self.thrusters)
+                    ),
+                    forces_n=tuple(float(value) for value in forces),
+                    residual=float(
+                        np.linalg.norm(self.axis_weights * (target - achieved))
+                    ),
+                    saturation_fraction=float(np.linalg.norm(target) > 1e-9),
+                )
         forces = self.unconstrained_gain @ weighted_target
         if not np.all(
-            (forces >= self.lower_bounds) & (forces <= self.upper_bounds)
+            (forces >= lower_bounds) & (forces <= upper_bounds)
         ):
             # Saturation is uncommon in tuned operation but it must be solved
             # globally when it occurs. SciPy's bounded-variable least-squares
@@ -283,7 +353,7 @@ class ThrusterAllocator:
             solution = lsq_linear(
                 self.solver_matrix,
                 solver_target,
-                bounds=(self.lower_bounds, self.upper_bounds),
+                bounds=(lower_bounds, upper_bounds),
                 method="bvls",
                 tol=1e-8,
                 max_iter=16,
@@ -296,8 +366,8 @@ class ThrusterAllocator:
         achieved = self.matrix @ forces
         residual = float(np.linalg.norm(self.axis_weights * (target - achieved)))
         at_limit = np.logical_or(
-            np.isclose(forces, self.lower_bounds, atol=1e-6),
-            np.isclose(forces, self.upper_bounds, atol=1e-6),
+            np.isclose(forces, lower_bounds, atol=1e-6),
+            np.isclose(forces, upper_bounds, atol=1e-6),
         )
         commands = tuple(
             item.force_to_command(float(forces[index]))
@@ -324,7 +394,11 @@ class ThrusterAllocator:
         return achieved
 
     def allocate_subset(
-        self, wrench: Iterable[float], channels: Iterable[int]
+        self,
+        wrench: Iterable[float],
+        channels: Iterable[int],
+        *,
+        command_limit: float | None = None,
     ) -> AllocationResult:
         """Allocate a wrench while keeping every channel outside ``channels`` neutral."""
 
@@ -333,20 +407,51 @@ class ThrusterAllocator:
         active = tuple(sorted({int(channel) for channel in channels}))
         if not active or any(channel < 0 or channel >= 8 for channel in active):
             raise ValueError("active thruster channels must be a non-empty subset of 0..7")
-        return self._allocate_vector_model(vec(wrench, 6), active_channels=active)
+        return self._allocate_vector_model(
+            vec(wrench, 6),
+            active_channels=active,
+            command_limit=command_limit,
+        )
 
     def _allocate_vector_model(
         self,
         target: np.ndarray,
         active_channels: tuple[int, ...] | None = None,
+        command_limit: float | None = None,
     ) -> AllocationResult:
         weighted_target = self.axis_weights * target
         active = tuple(range(8)) if active_channels is None else active_channels
-        full_seed = np.clip(self.unconstrained_gain @ weighted_target, -1.0, 1.0)
+        if command_limit is None:
+            lower_bounds = -np.ones(len(active), dtype=np.float64)
+            upper_bounds = np.ones(len(active), dtype=np.float64)
+        else:
+            live_bounds = [
+                self.thrusters[channel].normalized_effective_bounds(command_limit)
+                for channel in active
+            ]
+            lower_bounds = np.asarray(
+                [bounds[0] for bounds in live_bounds], dtype=np.float64
+            )
+            upper_bounds = np.asarray(
+                [bounds[1] for bounds in live_bounds], dtype=np.float64
+            )
+            if np.allclose(lower_bounds, upper_bounds, atol=1e-12):
+                commands = np.zeros(8, dtype=np.float64)
+                return AllocationResult(
+                    commands=tuple(float(value) for value in commands),
+                    forces_n=tuple(float(value) for value in commands),
+                    residual=float(np.linalg.norm(weighted_target)),
+                    saturation_fraction=float(np.linalg.norm(target) > 1e-9),
+                )
+        full_seed = self.unconstrained_gain @ weighted_target
         if np.linalg.norm(self._last_vector_solution) > 1e-8:
             full_seed = self._last_vector_solution.copy()
         active_index = np.asarray(active, dtype=np.int64)
-        seed = full_seed[active_index]
+        seed = np.clip(
+            full_seed[active_index],
+            lower_bounds + 1e-12,
+            upper_bounds - 1e-12,
+        )
 
         def achieved_for(values):
             achieved = np.zeros(6, dtype=np.float64)
@@ -392,7 +497,7 @@ class ThrusterAllocator:
             objective,
             seed,
             jac=jacobian,
-            bounds=(-np.ones(len(active)), np.ones(len(active))),
+            bounds=(lower_bounds, upper_bounds),
             method="trf",
             max_nfev=12,
             ftol=1e-6,
@@ -405,7 +510,9 @@ class ThrusterAllocator:
         if not np.all(np.isfinite(solution.x)):
             raise RuntimeError(f"nonlinear thruster allocation failed: {solution.message}")
         normalized_effective = np.zeros(8, dtype=np.float64)
-        normalized_effective[active_index] = np.clip(solution.x, -1.0, 1.0)
+        normalized_effective[active_index] = np.clip(
+            solution.x, lower_bounds, upper_bounds
+        )
         self._last_vector_solution = normalized_effective
         achieved = achieved_for(normalized_effective[active_index])
         commands = []
@@ -426,8 +533,17 @@ class ThrusterAllocator:
             residual=residual,
             saturation_fraction=float(
                 np.mean(
-                    np.isclose(
-                        np.abs(normalized_effective[active_index]), 1.0, atol=1e-6
+                    np.logical_or(
+                        np.isclose(
+                            normalized_effective[active_index],
+                            lower_bounds,
+                            atol=1e-6,
+                        ),
+                        np.isclose(
+                            normalized_effective[active_index],
+                            upper_bounds,
+                            atol=1e-6,
+                        ),
                     )
                 )
             ),

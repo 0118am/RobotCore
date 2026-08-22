@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Verify 60 Hz fused output while AprilTag is absent and VIO remains available.
+"""Verify 60 Hz BodyState output while AprilTag is absent and VIO remains available.
 
 Never run this publisher in the production ROS domain. The probe publishes
-only the production localisation inputs: ZED VIO and AprilTag.
+only the production localisation inputs: ZED VIO/status and AprilTag.
 """
 
 from __future__ import annotations
@@ -15,6 +15,8 @@ import time
 import rclpy
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
+from rclpy.time import Time
+from zed_msgs.msg import PosTrackStatus
 
 from robotcore_interfaces.msg import AprilTagPoseEstimate, BodyState
 
@@ -31,37 +33,44 @@ class EstimatorRateCheck(Node):
         self.vio_publisher = self.create_publisher(
             Odometry, "/zedx/zed_node/odom", 10
         )
+        self.zed_status_publisher = self.create_publisher(
+            PosTrackStatus, "/zedx/zed_node/pose/status", 10
+        )
         self.tag_publisher = self.create_publisher(
             AprilTagPoseEstimate, "/localization/apriltag_pose", 10
         )
-        self.create_subscription(
-            Odometry, "/localization/fused_odom", self.on_fused_odometry, 100
-        )
         self.create_subscription(BodyState, "/robot/body_state", self.on_body_state, 100)
+        self.create_timer(1.0 / 30.0, self.publish_zed_status)
         self.create_timer(1.0 / 30.0, self.publish_vio)
         self.create_timer(1.0 / 30.0, self.publish_tag_anchor)
-        self.fused_arrival_ns: list[int] = []
-        self.fused_stamp_ns: list[int] = []
         self.body_arrival_ns: list[int] = []
         self.body_stamp_ns: list[int] = []
         self.body_velocity_x: list[float] = []
         self.body_velocity_valid: list[bool] = []
-        self.fused_frame_ids: list[str] = []
-        self.fused_tag_residual_x: list[float] = []
+        self.body_frame_ids: list[str] = []
+        self.body_tag_residual_x: list[float] = []
         self.body_state_valid: list[bool] = []
         self.body_position_estimated: list[bool] = []
         self.outlier_sent = False
+
+    def publish_zed_status(self):
+        """Mark synthetic VIO tracking as valid."""
+
+        message = PosTrackStatus()
+        message.odometry_status = PosTrackStatus.OK
+        self.zed_status_publisher.publish(message)
 
     def publish_vio(self):
         """Publish the continuous local pose/velocity source used after Tag loss."""
 
         now = self.get_clock().now()
-        elapsed_s = (now.nanoseconds - self.started_ns) * 1e-9
         message = Odometry()
-        message.header.stamp = now.to_msg()
+        measurement_ns = now.nanoseconds - 50_000_000
+        measurement_elapsed_s = (measurement_ns - self.started_ns) * 1e-9
+        message.header.stamp = Time(nanoseconds=measurement_ns).to_msg()
         message.header.frame_id = "odom"
         message.child_frame_id = "base_link"
-        message.pose.pose.position.x = 0.25 * elapsed_s
+        message.pose.pose.position.x = 0.25 * measurement_elapsed_s
         message.pose.pose.orientation.w = 1.0
         message.twist.twist.linear.x = 0.25
         for index in (0, 7, 14):
@@ -81,13 +90,15 @@ class EstimatorRateCheck(Node):
         if elapsed_s > 2.0:
             return
         message = AprilTagPoseEstimate()
-        message.header.stamp = now.to_msg()
+        measurement_ns = now.nanoseconds - 60_000_000
+        measurement_elapsed_s = (measurement_ns - self.started_ns) * 1e-9
+        message.header.stamp = Time(nanoseconds=measurement_ns).to_msg()
         message.header.frame_id = "map"
         message.map_generation = 1
         message.pose_valid = True
-        message.pose.pose.position.x = 0.25 * elapsed_s
+        message.pose.pose.position.x = 0.25 * measurement_elapsed_s
         # One isolated, internally consistent but globally impossible Tag pose
-        # must be rejected by the 0.5 m map-alignment innovation gate.
+        # must be rejected by the covariance-aware NIS gate.
         if elapsed_s >= 1.0 and not self.outlier_sent:
             message.pose.pose.position.x += 1.0
             self.outlier_sent = True
@@ -98,21 +109,17 @@ class EstimatorRateCheck(Node):
             message.pose.covariance[index] = 0.001
         self.tag_publisher.publish(message)
 
-    def on_fused_odometry(self, message: Odometry):
-        self.fused_arrival_ns.append(self.get_clock().now().nanoseconds)
-        measurement_stamp_ns = stamp_ns(message.header.stamp)
-        self.fused_stamp_ns.append(measurement_stamp_ns)
-        self.fused_frame_ids.append(message.header.frame_id)
-        elapsed_s = (measurement_stamp_ns - self.started_ns) * 1e-9
-        self.fused_tag_residual_x.append(
-            float(message.pose.pose.position.x) - 0.25 * elapsed_s
-        )
-
     def on_body_state(self, message: BodyState):
         self.body_arrival_ns.append(self.get_clock().now().nanoseconds)
-        self.body_stamp_ns.append(stamp_ns(message.header.stamp))
+        measurement_stamp_ns = stamp_ns(message.header.stamp)
+        self.body_stamp_ns.append(measurement_stamp_ns)
         self.body_velocity_x.append(float(message.twist.linear.x))
         self.body_velocity_valid.append(bool(message.linear_velocity_valid))
+        self.body_frame_ids.append(message.header.frame_id)
+        elapsed_s = (measurement_stamp_ns - self.started_ns) * 1e-9
+        self.body_tag_residual_x.append(
+            float(message.pose.position.x) - 0.25 * elapsed_s
+        )
         self.body_state_valid.append(bool(message.state_valid))
         self.body_position_estimated.append(bool(message.position_estimated))
 
@@ -135,27 +142,23 @@ class EstimatorRateCheck(Node):
         return min(deltas), sum(delta <= 0 for delta in deltas)
 
     def result(self) -> tuple[bool, str]:
-        fused_rate = self.rate_hz(self.fused_arrival_ns)
         body_rate = self.rate_hz(self.body_arrival_ns)
-        fused_min_delta, fused_nonmonotonic = self.stamp_delta_summary(
-            self.fused_stamp_ns
-        )
         body_min_delta, body_nonmonotonic = self.stamp_delta_summary(
             self.body_stamp_ns
         )
         velocity = statistics.median(self.body_velocity_x[-120:]) if self.body_velocity_x else math.nan
         tag_position_error = (
-            statistics.median(self.fused_tag_residual_x[-120:])
-            if self.fused_tag_residual_x
+            statistics.median(self.body_tag_residual_x[-120:])
+            if self.body_tag_residual_x
             else math.nan
         )
         maximum_tag_position_error = (
-            max(abs(error) for error in self.fused_tag_residual_x)
-            if self.fused_tag_residual_x
+            max(abs(error) for error in self.body_tag_residual_x)
+            if self.body_tag_residual_x
             else math.nan
         )
-        map_output = bool(self.fused_frame_ids) and all(
-            frame == "map" for frame in self.fused_frame_ids[-120:]
+        map_output = bool(self.body_frame_ids) and all(
+            frame == "map" for frame in self.body_frame_ids[-120:]
         )
         tag_lost_vio_valid = (
             bool(self.body_position_estimated)
@@ -164,11 +167,8 @@ class EstimatorRateCheck(Node):
             and all(self.body_velocity_valid[-120:])
         )
         success = (
-            len(self.fused_arrival_ns) >= 120
-            and len(self.body_arrival_ns) >= 120
-            and 57.0 <= fused_rate <= 63.0
+            len(self.body_arrival_ns) >= 120
             and 57.0 <= body_rate <= 63.0
-            and self.strictly_increasing(self.fused_stamp_ns)
             and self.strictly_increasing(self.body_stamp_ns)
             and math.isfinite(velocity)
             and abs(velocity - 0.25) <= 0.03
@@ -181,17 +181,13 @@ class EstimatorRateCheck(Node):
             and self.outlier_sent
         )
         summary = (
-            f"fused_count={len(self.fused_arrival_ns)} fused_rate_hz={fused_rate:.3f} "
-            f"body_count={len(self.body_arrival_ns)} body_rate_hz={body_rate:.3f} "
+            f"body_count={len(self.body_arrival_ns)} body_state_rate_hz={body_rate:.3f} "
             f"body_velocity_x_mps={velocity:.4f} "
             f"tag_position_error_m={tag_position_error:.4f} "
             f"maximum_tag_position_error_m={maximum_tag_position_error:.4f} "
             f"outlier_sent={self.outlier_sent} "
             f"map_output={map_output} tag_lost_vio_valid={tag_lost_vio_valid} "
-            f"fused_stamps_monotonic={self.strictly_increasing(self.fused_stamp_ns)} "
             f"body_stamps_monotonic={self.strictly_increasing(self.body_stamp_ns)} "
-            f"fused_min_stamp_delta_ns={fused_min_delta} "
-            f"fused_nonmonotonic_count={fused_nonmonotonic} "
             f"body_min_stamp_delta_ns={body_min_delta} "
             f"body_nonmonotonic_count={body_nonmonotonic}"
         )

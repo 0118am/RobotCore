@@ -33,8 +33,12 @@ def generate_launch_description():
                 default_value="/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B7A033320-if00",
             ),
             DeclareLaunchArgument("baud", default_value="115200"),
-            DeclareLaunchArgument("imu_raw_topic", default_value="/hardware/aboard_imu_raw"),
-            DeclareLaunchArgument("external_imu_topic", default_value="/sensors/external_imu"),
+            DeclareLaunchArgument(
+                "imu_yaw_offset_deg",
+                # Optional startup fallback. The bridge replaces it from live
+                # BodyState and raw IMU samples after every relocalization.
+                default_value="0.0",
+            ),
             DeclareLaunchArgument("front_camera_raw_topic", default_value="/zedx/zed_node/rgb/color/rect/image"),
             DeclareLaunchArgument(
                 "front_camera_compressed_topic",
@@ -52,14 +56,9 @@ def generate_launch_description():
                 "apriltag_detections_topic",
                 default_value="/localization/apriltag/detections",
             ),
-            DeclareLaunchArgument(
-                "apriltag_cuda_input_topic",
-                # This is a one-way GPU/NITROS intermediate: the converter
-                # publishes RGB8 and the CUDA detector consumes it.
-                default_value="/localization/apriltag/cuda_input_rgb",
-            ),
-            # ZED VIO supplies continuous local odometry and AprilTag supplies
-            # the absolute map alignment. External IMU remains telemetry only.
+            # ZED VIO supplies continuous local pose/twist and AprilTag supplies
+            # absolute map corrections. External IMU bypasses this EKF and goes
+            # directly to the control and operator paths.
             DeclareLaunchArgument("enable_fixed_rate_state_estimator", default_value="true"),
             DeclareLaunchArgument("zed_workspace", default_value="/home/nvidia/ros2_ws"),
             DeclareLaunchArgument(
@@ -70,12 +69,6 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument("zed_serial_number", default_value="50649148"),
             DeclareLaunchArgument("zed_camera_id", default_value="-1"),
-            DeclareLaunchArgument(
-                "external_imu_config",
-                default_value=PathJoinSubstitution(
-                    [FindPackageShare("robotcore_sensors"), "config", "external_imu.yaml"]
-                ),
-            ),
             DeclareLaunchArgument("apriltag_max_tags", default_value="24"),
             DeclareLaunchArgument(
                 "apriltag_tag_map_file",
@@ -166,30 +159,6 @@ def generate_launch_description():
                 parameters=[{"thread_num": 2}],
                 condition=IfCondition(LaunchConfiguration("enable_apriltag_localization")),
                 composable_node_descriptions=[
-                    # ZED publishes BGR8 NITROS images, while the CUDA
-                    # AprilTag node requests RGB8. Keep the conversion on GPU
-                    # so format negotiation succeeds without a CPU/DDS image
-                    # round trip.
-                    ComposableNode(
-                        package="isaac_ros_image_proc",
-                        plugin="nvidia::isaac_ros::image_proc::ImageFormatConverterNode",
-                        name="apriltag_cuda_rgb_converter",
-                        parameters=[{
-                            "encoding_desired": "rgb8",
-                            # Explicitly pin both ends. Without the input
-                            # constraint the compatible subscriber falls back
-                            # to RGB8 and cannot negotiate with ZED's BGR8
-                            # NITROS publisher.
-                            "image_raw_nitros_format": "nitros_image_bgr8",
-                            "image_nitros_format": "nitros_image_rgb8",
-                            "image_width": 960,
-                            "image_height": 600,
-                        }],
-                        remappings=[
-                            ("image_raw", LaunchConfiguration("front_camera_raw_topic")),
-                            ("image", LaunchConfiguration("apriltag_cuda_input_topic")),
-                        ],
-                    ),
                     ComposableNode(
                         package="isaac_ros_apriltag",
                         plugin="nvidia::isaac_ros::apriltag::AprilTagNode",
@@ -209,9 +178,10 @@ def generate_launch_description():
                             }
                         ],
                         remappings=[
-                            # The CUDA converter resolves ZED BGR8 to the RGB8
-                            # format required by AprilTag entirely in NITROS.
-                            ("image", LaunchConfiguration("apriltag_cuda_input_topic")),
+                            # ZED's 24-bit NITROS publisher already provides
+                            # GPU-resident BGR8, which cuAprilTags accepts
+                            # directly without an intermediate image topic.
+                            ("image", LaunchConfiguration("front_camera_raw_topic")),
                             ("camera_info", LaunchConfiguration("front_camera_info_topic")),
                             (
                                 "tag_detections",
@@ -265,27 +235,28 @@ def generate_launch_description():
                 composable_node_descriptions=[
                     ComposableNode(
                         package="robotcore_sensors",
-                        plugin="robotcore_sensors::ImuConditionerComponent",
-                        name="imu_conditioning",
-                        parameters=[LaunchConfiguration("external_imu_config"), {
-                            "input_topic": LaunchConfiguration("imu_raw_topic"),
-                            "output_topic": LaunchConfiguration("external_imu_topic"),
-                        }],
-                        extra_arguments=[{"use_intra_process_comms": True}],
-                    ),
-                    ComposableNode(
-                        package="robotcore_sensors",
                         plugin="robotcore_sensors::VioTagFusionComponent",
-                        name="vio_tag_fusion",
+                        name="ekf",
                         parameters=[{
                             "vio_topic": "/zedx/zed_node/odom",
                             "tag_topic": "/localization/apriltag_pose",
+                            "zed_tracking_status_topic": "/zedx/zed_node/pose/status",
                             "output_rate_hz": 60.0,
                             "history_duration_s": 3.0,
                             "tag_fresh_s": 0.35,
-                            "tag_innovation_gate_m": 0.50,
-                            "vio_arrival_timeout_s": 0.30,
-                            "vio_prediction_horizon_s": 0.50,
+                            # The deployed ZED stream is bursty at about 18 Hz
+                            # and has measured inter-arrival gaps up to 0.68 s.
+                            # Predict through those bounded gaps instead of
+                            # resetting height control on every burst cycle.
+                            "vio_arrival_timeout_s": 0.80,
+                            "vio_prediction_horizon_s": 0.80,
+                            "require_zed_tracking_ok": True,
+                            # ZED pose and twist are correlated: pose corrects
+                            # position only, while twist is the sole velocity
+                            # observation with bounded single-frame influence.
+                            "vio_linear_velocity_stddev_floor_mps": 0.10,
+                            "vio_linear_velocity_correction_limit_mps": 0.04,
+                            "vio_linear_velocity_innovation_limit_mps": 0.25,
                         }],
                         extra_arguments=[{"use_intra_process_comms": True}],
                     ),
@@ -297,7 +268,10 @@ def generate_launch_description():
                 name="trajectory_command",
                 output="screen",
                 condition=IfCondition(LaunchConfiguration("enable_pool_tracking")),
-                parameters=[LaunchConfiguration("pool_control_config")],
+                parameters=[
+                    LaunchConfiguration("pool_control_config"),
+                    {"imu_topic": "/sensors/external_imu"},
+                ],
             ),
             Node(
                 package="robotcore_runtime",
@@ -320,7 +294,8 @@ def generate_launch_description():
                         "thruster_config_path": LaunchConfiguration(
                             "thruster_config_path"
                         ),
-                        "control_rate_hz": 30.0,
+                        "control_rate_hz": 50.0,
+                        "imu_topic": "/sensors/external_imu",
                     }
                 ],
             ),
@@ -377,6 +352,9 @@ def generate_launch_description():
                     {
                         "serial_port": LaunchConfiguration("serial_port"),
                         "baud": ParameterValue(LaunchConfiguration("baud"), value_type=int),
+                        "imu_yaw_offset_deg": ParameterValue(
+                            LaunchConfiguration("imu_yaw_offset_deg"), value_type=float
+                        ),
                         "span_us": ParameterValue(
                             LaunchConfiguration("manual_thruster_span_us"),
                             value_type=int,
@@ -385,10 +363,6 @@ def generate_launch_description():
                             LaunchConfiguration("thruster_command_timeout_ms"),
                             value_type=int,
                         ),
-                        # C++ bridge accepts only versioned, CRC-valid frame-4
-                        # samples with authoritative MCU acquisition stamps.
-                        "imu_topic": LaunchConfiguration("imu_raw_topic"),
-                        "imu_frame_id": "aboard_imu_link",
                     }
                 ],
             ),
@@ -407,8 +381,8 @@ def generate_launch_description():
                         "localization_status_topic": "/localization/status",
                         "title": "RobotCore Operator",
                         "front_camera_compressed_topic": LaunchConfiguration("front_camera_compressed_topic"),
-                        "imu_topic": LaunchConfiguration("external_imu_topic"),
-                        "manual_thruster_topic": "/control/candidates/manual",
+                        "imu_topic": "/sensors/external_imu",
+                        "manual_thruster_command_topic": "/control/manual/thruster_cmd",
                     }
                 ],
             ),

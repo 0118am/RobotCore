@@ -37,8 +37,9 @@
 
     video:
       publish_rgb: true
-      # ZED otherwise publishes BGRA. BGR carries the same visible image with
-      # 25% fewer bytes and one less channel for every ROS/DDS copy.
+      # Retrieve LEFT_BGR directly into GPU memory. Isaac ROS cuAprilTags
+      # accepts BGR8, so the NITROS stream needs neither an alpha-channel
+      # removal nor an RGB channel swap.
       enable_24bit_output: true
       publish_left_right: false
       publish_raw: false
@@ -87,7 +88,9 @@
       area_memory: false
       reset_odom_with_loop_closure: false
       publish_odom_pose: true
-      publish_pose_cov: false
+      # Expose the SDK pose covariance explicitly as well as carrying it in
+      # the odometry message consumed by the VIO/Tag EKF.
+      publish_pose_cov: true
       publish_cam_path: false
 
     sensors:
@@ -114,8 +117,8 @@
       stream_enabled: false
 
     debug:
-      # AprilTag subscribes to the GPU-backed /nitros image.  The ZED wrapper
-      # retains only an on-demand JPEG transport for the operator switch.
+      # AprilTag consumes the GPU-backed BGR8 NITROS image directly. The ZED
+      # wrapper retains only an on-demand JPEG transport for the operator switch.
       disable_nitros: false
       # Preserve the SDK camera timestamp; replacing it with ROS now() would
       # turn processing and DDS queueing delay into a measurement-time error.

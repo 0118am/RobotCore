@@ -8,5 +8,5 @@ bool enable
 # enable. A bridge or board restart requires a later arm generation.
 bool armed
 uint64 arm_generation
-# Human-readable producer such as thruster_allocator or safety_monitor.
+# Exact producer identity, for example pid_controller or command_authority:pid.
 string source

@@ -30,8 +30,10 @@ constexpr std::uint8_t kMaximumSafetyReason = 6U;
 constexpr std::size_t kThrusterChannels = 8;
 constexpr std::size_t kCommandV2FrameSize = 34;
 constexpr std::size_t kStatusV2FrameSize = 48;
-constexpr std::size_t kImuV1FrameSize = 27;
+constexpr std::size_t kImuV2FrameSize = 33;
 constexpr std::uint8_t kImuFrameNumber = 0x04U;
+constexpr std::uint8_t kImuFlagValid = 0x01U;
+constexpr std::uint8_t kImuFlagAttitudeValid = 0x02U;
 constexpr std::uint8_t kRuntimeFrameNumber = 0x05U;
 constexpr std::size_t kRuntimeV1FrameSize = 37;
 
@@ -68,6 +70,8 @@ struct ImuFrame
   std::uint32_t sample_tick_ms{};
   std::array<double, 3> gyro_rad_s{};
   std::array<double, 3> accel_m_s2{};
+  std::array<double, 3> attitude_rpy_rad{};
+  bool attitude_valid{false};
 };
 
 struct RuntimeFrame
@@ -97,7 +101,11 @@ std::optional<BoardStatusFrame> parse_board_status_v2(
 bool board_status_matches_applied_command(
   const BoardStatusFrame & status, const CommandFrame & command);
 bool board_status_reason_flags_consistent(const BoardStatusFrame & status);
-std::optional<ImuFrame> parse_imu_v1(const std::uint8_t * data, std::size_t size);
+std::optional<ImuFrame> parse_imu_v2(const std::uint8_t * data, std::size_t size);
+std::array<double, 3> imu_vector_to_base_link(
+  const std::array<double, 3> & sensor_vector);
+std::array<double, 3> imu_attitude_rpy_to_base_link(
+  const std::array<double, 3> & sensor_rpy);
 std::optional<RuntimeFrame> parse_runtime_v1(const std::uint8_t * data, std::size_t size);
 
 class McuClockMapper

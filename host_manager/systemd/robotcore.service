@@ -1,8 +1,8 @@
 [Unit]
 Description=RobotCore ROS 2 robot graph
-After=network-online.target dev-robotcore-aboard.device nvargus-daemon.service robotcore-camera-ipc-ready.service robotcore-performance.service
-Wants=network-online.target nvargus-daemon.service robotcore-performance.service
-Requires=dev-robotcore-aboard.device robotcore-camera-ipc-ready.service
+After=network-online.target dev-robotcore-aboard.device nvargus-daemon.service zed_x_daemon.service robotcore-performance.service
+Wants=network-online.target robotcore-performance.service
+Requires=dev-robotcore-aboard.device nvargus-daemon.service zed_x_daemon.service
 PartOf=robotcore-stack.target
 StartLimitIntervalSec=60
 StartLimitBurst=10
@@ -39,7 +39,9 @@ Restart=always
 RestartSec=1
 TimeoutStopSec=20
 KillSignal=SIGINT
-KillMode=control-group
+# Let the outer launch process stop its children in dependency order.  On a
+# timeout systemd still kills every remaining process in the service cgroup.
+KillMode=mixed
 # Reserve six cores for the latency-sensitive graph; CPU 0-1 remain available
 # to the browser, journald, networking, and kernel work.
 CPUAffinity=2 3 4 5 6 7

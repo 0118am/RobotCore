@@ -49,7 +49,7 @@ def test_exact_payload_contract_passes_without_active_video_client():
 
     assert errors == []
     assert snapshot[graph_check.RAW_IMAGE]["publishers"] == [graph_check.ZED_NODE]
-    assert snapshot[graph_check.CUDA_INPUT]["subscribers"] == [
+    assert snapshot[graph_check.RAW_IMAGE]["subscribers"] == [
         graph_check.DETECTOR_NODE
     ]
     assert snapshot[graph_check.LOCALIZATION_STATUS]["publishers"] == [graph_check.FUSION_NODE]
@@ -57,13 +57,13 @@ def test_exact_payload_contract_passes_without_active_video_client():
 
 def test_feedback_or_second_consumer_fails_the_contract():
     node = FakeGraphNode()
-    node.subscribers[graph_check.CUDA_INPUT].add(graph_check.ZED_NODE)
+    node.subscribers[graph_check.RAW_IMAGE].add(graph_check.ZED_NODE)
 
     errors, _ = graph_check.validate(
         node, require_ui=True, require_ui_video=False
     )
 
-    assert any(graph_check.CUDA_INPUT in error for error in errors)
+    assert any(graph_check.RAW_IMAGE in error for error in errors)
 
 
 def test_active_video_requires_zed_publisher_and_ui_subscriber():

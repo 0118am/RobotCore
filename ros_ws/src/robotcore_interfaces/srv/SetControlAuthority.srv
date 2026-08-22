@@ -3,9 +3,13 @@ string source
 bool arm
 # Clear the command-authority fault latch. This never clears /safety/abort.
 bool clear_fault
+# Update only the shared actuator limit. Source/arm/fault fields must be idle.
+bool update_pwm_limit
+float64 pwm_limit_us
 ---
 bool accepted
 string selected_source
 bool armed
 bool fault_latched
+float64 pwm_limit_us
 string message

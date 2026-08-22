@@ -9,7 +9,6 @@ fi
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 unit_root=/etc/systemd/system
 config_root=/etc/robotcore
-libexec_root=/usr/local/libexec
 edge_env=${config_root}/edge.env
 
 robot_workspace=${repo_root}/ros_ws
@@ -120,22 +119,21 @@ runuser -u robotcore -- test -r "${zed_workspace}/install/setup.bash" || {
   exit 1
 }
 
-apt-get update
-apt-get install -y ros-humble-rmw-cyclonedds-cpp
-
 install -d -m 0750 "${config_root}"
 install -d -m 0755 "${unit_root}/robotcore.service.d"
-install -d -m 0755 "${libexec_root}"
-install -m 0755 "${repo_root}/host_manager/bin/robotcore-camera-ipc-ready" \
-  "${libexec_root}/robotcore-camera-ipc-ready"
+install -d -m 0755 "${unit_root}/nvargus-daemon.service.d"
+install -d -m 0755 "${unit_root}/zed_x_daemon.service.d"
 install -m 0644 "${repo_root}/host_manager/systemd/robotcore.service" "${unit_root}/robotcore.service"
 install -m 0644 "${repo_root}/host_manager/systemd/control-interface.service" "${unit_root}/control-interface.service"
 install -m 0644 "${repo_root}/host_manager/systemd/robotcore-host-manager.service" "${unit_root}/robotcore-host-manager.service"
-install -m 0644 "${repo_root}/host_manager/systemd/robotcore-camera-ipc-ready.service" "${unit_root}/robotcore-camera-ipc-ready.service"
 install -m 0644 "${repo_root}/host_manager/systemd/robotcore-performance.service" "${unit_root}/robotcore-performance.service"
 install -m 0644 "${repo_root}/host_manager/systemd/robotcore-stack.target" "${unit_root}/robotcore-stack.target"
 install -m 0644 "${repo_root}/host_manager/systemd/robotcore-argus.conf" \
   "${unit_root}/robotcore.service.d/argus.conf"
+install -m 0644 "${repo_root}/host_manager/systemd/nvargus-robotcore.conf" \
+  "${unit_root}/nvargus-daemon.service.d/robotcore.conf"
+install -m 0644 "${repo_root}/host_manager/systemd/zed-x-robotcore.conf" \
+  "${unit_root}/zed_x_daemon.service.d/robotcore.conf"
 install -m 0644 "${repo_root}/host_manager/config/cyclonedds.xml" "${config_root}/cyclonedds.xml"
 install -m 0644 "${repo_root}/host_manager/systemd/99-robotcore-dds.conf" \
   /etc/sysctl.d/99-robotcore-dds.conf
@@ -143,6 +141,9 @@ install -m 0644 "${repo_root}/host_manager/systemd/99-robotcore-dds.conf" \
 # This old override bypasses the reviewed unit and points at one developer
 # workspace. edge.env is now the only workspace authority.
 rm -f "${unit_root}/robotcore.service.d/tag-vio.conf"
+# Replaced by direct systemd lifecycle coupling of the complete camera stack.
+rm -f "${unit_root}/robotcore-camera-ipc-ready.service"
+rm -f /usr/local/libexec/robotcore-camera-ipc-ready
 
 if [[ ! -e ${edge_env} ]]; then
   install -m 0640 "${repo_root}/host_manager/systemd/edge.env.example" "${edge_env}"
@@ -192,13 +193,20 @@ for task_file in "${repo_root}"/ros_ws/src/robotcore_runtime/config/tasks/*.json
       "/var/lib/robotcore/config/tasks/${task_name}"
   fi
 done
+# Remove managed task files that no longer exist in the deployed source tree.
+# This keeps upgrades aligned with the current allow-listed task set.
+for installed_task in /var/lib/robotcore/config/tasks/*.json; do
+  task_name=$(basename "${installed_task}")
+  if [[ ! -e "${repo_root}/ros_ws/src/robotcore_runtime/config/tasks/${task_name}" ]]; then
+    rm -f -- "${installed_task}"
+  fi
+done
 
 # Apply only RobotCore's queue tuning. Loading every host sysctl fragment here
 # produces unrelated Jetson/container warnings and can obscure a real failure.
 sysctl -p /etc/sysctl.d/99-robotcore-dds.conf
 systemd-analyze verify \
   "${unit_root}/robotcore-performance.service" \
-  "${unit_root}/robotcore-camera-ipc-ready.service" \
   "${unit_root}/robotcore-host-manager.service" \
   "${unit_root}/robotcore.service" \
   "${unit_root}/control-interface.service" \

@@ -20,7 +20,7 @@
 - Bind the web UI to `127.0.0.1` by default.  If remote access is needed, use
   an authenticated TLS reverse proxy or VPN; do not expose port 8080 directly.
 - The browser service must have no serial-device parameter, UART framing code,
-  or normalized-command-to-PWM mapping. It publishes a ROS manual candidate
+  or normalized-command-to-PWM mapping. It publishes a ROS manual command
   only. The production Aquaboard bridge is the sole Jetson serial writer, and the
   browser unit must remain outside the `dialout` group. An empty serial setting
   is not an acceptable substitute for deleting the capability.

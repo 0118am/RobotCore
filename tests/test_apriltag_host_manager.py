@@ -231,16 +231,21 @@ def test_task_files_are_listed_read_and_written_by_name():
         manager = make_control_manager(root)
 
         tasks = manager.handle({"action": "task-list"})["tasks"]
-        assert "pose_hold" in {task["name"] for task in tasks}
+        assert {task["name"] for task in tasks} == {
+            "pose_hold",
+            "station_hold",
+            "station_hold_fast",
+            "spatial_figure_eight",
+        }
         assert "record_topics" not in {task["name"] for task in tasks}
 
-        task = manager.handle({"action": "task-get", "name": "step_x"})["task"]
-        task["name"] = "step_x_small"
-        task["label"] = "Small X step"
-        task["trajectory"]["step_amplitude"] = 0.05
+        task = manager.handle({"action": "task-get", "name": "pose_hold"})["task"]
+        task["name"] = "altitude_hold_test"
+        task["label"] = "Altitude hold test"
+        task["trajectory"]["manual_vertical_speed_mps"] = 0.1
         manager.handle({"action": "task-save", "task": task})
 
         saved = manager.handle(
-            {"action": "task-get", "name": "step_x_small"}
+            {"action": "task-get", "name": "altitude_hold_test"}
         )["task"]
-        assert saved["trajectory"]["step_amplitude"] == 0.05
+        assert saved["trajectory"]["manual_vertical_speed_mps"] == 0.1

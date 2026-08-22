@@ -167,7 +167,7 @@ sudo systemd-analyze verify /etc/systemd/system/robotcore*.service /etc/systemd/
 
 ```bash
 source /home/nvidia/RobotCore/scripts/robotcore_ros_env.sh
-ros2 topic hz /hardware/aboard_imu_raw
+ros2 topic hz /sensors/external_imu
 ros2 topic hz /zedx/zed_node/odom
 ros2 topic hz /localization/apriltag/detections
 ros2 topic hz /robot/body_state

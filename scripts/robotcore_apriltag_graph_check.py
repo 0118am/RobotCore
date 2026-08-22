@@ -60,15 +60,13 @@ def ensure_rclpy() -> None:
 
 
 ZED_NODE = "/zedx/zed_node"
-CONVERTER_NODE = "/apriltag_cuda_rgb_converter"
 DETECTOR_NODE = "/apriltag_cuda_detector"
 LOCALIZER_NODE = "/apriltag_localization"
-FUSION_NODE = "/vio_tag_fusion"
+FUSION_NODE = "/ekf"
 UI_NODES = {"/web_operator", "/web_operator_ui"}
 
 RAW_IMAGE = "/zedx/zed_node/rgb/color/rect/image"
 CAMERA_INFO = "/zedx/zed_node/rgb/color/rect/camera_info"
-CUDA_INPUT = "/localization/apriltag/cuda_input_rgb"
 DETECTIONS = "/localization/apriltag/detections"
 POSE = "/localization/apriltag_pose"
 LOCALIZATION_STATUS = "/localization/status"
@@ -83,13 +81,12 @@ class TopicContract:
 
 
 CORE_CONTRACTS = (
-    TopicContract(RAW_IMAGE, frozenset({ZED_NODE}), frozenset({CONVERTER_NODE})),
+    TopicContract(RAW_IMAGE, frozenset({ZED_NODE}), frozenset({DETECTOR_NODE})),
     TopicContract(
         CAMERA_INFO,
         frozenset({ZED_NODE}),
         frozenset({DETECTOR_NODE, LOCALIZER_NODE}),
     ),
-    TopicContract(CUDA_INPUT, frozenset({CONVERTER_NODE}), frozenset({DETECTOR_NODE})),
     TopicContract(DETECTIONS, frozenset({DETECTOR_NODE}), frozenset({LOCALIZER_NODE})),
     TopicContract(POSE, frozenset({LOCALIZER_NODE}), frozenset({FUSION_NODE})),
 )

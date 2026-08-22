@@ -17,8 +17,9 @@ import time
 STATUS_HEADER = b"\xff\xfd"
 IMU_HEADER = b"\xff\xf8\x04"
 STATUS_LEN = 48
-IMU_LEN = 27
+IMU_LENGTH_BY_VERSION = {1: 27, 2: 33}
 PROTOCOL_V2 = 2
+KNOWN_STATUS_FLAGS = 0x3F
 BAUD_CONSTANTS = {
     9600: termios.B9600,
     19200: termios.B19200,
@@ -65,20 +66,26 @@ def percentile(values: list[float], fraction: float) -> float:
 
 def next_frame(buffer: bytearray):
     starts = []
-    for header, length, kind in (
-        (STATUS_HEADER, STATUS_LEN, "status"),
-        (IMU_HEADER, IMU_LEN, "imu"),
-    ):
+    for header, kind in ((STATUS_HEADER, "status"), (IMU_HEADER, "imu")):
         index = buffer.find(header)
         if index >= 0:
-            starts.append((index, length, kind))
+            starts.append((index, kind))
     if not starts:
         if len(buffer) > STATUS_LEN:
             del buffer[:-2]
         return None
-    start, length, kind = min(starts)
+    start, kind = min(starts)
     if start:
         del buffer[:start]
+    if kind == "status":
+        length = STATUS_LEN
+    else:
+        if len(buffer) < 4:
+            return None
+        length = IMU_LENGTH_BY_VERSION.get(buffer[3])
+        if length is None:
+            del buffer[:1]
+            return next_frame(buffer)
     if len(buffer) < length:
         return None
     return kind, bytes(buffer[:length])
@@ -92,7 +99,7 @@ def require_crc(frame: bytes) -> None:
 def parse_status(frame: bytes) -> dict[str, object]:
     if len(frame) != STATUS_LEN or frame[:2] != STATUS_HEADER or frame[2] != PROTOCOL_V2:
         raise ValueError("invalid status header/version")
-    if frame[3] & ~0x07:
+    if frame[3] & ~KNOWN_STATUS_FLAGS:
         raise ValueError("invalid status flags")
     require_crc(frame)
     tick, boot_id, session, received, applied = struct.unpack_from("<IIIII", frame, 4)
@@ -114,18 +121,28 @@ def parse_status(frame: bytes) -> dict[str, object]:
 
 
 def parse_imu(frame: bytes) -> dict[str, object]:
-    if len(frame) != IMU_LEN or frame[:3] != IMU_HEADER or frame[3] != 1:
+    if len(frame) < 4 or frame[:3] != IMU_HEADER:
         raise ValueError("invalid IMU header/version")
+    version = frame[3]
+    if len(frame) != IMU_LENGTH_BY_VERSION.get(version):
+        raise ValueError("invalid IMU length/version")
+    if frame[4] & ~0x03:
+        raise ValueError("invalid IMU flags")
     require_crc(frame)
     sample_id, tick_ms = struct.unpack_from("<II", frame, 5)
     values = struct.unpack_from("<6h", frame, 13)
-    return {
+    parsed = {
+        "version": version,
         "valid": bool(frame[4] & 0x01),
+        "attitude_valid": bool(frame[4] & 0x02) if version >= 2 else False,
         "sample_id": sample_id,
         "tick_ms": tick_ms,
         "gyro_cdeg_s": list(values[:3]),
         "accel_mg": list(values[3:]),
     }
+    if version >= 2:
+        parsed["attitude_rpy_cdeg"] = list(struct.unpack_from("<3h", frame, 25))
+    return parsed
 
 
 def print_intervals(name: str, times: list[float]) -> None:
@@ -153,6 +170,7 @@ def measure(port: str, baud: int, duration_s: float) -> int:
     counts: Counter[str] = Counter()
     arrivals = {"status": [], "imu": []}
     first = {}
+    last = {}
     buffer = bytearray()
     started = time.monotonic()
     try:
@@ -182,8 +200,13 @@ def measure(port: str, baud: int, duration_s: float) -> int:
                 counts[kind] += 1
                 arrivals[kind].append(time.monotonic())
                 first.setdefault(kind, parsed)
+                last[kind] = parsed
                 if kind == "imu" and not parsed["valid"]:
                     counts["imu_invalid"] += 1
+                if kind == "imu" and not parsed["attitude_valid"]:
+                    counts["imu_attitude_invalid"] += 1
+                if kind == "imu":
+                    counts[f"imu_v{parsed['version']}"] += 1
     finally:
         if original is not None:
             termios.tcsetattr(fd, termios.TCSANOW, original)
@@ -197,6 +220,7 @@ def measure(port: str, baud: int, duration_s: float) -> int:
     for kind in ("status", "imu"):
         if kind in first:
             print(f"first_{kind}={first[kind]}")
+            print(f"last_{kind}={last[kind]}")
         print_intervals(kind, arrivals[kind])
     if not arrivals["status"]:
         print("warning=no protocol-v2 board status observed")
@@ -207,6 +231,9 @@ def measure(port: str, baud: int, duration_s: float) -> int:
     if counts["imu_invalid"] == counts["imu"]:
         print("warning=no valid UART8 IMU samples observed")
         return 2
+    if counts["imu_attitude_invalid"] == counts["imu"]:
+        print("warning=no native UART8 IMU attitude observed")
+        return 5
     return 0
 
 
