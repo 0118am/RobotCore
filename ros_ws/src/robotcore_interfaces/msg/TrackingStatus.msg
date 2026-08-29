@@ -1,6 +1,7 @@
 # Tracking diagnostics published by runtime from ROS trajectory/body topics.
 std_msgs/Header header
 string trajectory_type
+string control_mode
 bool valid
 float64 time_s
 

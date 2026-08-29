@@ -156,9 +156,11 @@ def test_apriltag_image_path_is_bounded_and_localizer_consumes_only_detections()
     assert "AprilTagDetectionArray" in localization
     assert "sensor_msgs/msg/image" not in localization
     assert "SensorDataQoS().keep_last(1)" in localization
-    assert "pub_resolution: CUSTOM" in camera_config
+    assert "pub_resolution: NATIVE" in camera_config
     assert "grab_resolution: SVGA" in camera_config
-    assert "pub_downscale_factor: 1.0" in camera_config
+    assert "grab_compute_capping_fps: 15.0" in camera_config
+    assert "pub_frame_rate: 15.0" in camera_config
+    assert "depth_mode: NONE" in camera_config
     assert "publish_imu: false" in camera_config
     assert "enable_24bit_output: true" in camera_config
     assert 'default_value="/zedx/zed_node/rgb/color/rect/image"' in edge_launch
@@ -219,9 +221,8 @@ def test_web_bridge_consumes_robot_core_contract_without_owning_devices_or_maps(
     web_node_start = edge_launch.index('package="control_interface"')
     hardware_node = edge_launch[hardware_node_start:web_node_start]
     web_node = edge_launch[web_node_start:]
-    assert '"span_us": ParameterValue(' in hardware_node
-    assert 'LaunchConfiguration("manual_thruster_span_us")' in hardware_node
-    assert "manual_thruster_span_us" not in web_node
+    assert '"span_us": ParameterValue(' not in hardware_node
+    assert "manual_thruster_span_us" not in edge_launch
 
 
 def test_robotcore_aboard_rule_matches_the_detected_cdc_acm_board():
@@ -262,11 +263,11 @@ def test_only_production_aboard_bridge_uses_protocol_v2():
     assert "MessageInfo" not in bridge
     assert "command_authority freshness timeout" in bridge
     assert "kCommandPeriod = 20ms" in bridge
-    assert "declare_parameter<std::int64_t>(\"span_us\", 500)" in bridge
-    assert "requested_span_us, 1, 500" in bridge
+    assert "span_us" not in bridge
     assert "kMinimumReportedPwmUs = 1000U" in bridge
     assert "kMaximumReportedPwmUs = 2000U" in bridge
-    assert "message->normalized[i]) * span_us_" in bridge
+    assert "message->action[i]) * kActionPwmSpanUs" in bridge
+    assert "kActionPwmSpanUs = 250.0" in bridge
     assert "diagnostic_timer_ = create_wall_timer(1s" in bridge
     assert bridge.count("updater_.force_update()") == 1
 

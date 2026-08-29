@@ -10,12 +10,12 @@ Jetson Orin NX:
 - Runs ROS 2 Humble.
 - Runs policy inference, trajectory planning, vision processing, task planning,
   sensor bridge, and logging.
-- Sends normalized 8-thruster commands to the low-level board.
+- Sends eight direct T1..T8 actions to the hardware bridge.
 
 RoboMaster Aboard candidate:
 
 - Validates command packets.
-- Maps normalized commands to PWM.
+- Applies validated signed PWM offsets and latches all eight outputs together.
 - Handles heartbeat, failsafe, and board status.
 - Returns telemetry to Jetson.
 
@@ -26,19 +26,18 @@ There is one production propulsion path:
 ```text
 ControlInterface -> /control/manual/thruster_cmd --\
 PID controller  -> /control/pid/thruster_cmd ------> command_authority
-RL adapter      -> /control/rl/thruster_cmd -------/
+t60_policy      -> /policy/body/action ------------/
   -> /control/thruster_cmd
-  -> aboard_bridge (normalized limit and UART-v2 framing)
+  -> aboard_bridge (fixed action-to-PWM conversion and UART-v2 framing)
   -> Aquaboard synchronized PWM latch (logical 0..7 -> physical PWM 8..15)
 ```
 
 The browser does not open an Aquaboard device, construct UART frames, choose a
-physical PWM channel offset, or map normalized commands to microseconds. The
-historically named `manual_thruster_span_us` launch argument is retained only
-as the Aquaboard bridge's final `span_us` limit; it applies to every authority
-source and must not be passed to the web node. `BoardStatus.pwm_us` is the
-MCU-latched command echo at the timer update boundary, not ESC speed, current,
-or thrust feedback.
+physical PWM channel offset, or convert actions to microseconds. There is no
+configurable thruster span or source-specific mapping. The bridge performs the
+only conversion, `PWM_us = 1500 + 250 * action`, so `[-1, 1]` is exactly
+`[1250, 1750]` us. `BoardStatus.pwm_us` is the MCU-latched command echo at the
+timer update boundary, not ESC speed, current, or thrust feedback.
 
 ## Aquaboard UART8 inertial telemetry
 
@@ -64,10 +63,12 @@ not estimate a second bias, remove gravity, apply another low-pass filter, or
 run a software AHRS. The Status panel's
 **IMU Calibration** action executes the external IMU's own saved `0x5a` gyro
 calibration through Aquaboard and is rejected unless propulsion is disarmed and
-all PWM outputs report neutral. `/sensors/external_imu` bypasses localization:
-PID consumes its native attitude and angular rate directly, the trajectory node
-uses it to latch the station-hold heading, and the browser displays it as raw
-IMU telemetry. It is not subscribed by the VIO/Tag EKF.
+all PWM outputs report neutral. `/sensors/external_imu` bypasses localization
+and remains the source of low-latency roll/pitch, angular rate, and raw UI
+telemetry. PID and trajectory use `BodyState.pose.orientation` for absolute map
+yaw, so magnetic-heading disturbances in the native attitude cannot change
+heading feedback or a latched station-hold target. The external IMU is not
+subscribed by the VIO/Tag EKF.
 
 The fixed-rate state chain is:
 
@@ -76,7 +77,8 @@ ZED VIO pose + covariance --------> delayed EKF pose update -------------\
 ZED VIO twist + covariance -------> delayed EKF twist update ------------> 60 Hz BodyState
 AprilTag absolute pose -----------> static map alignment + pose update --/
 
-external IMU attitude + gyro ----> PID/trajectory/UI directly (no EKF)
+external IMU roll/pitch + gyro --> PID/trajectory/UI fast attitude path
+BodyState map yaw ---------------> PID/trajectory absolute heading
 ```
 
 ZED X Mini uses one fixed 30 Hz clock for camera grab/VIO and AprilTag image
@@ -132,8 +134,7 @@ The normal edge command needs no IMU argument:
 
 ```bash
 ros2 launch robotcore_bringup robotcore_edge_system.launch.py \
-  serial_port:=/dev/ttyACM0 \
-  manual_thruster_span_us:=500
+  serial_port:=/dev/ttyACM0
 ```
 
 Validate all estimator inputs after launch:

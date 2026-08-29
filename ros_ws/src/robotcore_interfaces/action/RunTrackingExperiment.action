@@ -2,6 +2,8 @@
 string scenario
 # Expected active authority source. Initially only "pid" is permitted.
 string controller
+# Execution profile selected independently from the task's target trajectory.
+string control_mode
 float64 duration_s
 ---
 bool success

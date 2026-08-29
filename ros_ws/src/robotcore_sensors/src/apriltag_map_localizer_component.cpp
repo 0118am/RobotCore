@@ -78,13 +78,18 @@ public:
     single_tag_reference_edge_px_ = declare_parameter<double>("single_tag_reference_edge_px", 40.0);
     load_map();
 
-    const auto qos = rclcpp::SensorDataQoS().keep_last(1);
+    const auto camera_qos = rclcpp::SensorDataQoS().keep_last(1);
+    // Tag corrections are sparse absolute measurements.  Request delivery
+    // from the reliable Isaac ROS publisher, but retain only the newest
+    // estimate so an old correction cannot build up behind the estimator.
+    const auto tag_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable();
     estimate_pub_ = create_publisher<robotcore_interfaces::msg::AprilTagPoseEstimate>(
-      declare_parameter<std::string>("pose_topic", "/localization/apriltag_pose"), qos);
-    camera_sub_ = create_subscription<sensor_msgs::msg::CameraInfo>(camera_topic_, qos,
+      declare_parameter<std::string>("pose_topic", "/localization/apriltag_pose"), tag_qos);
+    camera_sub_ = create_subscription<sensor_msgs::msg::CameraInfo>(camera_topic_, camera_qos,
       std::bind(&AprilTagMapLocalizerComponent::on_camera, this, std::placeholders::_1));
     detections_sub_ = create_subscription<isaac_ros_apriltag_interfaces::msg::AprilTagDetectionArray>(
-      detections_topic_, qos, std::bind(&AprilTagMapLocalizerComponent::on_detections, this, std::placeholders::_1));
+      detections_topic_, tag_qos,
+      std::bind(&AprilTagMapLocalizerComponent::on_detections, this, std::placeholders::_1));
     reload_service_ = create_service<std_srvs::srv::Trigger>(
       declare_parameter<std::string>("relocalize_service", "/localization/apriltag/relocalize"),
       std::bind(&AprilTagMapLocalizerComponent::reload, this, std::placeholders::_1, std::placeholders::_2));

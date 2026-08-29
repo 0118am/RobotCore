@@ -63,6 +63,10 @@ if(BUILD_TESTING)
   ament_add_gtest(test_apriltag_map test/test_apriltag_map.cpp)
   target_include_directories(test_apriltag_map PRIVATE include)
   target_link_libraries(test_apriltag_map Eigen3::Eigen nlohmann_json::nlohmann_json)
+
+  ament_add_gtest(test_covariance test/test_covariance.cpp)
+  target_include_directories(test_covariance PRIVATE include)
+  target_link_libraries(test_covariance Eigen3::Eigen)
 endif()
 
 ament_export_include_directories(include)

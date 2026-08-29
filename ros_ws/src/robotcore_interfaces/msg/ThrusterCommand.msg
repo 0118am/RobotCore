@@ -1,7 +1,8 @@
-# Normalized 8-thruster command shared by policy/control and edge hardware.
+# Direct 8-thruster action shared by policy/control and edge hardware.
 std_msgs/Header header
-# Fixed BlueROV2 Heavy-style channel order, each value in [-1.0, 1.0].
-float32[8] normalized
+# Fixed T1..T8 channel order. Each action is in [-1.0, 1.0] and maps once,
+# at the hardware boundary, as PWM_us = 1500 + 250 * action.
+float32[8] action
 # False means downstream hardware should disable or neutralize outputs.
 bool enable
 # Persistent authority state is distinct from the momentary dead-man/output

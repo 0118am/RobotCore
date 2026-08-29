@@ -18,11 +18,16 @@
 #include "robotcore_interfaces/msg/thruster_command.hpp"
 #include "robotcore_interfaces/msg/trajectory_target.hpp"
 #include "robotcore_interfaces/srv/set_control_authority.hpp"
+#include "std_msgs/msg/float32_multi_array.hpp"
 
 using namespace std::chrono_literals;
 
 namespace robotcore_control_cpp
 {
+constexpr double kActionPwmSpanUs = 250.0;
+constexpr double kMaximumPwmLimitUs = 250.0;
+constexpr double kMaximumAction = 1.0;
+
 class CommandAuthorityNode final : public rclcpp::Node
 {
   using ThrusterCommand = robotcore_interfaces::msg::ThrusterCommand;
@@ -44,9 +49,10 @@ public:
     state_timeout_s_ = declare_parameter("state_timeout_s", 0.15);
     target_timeout_s_ = declare_parameter("target_timeout_s", 0.15);
     safety_timeout_s_ = declare_parameter("safety_heartbeat_timeout_s", 0.25);
-    const auto pwm_limit_us = declare_parameter("pwm_limit_us", 200.0);
-    automatic_limit_ = std::clamp(std::abs(pwm_limit_us) / 500.0, 0.0, 0.4);
-    allow_rl_ = declare_parameter("allow_rl_hardware", false);
+    const auto pwm_limit_us = declare_parameter("pwm_limit_us", kMaximumPwmLimitUs);
+    action_limit_ = std::clamp(
+      std::abs(pwm_limit_us) / kActionPwmSpanUs, 0.0, kMaximumAction);
+    allow_rl_ = declare_parameter("allow_rl_hardware", true);
 
     command_pub_ = create_publisher<ThrusterCommand>(
       "/control/thruster_cmd", rclcpp::QoS(rclcpp::KeepLast(1)).reliable());
@@ -56,8 +62,11 @@ public:
       "/control/manual/thruster_cmd", "manual", "web_operator");
     pid_command_sub_ = create_source_subscription(
       "/control/pid/thruster_cmd", "pid", "pid_controller");
-    rl_command_sub_ = create_source_subscription(
-      "/control/rl/thruster_cmd", "rl", "rl_action_adapter");
+    rl_action_sub_ = create_subscription<std_msgs::msg::Float32MultiArray>(
+      "/policy/body/action", rclcpp::QoS(rclcpp::KeepLast(1)).reliable(),
+      [this](const std_msgs::msg::Float32MultiArray::SharedPtr message) {
+        on_rl_action(*message);
+      });
     body_sub_ = create_subscription<BodyState>(
       "/robot/body_state", rclcpp::QoS(rclcpp::KeepLast(1)),
       [this](BodyState::SharedPtr message) {
@@ -135,6 +144,32 @@ private:
       });
   }
 
+  void on_rl_action(const std_msgs::msg::Float32MultiArray & action)
+  {
+    if (action.data.size() != 8U ||
+      !std::all_of(action.data.begin(), action.data.end(),
+        [](float value) {
+          return std::isfinite(value) && value >= -1.0F && value <= 1.0F;
+        }))
+    {
+      source_commands_.erase("rl");
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "ignored RL action: expected eight finite values in [-1, 1]");
+      return;
+    }
+
+    auto command = std::make_shared<ThrusterCommand>();
+    command->header.stamp = now();
+    command->header.frame_id = "base_link";
+    for (std::size_t channel = 0; channel < 8U; ++channel) {
+      command->action[channel] = action.data[channel];
+    }
+    command->enable = true;
+    command->source = "t60_policy";
+    source_commands_["rl"] = TimedSourceCommand{std::move(command), SteadyClock::now()};
+  }
+
   std::string source_command_integrity_failure(
     const std::string & source, SteadyClock::time_point now) const
   {
@@ -149,8 +184,10 @@ private:
     if (expected == expected_producers_.end() || item->second.message->source != expected->second) {
       return "unexpected command producer: " + item->second.message->source;
     }
-    for (const auto value : item->second.message->normalized) {
-      if (!std::isfinite(value)) {return "source command is not eight finite values";}
+    for (const auto value : item->second.message->action) {
+      if (!std::isfinite(value) || value < -1.0F || value > 1.0F) {
+        return "source action is not eight finite values in [-1, 1]";
+      }
     }
     return {};
   }
@@ -219,13 +256,13 @@ private:
   {
     return target_ &&
       std::chrono::duration<double>(now - target_->stamp).count() <= target_timeout_s_ &&
-      target_->message->valid && lower(target_->message->trajectory_type) == "altitude_hold";
+      target_->message->valid && lower(target_->message->control_mode) == "altitude_hold";
   }
 
   static std::array<double, 8> altitude_manual_surge_yaw(
     const ThrusterCommand & manual)
   {
-    const auto & values = manual.normalized;
+    const auto & values = manual.action;
     const double surge = 0.25 * (-values[4] - values[5] + values[6] + values[7]);
     const double yaw = 0.25 * (-values[4] + values[5] + values[6] - values[7]);
     return {0.0, 0.0, 0.0, 0.0,
@@ -259,7 +296,7 @@ private:
     response.selected_source = selected_source_;
     response.armed = armed_;
     response.fault_latched = fault_latched_;
-    response.pwm_limit_us = automatic_limit_ * 500.0;
+    response.pwm_limit_us = action_limit_ * kActionPwmSpanUs;
     response.message = text;
   }
 
@@ -271,12 +308,12 @@ private:
         return;
       }
       if (!std::isfinite(request.pwm_limit_us) ||
-        request.pwm_limit_us < 0.0 || request.pwm_limit_us > 200.0)
+        request.pwm_limit_us < 0.0 || request.pwm_limit_us > kMaximumPwmLimitUs)
       {
-        fill_response(response, false, "PWM limit must be finite and within 0..200 us");
+        fill_response(response, false, "PWM limit must be finite and within 0..250 us");
         return;
       }
-      automatic_limit_ = request.pwm_limit_us / 500.0;
+      action_limit_ = request.pwm_limit_us / kActionPwmSpanUs;
       message_ = "PWM limit set to " + std::to_string(request.pwm_limit_us) + " us";
       fill_response(response, true, message_);
       publish_status(SteadyClock::now());
@@ -346,16 +383,15 @@ private:
       }
     }
     if (output_allowed && idle_reason.empty()) {
-      const auto limit = std::abs(automatic_limit_);
       const auto altitude_manual = hybrid_altitude_hold ?
         altitude_manual_surge_yaw(*source_commands_.at("manual").message) :
         std::array<double, 8>{};
       const auto & selected_values = source_commands_.at(
-        hybrid_altitude_hold ? "pid" : active_source_).message->normalized;
+        hybrid_altitude_hold ? "pid" : active_source_).message->action;
       for (std::size_t i = 0; i < output_.size(); ++i) {
-        const double value = hybrid_altitude_hold && i >= 4U ?
+        const double requested = hybrid_altitude_hold && i >= 4U ?
           altitude_manual[i] : static_cast<double>(selected_values[i]);
-        output_[i] = std::clamp(value, -limit, limit);
+        output_[i] = requested * action_limit_;
       }
       message_ = manual_override ?
         "armed " + selected_source_ + "; manual LB override" :
@@ -371,7 +407,7 @@ private:
     ThrusterCommand command;
     command.header.stamp = now(); command.header.frame_id = "base_link";
     for (std::size_t i = 0; i < output_.size(); ++i) {
-      command.normalized[i] = static_cast<float>(output_[i]);
+      command.action[i] = static_cast<float>(output_[i]);
     }
     command.enable = enable; command.armed = armed_;
     command.arm_generation = arm_generation_;
@@ -399,13 +435,13 @@ private:
       body_ ? std::optional<SteadyClock::time_point>{body_->stamp} : std::nullopt, steady_now);
     status.target_age_s = age_s(
       target_ ? std::optional<SteadyClock::time_point>{target_->stamp} : std::nullopt, steady_now);
-    status.command_limit = automatic_limit_; status.command_slew_rate = 0.0;
+    status.action_limit = action_limit_; status.action_slew_rate = 0.0;
     status.localization_source = body_ ? body_->message->localization_source : "";
     status_pub_->publish(status);
   }
 
   const std::unordered_map<std::string, std::string> expected_producers_{
-    {"manual", "web_operator"}, {"pid", "pid_controller"}, {"rl", "rl_action_adapter"}};
+    {"manual", "web_operator"}, {"pid", "pid_controller"}, {"rl", "t60_policy"}};
   std::unordered_map<std::string, TimedSourceCommand> source_commands_;
   std::optional<TimedBody> body_;
   std::optional<TimedTarget> target_;
@@ -419,13 +455,13 @@ private:
   std::uint64_t arm_generation_{0U};
   double evaluation_rate_hz_{}, publish_rate_hz_{}, status_rate_hz_{};
   double source_command_timeout_s_{}, state_timeout_s_{}, target_timeout_s_{}, safety_timeout_s_{};
-  double automatic_limit_{};
+  double action_limit_{};
 
   rclcpp::Publisher<ThrusterCommand>::SharedPtr command_pub_;
   rclcpp::Publisher<AuthorityStatus>::SharedPtr status_pub_;
   rclcpp::Subscription<ThrusterCommand>::SharedPtr manual_command_sub_;
   rclcpp::Subscription<ThrusterCommand>::SharedPtr pid_command_sub_;
-  rclcpp::Subscription<ThrusterCommand>::SharedPtr rl_command_sub_;
+  rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr rl_action_sub_;
   rclcpp::Subscription<BodyState>::SharedPtr body_sub_;
   rclcpp::Subscription<TrajectoryTarget>::SharedPtr target_sub_;
   rclcpp::Subscription<SafetyEvent>::SharedPtr safety_sub_;

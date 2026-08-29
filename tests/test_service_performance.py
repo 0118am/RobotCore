@@ -27,9 +27,14 @@ def test_robot_service_owns_latency_cores_and_maximum_jetson_profile():
     assert "TimerSlackNSec=1us" in robot
     assert "enable_web_ui:=false" in robot
     assert "enable_pool_tracking:=true" in robot
+    assert "enable_rl_policy_runtime:=true" in robot
+    assert "allow_rl_hardware:=true" in robot
     assert "Restart=always" in robot
     assert "RMW_IMPLEMENTATION=rmw_cyclonedds_cpp" in robot
     assert "CYCLONEDDS_URI=file:///etc/robotcore/cyclonedds.xml" in robot
+    assert "ReadWritePaths=/var/lib/robotcore /home/nvidia/robotcore_logs" in robot
+    assert "ExecStartPre=/usr/bin/test -w ${ROS_LOG_DIR}" in robot
+    assert "ExecStartPre=/usr/bin/test -w ${ROBOTCORE_RUN_ROOT}" in robot
     assert "vio_tag_fusion_node" in robot
     assert "set -eo pipefail; source /opt/ros/humble/setup.bash" in robot
     assert 'setup.bash"; set -u; exec ros2 launch' in robot
@@ -53,10 +58,20 @@ def test_web_service_is_supervised_on_non_localization_cores():
     assert "Nice=10" in web
     assert "Restart=always" in web
     assert "RMW_IMPLEMENTATION=rmw_cyclonedds_cpp" in web
+    assert "ReadWritePaths=/home/nvidia/robotcore_logs" in web
+    assert "ExecStartPre=/usr/bin/test -w ${ROS_LOG_DIR}" in web
     assert "imu_topic:=" not in web
     assert "set -eo pipefail; source /opt/ros/humble/setup.bash" in web
     assert 'setup.bash"; set -u; exec ros2 launch' in web
     assert "set -euo pipefail; source /opt/ros/humble/setup.bash" not in web
+
+
+def test_host_manager_can_read_only_the_operator_log_tree():
+    host_manager = text("robotcore-host-manager.service")
+
+    assert "ProtectHome=tmpfs" in host_manager
+    assert "BindReadOnlyPaths=/home/nvidia/robotcore_logs" in host_manager
+    assert "ReadWritePaths=/run/robotcore /etc/robotcore /var/lib/robotcore" in host_manager
 
 
 def test_stack_target_starts_both_services_and_edge_env_is_local_dds():
@@ -70,7 +85,8 @@ def test_stack_target_starts_both_services_and_edge_env_is_local_dds():
     assert "ROS_DOMAIN_ID=42" in environment
     assert "RMW_IMPLEMENTATION=rmw_cyclonedds_cpp" in environment
     assert "CYCLONEDDS_URI=file:///etc/robotcore/cyclonedds.xml" in environment
-    assert "ROBOTCORE_RUN_ROOT=/var/lib/robotcore/runs" in environment
+    assert "ROS_LOG_DIR=/home/nvidia/robotcore_logs/ros" in environment
+    assert "ROBOTCORE_RUN_ROOT=/home/nvidia/robotcore_logs/runs" in environment
     cyclone = (ROOT / "host_manager/config/cyclonedds.xml").read_text()
     assert "ROS_LOCALHOST_ONLY=1" in cyclone
     assert "<NetworkInterface" not in cyclone
@@ -100,6 +116,9 @@ def test_installer_pins_and_validates_the_cpp_workspaces():
     assert 'set_env_value CONTROL_INTERFACE_WORKSPACE "${web_workspace}"' in installer
     assert 'set_env_value ZED_WORKSPACE "${zed_workspace}"' in installer
     assert "set_env_value RMW_IMPLEMENTATION rmw_cyclonedds_cpp" in installer
+    assert 'set_env_value ROS_LOG_DIR "${ros_log_dir}"' in installer
+    assert 'set_env_value ROBOTCORE_RUN_ROOT "${run_root}"' in installer
+    assert 'install -d -o robotcore -g nvidia -m 2770 "${log_root}"' in installer
     assert "install -d -o robotcore -g robotcore" in installer
     assert "nvargus-daemon.service.d/robotcore.conf" in installer
     assert "zed_x_daemon.service.d/robotcore.conf" in installer

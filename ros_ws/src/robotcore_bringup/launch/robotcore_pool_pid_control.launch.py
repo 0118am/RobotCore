@@ -1,5 +1,8 @@
 """Launch the fail-closed pool PID control graph without sensors or hardware."""
 
+import os
+from pathlib import Path
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
@@ -8,6 +11,16 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
+    task_config_dir = (
+        Path(
+            os.environ.get(
+                "CONTROL_INTERFACE_WORKSPACE", "/home/nvidia/ControlInterface"
+            )
+        )
+        / "control_interface"
+        / "config"
+        / "tasks"
+    )
     return LaunchDescription(
         [
             DeclareLaunchArgument(
@@ -30,15 +43,11 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "task_config_dir",
-                default_value=PathJoinSubstitution(
-                    [FindPackageShare("robotcore_runtime"), "config", "tasks"]
-                ),
+                default_value=str(task_config_dir),
             ),
             DeclareLaunchArgument(
                 "record_topics_path",
-                default_value=PathJoinSubstitution(
-                    [FindPackageShare("robotcore_runtime"), "config", "tasks", "record_topics.json"]
-                ),
+                default_value=str(task_config_dir / "record_topics.json"),
             ),
             Node(
                 package="robotcore_runtime",

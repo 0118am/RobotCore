@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>robotcore_policy_cpp</name>
+  <version>0.1.0</version>
+  <description>Deterministic C++ TensorRT runtime for the t60 body policy.</description>
+  <maintainer email="maintainer@example.com">RobotCore Team</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>rclcpp</depend>
+  <depend>robotcore_interfaces</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+
+  <export><build_type>ament_cmake</build_type></export>
+</package>

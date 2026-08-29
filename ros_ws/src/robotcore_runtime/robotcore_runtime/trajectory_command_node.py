@@ -1,9 +1,8 @@
-"""Isaac-compatible trajectory target publisher.
+"""Managed hold and deterministic planar-trajectory target publisher.
 
-The exported WarpAUV trajectory policy expects target pose and target linear
-velocity as part of its 20-D observation.  IsaacLab generated those commands
-inside the environment; in RobotCore they live in ROS so hardware, logging, UI, and
-future hardware playback can all see the same target stream.
+Target generation is deliberately separate from controller selection. The
+published ``control_mode`` names the already-selected execution profile; this
+node never chooses controller gains or actuator behavior from a trajectory.
 """
 
 from __future__ import annotations
@@ -22,6 +21,16 @@ from std_srvs.srv import Trigger
 from robotcore_interfaces.msg import BodyState, ThrusterCommand, TrajectoryTarget
 
 
+AUTOMATIC_TRAJECTORY_TYPES = frozenset(
+    {
+        "spatial_lissajous",
+        "circle",
+        "racetrack",
+        "straight_line",
+    }
+)
+
+
 @dataclass
 class TrajectorySample:
     """One target sample in world/map coordinates."""
@@ -32,11 +41,12 @@ class TrajectorySample:
 
 
 class TrajectoryCommandNode(Node):
-    """Publishes deterministic trajectory targets matching Isaac AUV eval code."""
+    """Publish deterministic hold or automatic planar-trajectory targets."""
 
     def __init__(self):
         super().__init__("trajectory_command_node")
-        self.declare_parameter("trajectory_type", "lissajous")
+        self.declare_parameter("trajectory_type", "hold")
+        self.declare_parameter("control_mode", "idle")
         self.declare_parameter("publish_rate_hz", 10.0)
         self.declare_parameter("center_x", 0.0)
         self.declare_parameter("center_y", 0.0)
@@ -44,20 +54,13 @@ class TrajectoryCommandNode(Node):
         self.declare_parameter("amp_x", 1.5)
         self.declare_parameter("amp_y", 0.75)
         self.declare_parameter("amp_z", 0.4)
+        self.declare_parameter("radius_m", 1.0)
         self.declare_parameter("period_s", 16.0)
+        self.declare_parameter("trajectory_speed_mps", 0.1)
         self.declare_parameter("trajectory_ramp_s", 0.0)
-        self.declare_parameter("radius_min", 0.3)
-        self.declare_parameter("radius_max", 1.5)
-        self.declare_parameter("chirp_rate", 2.2)
         self.declare_parameter("relative_to_initial_pose", False)
         self.declare_parameter("hold_before_motion_s", 0.0)
         self.declare_parameter("attitude_mode", "fixed_identity")
-        self.declare_parameter("roll_amplitude_deg", 5.0)
-        self.declare_parameter("pitch_amplitude_deg", 5.0)
-        self.declare_parameter("yaw_amplitude_deg", 15.0)
-        self.declare_parameter("attitude_period_s", 30.0)
-        self.declare_parameter("step_amplitude", 0.1)
-        self.declare_parameter("step_time_s", 5.0)
         self.declare_parameter("move_duration_s", 18.0)
         self.declare_parameter("require_pool_bounds", False)
         self.declare_parameter("pool_min_xyz", [0.0, 0.0, 0.0])
@@ -68,6 +71,7 @@ class TrajectoryCommandNode(Node):
         self.declare_parameter("manual_input_age_s", 0.15)
         self.declare_parameter("imu_topic", "/sensors/external_imu")
         self.declare_parameter("station_linear_input_gain_mps", 0.30)
+        self.declare_parameter("station_lateral_input_gain_mps", 0.20)
         self.declare_parameter("station_yaw_input_gain_rps", 0.60)
         self.declare_parameter("max_angular_speed_rps", 0.0)
         self.declare_parameter("attitude_min_rpy_deg", [0.0, 0.0, 0.0])
@@ -78,6 +82,7 @@ class TrajectoryCommandNode(Node):
         self.initial_position = None
         self.initial_quaternion = None
         self.latest_position = None
+        self.latest_map_yaw = None
         self.latest_quaternion = None
         self.latest_angular_velocity = None
         self.motion_start_position = None
@@ -135,6 +140,9 @@ class TrajectoryCommandNode(Node):
         now = self.get_clock().now()
         time_s = self.trajectory_time_s(now.nanoseconds)
         trajectory_type = str(self.get_parameter("trajectory_type").value).lower()
+        configured_control_mode = str(
+            self.get_parameter("control_mode").value
+        ).lower()
         hold_s = max(0.0, float(self.get_parameter("hold_before_motion_s").value))
         effective_time_s = max(0.0, time_s - hold_s)
         if not self.tracking_started:
@@ -148,10 +156,12 @@ class TrajectoryCommandNode(Node):
             # freshness gate, but it is not an instruction to actuate. The
             # PID command stays neutral until the explicit Start/reset.
             published_trajectory_type = "idle"
+            published_control_mode = "idle"
+            published_phase = "idle"
             target_valid = self.idle_target_is_valid(sample.position)
             angular_velocity = (0.0, 0.0, 0.0)
             angular_acceleration = (0.0, 0.0, 0.0)
-        elif trajectory_type == "altitude_hold":
+        elif trajectory_type == "hold" and configured_control_mode == "altitude_hold":
             sample = self.altitude_hold_sample(now.nanoseconds)
             orientation = tuple(
                 self.latest_quaternion
@@ -159,46 +169,78 @@ class TrajectoryCommandNode(Node):
                 else self.attitude_quaternion("hold", 0.0)
             )
             published_trajectory_type = trajectory_type
+            published_control_mode = configured_control_mode
+            published_phase = "hold"
             target_valid = self.target_is_valid(sample.position)
             angular_velocity = (0.0, 0.0, 0.0)
             angular_acceleration = (0.0, 0.0, 0.0)
-        elif trajectory_type in {"station_hold", "station_hold_fast"}:
+        elif trajectory_type == "hold" and configured_control_mode in {
+            "station_hold",
+            "station_hold_fast",
+            "rl_policy",
+        }:
             sample, orientation, angular_velocity = self.station_hold_target(
                 now.nanoseconds
             )
             published_trajectory_type = trajectory_type
+            published_control_mode = configured_control_mode
+            published_phase = "hold"
             target_valid = self.target_is_valid(sample.position)
             angular_acceleration = (0.0, 0.0, 0.0)
-        elif time_s < hold_s:
-            if trajectory_type == "spatial_figure_eight":
-                move_s = max(
-                    0.1, float(self.get_parameter("move_duration_s").value)
+        elif trajectory_type in AUTOMATIC_TRAJECTORY_TYPES and time_s < hold_s:
+            move_s = max(
+                0.1, float(self.get_parameter("move_duration_s").value)
+            )
+            move_time_s = min(time_s, move_s)
+            turn_time_s = max(0.0, time_s - move_s)
+            sample = self.sample("move_to_trajectory_start", move_time_s)
+            orientation, angular_velocity, angular_acceleration = (
+                self.sample_attitude(
+                    "move_to_trajectory_start", turn_time_s
                 )
-                move_time_s = min(time_s, move_s)
-                turn_time_s = max(0.0, time_s - move_s)
-                sample = self.sample("move_to_hold", move_time_s)
-                orientation, angular_velocity, angular_acceleration = (
-                    self.sample_attitude(
-                        "move_to_figure_eight_start", turn_time_s
-                    )
-                )
-            else:
-                sample_type = (
-                    "move_to_hold" if trajectory_type == "move_to_hold" else "hold"
-                )
-                sample = self.sample(sample_type, 0.0)
-                orientation = tuple(self.attitude_quaternion("hold", 0.0))
-                angular_velocity = (0.0, 0.0, 0.0)
-                angular_acceleration = (0.0, 0.0, 0.0)
+            )
             published_trajectory_type = trajectory_type
+            published_control_mode = configured_control_mode
+            published_phase = (
+                "start_approach" if time_s < move_s else "heading_alignment"
+            )
             target_valid = self.target_is_valid(sample.position)
-        else:
+        elif trajectory_type in AUTOMATIC_TRAJECTORY_TYPES:
             sample = self.sample(trajectory_type, effective_time_s)
             orientation, angular_velocity, angular_acceleration = self.sample_attitude(
                 trajectory_type, effective_time_s
             )
             published_trajectory_type = trajectory_type
+            published_control_mode = configured_control_mode
+            published_phase = "tracking"
             target_valid = self.target_is_valid(sample.position)
+        else:
+            sample = self.idle_hold_sample()
+            orientation = tuple(
+                self.latest_quaternion
+                if self.latest_quaternion is not None
+                else self.attitude_quaternion("hold", 0.0)
+            )
+            angular_velocity = (0.0, 0.0, 0.0)
+            angular_acceleration = (0.0, 0.0, 0.0)
+            published_trajectory_type = trajectory_type
+            published_control_mode = configured_control_mode
+            published_phase = "invalid"
+            target_valid = False
+
+        if self.tracking_started and not self.control_mode_is_compatible(
+            trajectory_type, configured_control_mode
+        ):
+            target_valid = False
+
+        # Every published pose target is level by definition.  Measured tilt
+        # is feedback, never a target: keep only the requested map yaw and
+        # reject roll/pitch angular feed-forward at the publication boundary.
+        # This applies equally to idle, holds, manual position commands,
+        # automatic trajectories, and the move-to-start prelude.
+        orientation = tuple(self.level_heading_quaternion(orientation))
+        angular_velocity = (0.0, 0.0, float(angular_velocity[2]))
+        angular_acceleration = (0.0, 0.0, float(angular_acceleration[2]))
 
         msg = TrajectoryTarget()
         msg.header.stamp = now.to_msg()
@@ -225,6 +267,8 @@ class TrajectoryCommandNode(Node):
         msg.target_accel.angular.y = angular_acceleration[1]
         msg.target_accel.angular.z = angular_acceleration[2]
         msg.trajectory_type = published_trajectory_type
+        msg.control_mode = published_control_mode
+        msg.trajectory_phase = published_phase
         msg.time_s = float(time_s)
         msg.valid = target_valid
         self.pub.publish(msg)
@@ -237,7 +281,7 @@ class TrajectoryCommandNode(Node):
         return max(0.0, (int(now_ns) - self.started_ns) * 1e-9)
 
     def on_body_state(self, msg: BodyState):
-        """Track EKF position without consuming its localization attitude."""
+        """Track EKF position and its disturbance-free absolute map heading."""
 
         if not (msg.state_valid or msg.position_estimated):
             return
@@ -248,13 +292,27 @@ class TrajectoryCommandNode(Node):
         if not np.all(np.isfinite(position)):
             return
         self.latest_position = position
+        body_quaternion = np.asarray(
+            [
+                msg.pose.orientation.w,
+                msg.pose.orientation.x,
+                msg.pose.orientation.y,
+                msg.pose.orientation.z,
+            ],
+            dtype=np.float64,
+        )
+        body_norm = float(np.linalg.norm(body_quaternion))
+        if np.isfinite(body_norm) and body_norm > 1e-9:
+            self.latest_map_yaw = float(
+                self.quaternion_to_rpy(body_quaternion / body_norm)[2]
+            )
         if self.initial_position is None:
             self.initial_position = position.copy()
             self.envelope_checked = False
             self.get_logger().info("Captured trusted initial position for relative trajectory")
 
     def on_imu(self, msg: Imu):
-        """Track the external-IMU attitude directly, outside localization."""
+        """Combine external-IMU tilt/rates with BodyState absolute yaw."""
 
         quaternion = np.asarray(
             [
@@ -271,9 +329,13 @@ class TrajectoryCommandNode(Node):
             or msg.orientation_covariance[0] < 0.0
             or not np.isfinite(norm)
             or norm <= 1e-9
+            or self.latest_map_yaw is None
         ):
             return
-        self.latest_quaternion = quaternion / norm
+        imu_rpy = self.quaternion_to_rpy(quaternion / norm)
+        self.latest_quaternion = self.rpy_quaternion(
+            float(imu_rpy[0]), float(imu_rpy[1]), self.latest_map_yaw
+        )
         angular_velocity = np.asarray(
             [msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z],
             dtype=np.float64,
@@ -308,7 +370,7 @@ class TrajectoryCommandNode(Node):
             or self.manual_command.source != "web_operator"
         ):
             return 0.0
-        values = np.asarray(self.manual_command.normalized, dtype=np.float64)
+        values = np.asarray(self.manual_command.action, dtype=np.float64)
         if values.shape != (8,) or not np.all(np.isfinite(values)):
             return 0.0
         return float(np.clip(np.mean(values[:4]), -1.0, 1.0))
@@ -371,7 +433,7 @@ class TrajectoryCommandNode(Node):
         )
 
     def station_hold_target(self, now_ns):
-        """Convert stick rates to a pose target and latch measured pose on release."""
+        """Publish Station Hold Fast velocity and latch pose on stick release."""
 
         if self.station_target_position is None:
             source = self.motion_start_position
@@ -389,15 +451,19 @@ class TrajectoryCommandNode(Node):
             self.station_target_quaternion = self.level_heading_quaternion(source)
 
         command = self.current_station_input(now_ns)
-        # Station mode keeps the normal left-stick mapping: longitudinal is
-        # forward motion and horizontal is heading. It does not reinterpret
-        # the horizontal axis as lateral motion.
-        command[1] = 0.0
+        # Every gamepad pose target uses the Station Hold Fast convention.
+        # Controller selection does not alter stick axes or target semantics:
+        # left-stick Y/X are forward/yaw, right-stick X/Y are lateral/height.
         forward, left, up, yaw_ccw = (float(value) for value in command)
         planar_active = not np.allclose(command[:2], 0.0, atol=1e-3)
         heave_active = not math.isclose(up, 0.0, abs_tol=1e-3)
         yaw_active = not math.isclose(yaw_ccw, 0.0, abs_tol=1e-3)
 
+        # While a rate command is active, keep the position target on the
+        # measured vehicle and drive motion with velocity feed-forward.  On
+        # the first neutral sample, latch the final measured pose.  This is
+        # the Station Hold Fast contract: the green target cannot integrate
+        # away from a slower vehicle and become an unreachable moving goal.
         if self.latest_position is not None:
             if planar_active or self.station_planar_active:
                 self.station_target_position[:2] = self.latest_position[:2]
@@ -406,7 +472,7 @@ class TrajectoryCommandNode(Node):
         if self.latest_quaternion is not None and (
             yaw_active or self.station_yaw_active
         ):
-            # The right-stick horizontal axis owns yaw only. Roll and pitch
+            # The left-stick horizontal axis owns yaw. Roll and pitch
             # remain level instead of latching a transient measured tilt.
             measured_yaw = self.quaternion_to_rpy(self.latest_quaternion)[2]
             self.station_target_quaternion = self.rpy_quaternion(
@@ -420,28 +486,56 @@ class TrajectoryCommandNode(Node):
         linear_gain = abs(
             float(self.get_parameter("station_linear_input_gain_mps").value)
         )
+        lateral_gain = abs(
+            float(self.get_parameter("station_lateral_input_gain_mps").value)
+        )
         vertical_gain = abs(
             float(self.get_parameter("manual_vertical_speed_mps").value)
         )
         yaw_gain = abs(
             float(self.get_parameter("station_yaw_input_gain_rps").value)
         )
+        # Browser/gamepad convention: right stick down is positive.  Map FLU
+        # uses +Z up, so the target-height rate must carry the opposite sign.
+        target_vertical_velocity = -up * vertical_gain
         current_quaternion = (
             self.latest_quaternion
             if self.latest_quaternion is not None
             else self.station_target_quaternion
         )
-        rotation = self.rotation_matrix(current_quaternion)
+        # Operator X/Y commands are horizontal map-plane commands.  Use the
+        # current heading only, so measured roll/pitch cannot tilt or scale a
+        # requested horizontal direction.
+        rotation = self.rotation_matrix(
+            self.level_heading_quaternion(current_quaternion)
+        )
         planar_world = rotation @ np.asarray(
-            [forward * linear_gain, left * linear_gain, 0.0],
+            [forward * linear_gain, left * lateral_gain, 0.0],
             dtype=np.float64,
         )
         angular_world = rotation @ np.asarray(
             [0.0, 0.0, yaw_ccw * yaw_gain], dtype=np.float64
         )
+        if bool(self.get_parameter("require_pool_bounds").value):
+            minimum = np.asarray(
+                self.get_parameter("pool_min_xyz").value, dtype=np.float64
+            )
+            maximum = np.asarray(
+                self.get_parameter("pool_max_xyz").value, dtype=np.float64
+            )
+            if minimum.shape == (3,) and maximum.shape == (3,):
+                self.station_target_position[:] = np.clip(
+                    self.station_target_position,
+                    minimum,
+                    maximum,
+                )
         sample = TrajectorySample(
             position=tuple(float(value) for value in self.station_target_position),
-            velocity=(float(planar_world[0]), float(planar_world[1]), up * vertical_gain),
+            velocity=(
+                float(planar_world[0]),
+                float(planar_world[1]),
+                float(target_vertical_velocity),
+            ),
             acceleration=(0.0, 0.0, 0.0),
         )
         return (
@@ -452,35 +546,44 @@ class TrajectoryCommandNode(Node):
 
     def on_reset_scenario(self, _request, response):
         trajectory_type = str(self.get_parameter("trajectory_type").value).lower()
+        control_mode = str(self.get_parameter("control_mode").value).lower()
+        if not self.control_mode_is_compatible(trajectory_type, control_mode):
+            response.success = False
+            response.message = (
+                f"trajectory {trajectory_type} is incompatible with control mode "
+                f"{control_mode}"
+            )
+            return response
         if (
-            trajectory_type in {
-                "move_to_hold",
-                "altitude_hold",
-                "station_hold",
-                "station_hold_fast",
-                "spatial_figure_eight",
-            }
+            trajectory_type in {"hold", *AUTOMATIC_TRAJECTORY_TYPES}
             and self.motion_start_position is None
         ):
             response.success = False
             response.message = f"{trajectory_type} requires a validated current body pose"
             return response
         if (
-            trajectory_type
-            in {"station_hold", "station_hold_fast", "spatial_figure_eight"}
+            trajectory_type in {"hold", *AUTOMATIC_TRAJECTORY_TYPES}
             and self.motion_start_quaternion is None
         ):
             response.success = False
             response.message = f"{trajectory_type} requires a validated current attitude"
             return response
-        if trajectory_type == "altitude_hold":
+        if trajectory_type == "hold" and control_mode == "altitude_hold":
             self.altitude_hold_z = float(self.get_parameter("center_z").value)
             self.altitude_heave_active = False
-        elif trajectory_type in {"station_hold", "station_hold_fast"}:
+        elif trajectory_type == "hold" and control_mode in {
+            "station_hold",
+            "station_hold_fast",
+            "rl_policy",
+        }:
             self.station_target_position = self.motion_start_position.copy()
-            self.station_target_position[2] = float(
-                self.get_parameter("center_z").value
-            )
+            # Standard Station Hold retains its configured absolute height.
+            # Station Hold Fast and RL+None instead latch the measured height
+            # at Start; their right-stick rate then updates and re-latches it.
+            if control_mode == "station_hold":
+                self.station_target_position[2] = float(
+                    self.get_parameter("center_z").value
+                )
             self.station_target_quaternion = self.level_heading_quaternion(
                 self.motion_start_quaternion
             )
@@ -515,13 +618,17 @@ class TrajectoryCommandNode(Node):
 
     def on_validate_scenario(self, _request, response):
         trajectory_type = str(self.get_parameter("trajectory_type").value).lower()
-        if trajectory_type in {
-            "move_to_hold",
-            "altitude_hold",
-            "station_hold",
-            "station_hold_fast",
-            "spatial_figure_eight",
-        }:
+        control_mode = str(self.get_parameter("control_mode").value).lower()
+        if not self.control_mode_is_compatible(trajectory_type, control_mode):
+            self.envelope_valid = False
+            self.envelope_checked = True
+            response.success = False
+            response.message = (
+                f"trajectory {trajectory_type} is incompatible with control mode "
+                f"{control_mode}"
+            )
+            return response
+        if trajectory_type in {"hold", *AUTOMATIC_TRAJECTORY_TYPES}:
             if self.latest_position is None or self.latest_quaternion is None:
                 self.envelope_valid = False
                 self.envelope_checked = True
@@ -546,8 +653,29 @@ class TrajectoryCommandNode(Node):
         )
         return response
 
+    @staticmethod
+    def control_mode_is_compatible(trajectory_type: str, control_mode: str) -> bool:
+        """Keep target generation independent while rejecting unsafe pairings."""
+
+        trajectory_type = str(trajectory_type).lower()
+        control_mode = str(control_mode).lower()
+        if trajectory_type == "hold":
+            return control_mode in {
+                "altitude_hold",
+                "station_hold",
+                "station_hold_fast",
+                "rl_policy",
+            }
+        if trajectory_type in AUTOMATIC_TRAJECTORY_TYPES:
+            return control_mode in {
+                "station_hold",
+                "station_hold_fast",
+                "rl_policy",
+            }
+        return False
+
     def sample(self, trajectory_type: str, time_s: float) -> TrajectorySample:
-        """Evaluate one of the Isaac AUV trajectory families."""
+        """Evaluate a managed hold, fixed-start approach, or automatic path."""
 
         relative = bool(self.get_parameter("relative_to_initial_pose").value)
         motion_start_position = getattr(self, "motion_start_position", None)
@@ -564,21 +692,22 @@ class TrajectoryCommandNode(Node):
                 float(self.get_parameter("center_y").value),
                 float(self.get_parameter("center_z").value),
             )
-        amp_x = float(self.get_parameter("amp_x").value)
-        amp_y = float(self.get_parameter("amp_y").value)
-        amp_z = float(self.get_parameter("amp_z").value)
-        period = max(0.1, float(self.get_parameter("period_s").value))
-        omega = 2.0 * math.pi / period
-        phase_x = omega * time_s
-        phase_y = 2.0 * omega * time_s
-
-        if trajectory_type == "move_to_hold":
+        if trajectory_type in {"move_to_hold", "move_to_trajectory_start"}:
             start = self.motion_start_position
             if start is None:
                 start = self.latest_position
             if start is None:
                 start = np.asarray(center, dtype=np.float64)
-            goal = np.asarray(center, dtype=np.float64)
+            if trajectory_type == "move_to_trajectory_start":
+                active_type = str(
+                    self.get_parameter("trajectory_type").value
+                ).lower()
+                goal = np.asarray(
+                    self.sample(active_type, 0.0).position,
+                    dtype=np.float64,
+                )
+            else:
+                goal = np.asarray(center, dtype=np.float64)
             displacement = goal - np.asarray(start, dtype=np.float64)
             duration = max(0.1, float(self.get_parameter("move_duration_s").value))
             tau = float(np.clip(time_s / duration, 0.0, 1.0))
@@ -595,118 +724,16 @@ class TrajectoryCommandNode(Node):
                 velocity=tuple(float(value) for value in velocity),
                 acceleration=tuple(float(value) for value in acceleration),
             )
-        if trajectory_type == "altitude_hold":
-            start = self.motion_start_position
-            if start is None:
-                start = self.latest_position
-            if start is None:
-                start = np.asarray(center, dtype=np.float64)
-            return TrajectorySample(
-                position=(float(start[0]), float(start[1]), float(center[2])),
-                velocity=(0.0, 0.0, 0.0),
-                acceleration=(0.0, 0.0, 0.0),
+        if trajectory_type in AUTOMATIC_TRAJECTORY_TYPES:
+            offset, velocity, acceleration, _yaw = self.trajectory_kinematics(
+                trajectory_type, time_s
             )
-        if trajectory_type.startswith("step_"):
-            offset = [0.0, 0.0, 0.0]
-            velocity = [0.0, 0.0, 0.0]
-            acceleration = [0.0, 0.0, 0.0]
-            axis_name = trajectory_type.rsplit("_", 1)[-1]
-            if axis_name in {"x", "y", "z"}:
-                axis = {"x": 0, "y": 1, "z": 2}[axis_name]
-                if time_s >= float(self.get_parameter("step_time_s").value):
-                    offset[axis] = float(self.get_parameter("step_amplitude").value)
-            offset, velocity, acceleration = tuple(offset), tuple(velocity), tuple(acceleration)
-        elif trajectory_type == "hold" or trajectory_type.startswith("step_"):
+        else:
+            # Unsupported external names remain stationary and are marked
+            # invalid by control_mode_is_compatible() before publication.
             offset = (0.0, 0.0, 0.0)
             velocity = (0.0, 0.0, 0.0)
             acceleration = (0.0, 0.0, 0.0)
-        elif trajectory_type == "circle":
-            offset = (
-                amp_x * math.cos(phase_x),
-                amp_y * math.sin(phase_x),
-                0.0,
-            )
-            velocity = (
-                -amp_x * omega * math.sin(phase_x),
-                amp_y * omega * math.cos(phase_x),
-                0.0,
-            )
-            acceleration = (
-                -amp_x * omega**2 * math.cos(phase_x),
-                -amp_y * omega**2 * math.sin(phase_x),
-                0.0,
-            )
-        elif trajectory_type == "helix":
-            offset = (
-                amp_x * math.cos(phase_x),
-                amp_y * math.sin(phase_x),
-                amp_z * math.sin(phase_y),
-            )
-            velocity = (
-                -amp_x * omega * math.sin(phase_x),
-                amp_y * omega * math.cos(phase_x),
-                2.0 * amp_z * omega * math.cos(phase_y),
-            )
-            acceleration = (
-                -amp_x * omega**2 * math.cos(phase_x),
-                -amp_y * omega**2 * math.sin(phase_x),
-                -4.0 * amp_z * omega**2 * math.sin(phase_y),
-            )
-        elif trajectory_type == "spiral":
-            offset, velocity, acceleration = self._sample_spiral(time_s, omega)
-        elif trajectory_type == "chirp":
-            offset, velocity, acceleration = self._sample_chirp(time_s, omega)
-        elif trajectory_type == "racetrack":
-            offset, velocity, acceleration = self._sample_racetrack(time_s)
-        elif trajectory_type in {"sine_x", "sine_y", "sine_z"}:
-            axis = {"sine_x": 0, "sine_y": 1, "sine_z": 2}[trajectory_type]
-            offset = [0.0, 0.0, 0.0]
-            velocity = [0.0, 0.0, 0.0]
-            acceleration = [0.0, 0.0, 0.0]
-            offset[axis] = amp_x * math.sin(phase_x)
-            velocity[axis] = amp_x * omega * math.cos(phase_x)
-            acceleration[axis] = -amp_x * omega**2 * math.sin(phase_x)
-            offset = tuple(offset)
-            velocity = tuple(velocity)
-            acceleration = tuple(acceleration)
-        elif trajectory_type == "spatial_figure_eight":
-            offset, velocity, acceleration, _yaw = (
-                self.spatial_figure_eight_kinematics(time_s)
-            )
-        elif trajectory_type == "pose_lissajous_6dof":
-            offset = (
-                amp_x * math.sin(phase_x),
-                amp_y * math.sin(phase_y),
-                amp_z * math.sin(3.0 * phase_x),
-            )
-            velocity = (
-                amp_x * omega * math.cos(phase_x),
-                2.0 * amp_y * omega * math.cos(phase_y),
-                3.0 * amp_z * omega * math.cos(3.0 * phase_x),
-            )
-            acceleration = (
-                -amp_x * omega**2 * math.sin(phase_x),
-                -4.0 * amp_y * omega**2 * math.sin(phase_y),
-                -9.0 * amp_z * omega**2 * math.sin(3.0 * phase_x),
-            )
-        else:
-            # Isaac's default trajectory policy was trained/evaluated on a
-            # Lissajous-style figure-eight, so unknown names fall back there.
-            offset = (
-                amp_x * math.sin(phase_x),
-                amp_y * math.sin(phase_y),
-                0.0,
-            )
-            velocity = (
-                amp_x * omega * math.cos(phase_x),
-                2.0 * amp_y * omega * math.cos(phase_y),
-                0.0,
-            )
-            acceleration = (
-                -amp_x * omega**2 * math.sin(phase_x),
-                -4.0 * amp_y * omega**2 * math.sin(phase_y),
-                0.0,
-            )
 
         position = (
             center[0] + offset[0],
@@ -715,13 +742,21 @@ class TrajectoryCommandNode(Node):
         )
         return TrajectorySample(position=position, velocity=velocity, acceleration=acceleration)
 
-    def spatial_figure_eight_kinematics(self, time_s: float):
-        """Return a smooth 3-D figure eight whose initial heading is map +F."""
+    def phase_kinematics(self, time_s: float):
+        """Return ramped periodic phase and its first two time derivatives."""
 
-        amp_x = float(self.get_parameter("amp_x").value)
-        amp_y = float(self.get_parameter("amp_y").value)
-        amp_z = float(self.get_parameter("amp_z").value)
         period = max(0.1, float(self.get_parameter("period_s").value))
+        phase_time, phase_rate, phase_acceleration = self.ramped_time_kinematics(
+            time_s
+        )
+        phase = 2.0 * math.pi * phase_time / period
+        phase_dot = 2.0 * math.pi * phase_rate / period
+        phase_ddot = 2.0 * math.pi * phase_acceleration / period
+        return phase, phase_dot, phase_ddot
+
+    def ramped_time_kinematics(self, time_s: float):
+        """Return smoothly started effective time and its first derivatives."""
+
         ramp_s = max(0.0, float(self.get_parameter("trajectory_ramp_s").value))
         if 0.0 < ramp_s and time_s < ramp_s:
             ramp_fraction = float(np.clip(time_s / ramp_s, 0.0, 1.0))
@@ -736,59 +771,204 @@ class TrajectoryCommandNode(Node):
             phase_time = time_s - 0.5 * ramp_s
             phase_rate = 1.0
             phase_acceleration = 0.0
+        return phase_time, phase_rate, phase_acceleration
 
-        phase = 2.0 * math.pi * phase_time / period
-        phase_dot = 2.0 * math.pi * phase_rate / period
-        phase_ddot = 2.0 * math.pi * phase_acceleration / period
-        canonical_offset = np.asarray(
-            [amp_x * math.sin(phase), amp_y * math.sin(2.0 * phase)],
-            dtype=np.float64,
-        )
-        canonical_first = np.asarray(
-            [amp_x * math.cos(phase), 2.0 * amp_y * math.cos(2.0 * phase)],
-            dtype=np.float64,
-        )
-        canonical_second = np.asarray(
-            [-amp_x * math.sin(phase), -4.0 * amp_y * math.sin(2.0 * phase)],
-            dtype=np.float64,
-        )
+    @staticmethod
+    def compose_kinematics(path_offset, path_first, path_second, phase_dot, phase_ddot):
+        offset = np.asarray(path_offset, dtype=np.float64)
+        first = np.asarray(path_first, dtype=np.float64)
+        second = np.asarray(path_second, dtype=np.float64)
+        velocity = first * phase_dot
+        acceleration = second * phase_dot**2 + first * phase_ddot
+        yaw = math.atan2(float(first[1]), float(first[0]))
+        return tuple(offset), tuple(velocity), tuple(acceleration), yaw
 
-        # Keep x=sin(t), y=sin(2t) in the map frame: reflection across map X
-        # swaps the left/right halves, so the figure-eight's left-right
-        # symmetry axis points along +F. Its center-crossing tangent determines
-        # the vehicle's starting yaw.
-        planar_offset = canonical_offset
-        planar_first = canonical_first
-        planar_second = canonical_second
+    def trajectory_kinematics(self, trajectory_type: str, time_s: float):
+        """Dispatch one configured automatic path in the horizontal plane."""
 
-        offset = np.asarray(
+        trajectory_type = str(trajectory_type).lower()
+        if trajectory_type == "spatial_lissajous":
+            return self.spatial_lissajous_kinematics(time_s)
+        if trajectory_type == "circle":
+            return self.circle_kinematics(time_s)
+        if trajectory_type == "racetrack":
+            return self.racetrack_kinematics(time_s)
+        if trajectory_type == "straight_line":
+            return self.straight_line_kinematics(time_s)
+        zeros = (0.0, 0.0, 0.0)
+        return zeros, zeros, zeros, 0.0
+
+    def spatial_lissajous_kinematics(self, time_s: float):
+        """Return a 1:2:3 spatial Lissajous at constant total path speed."""
+
+        amp_x = abs(float(self.get_parameter("amp_x").value))
+        amp_y = abs(float(self.get_parameter("amp_y").value))
+        amp_z = abs(float(self.get_parameter("amp_z").value))
+        path_speed = abs(
+            float(self.get_parameter("trajectory_speed_mps").value)
+        )
+        phases, cumulative_length = self.lissajous_arc_table(
+            amp_x, amp_y, amp_z
+        )
+        lap_length = float(cumulative_length[-1])
+        if lap_length <= 1.0e-9 or path_speed <= 0.0:
+            zeros = (0.0, 0.0, 0.0)
+            return zeros, zeros, zeros, 0.0
+
+        effective_time, time_rate, time_acceleration = (
+            self.ramped_time_kinematics(time_s)
+        )
+        distance = path_speed * effective_time
+        lap_distance = distance % lap_length
+        phase = float(np.interp(lap_distance, cumulative_length, phases))
+
+        path_offset = np.asarray(
             [
-                planar_offset[0],
-                planar_offset[1],
+                amp_x * math.sin(phase),
+                amp_y * math.sin(2.0 * phase),
                 amp_z * math.sin(3.0 * phase),
             ],
             dtype=np.float64,
         )
         path_first = np.asarray(
             [
-                planar_first[0],
-                planar_first[1],
+                amp_x * math.cos(phase),
+                2.0 * amp_y * math.cos(2.0 * phase),
                 3.0 * amp_z * math.cos(3.0 * phase),
             ],
             dtype=np.float64,
         )
         path_second = np.asarray(
             [
-                planar_second[0],
-                planar_second[1],
+                -amp_x * math.sin(phase),
+                -4.0 * amp_y * math.sin(2.0 * phase),
                 -9.0 * amp_z * math.sin(3.0 * phase),
             ],
             dtype=np.float64,
         )
-        velocity = path_first * phase_dot
-        acceleration = path_second * phase_dot**2 + path_first * phase_ddot
-        yaw = math.atan2(float(planar_first[1]), float(planar_first[0]))
-        return tuple(offset), tuple(velocity), tuple(acceleration), yaw
+        derivative_norm = max(1.0e-9, float(np.linalg.norm(path_first)))
+        distance_rate = path_speed * time_rate
+        distance_acceleration = path_speed * time_acceleration
+        phase_dot = distance_rate / derivative_norm
+        phase_ddot = (
+            distance_acceleration / derivative_norm
+            - float(np.dot(path_first, path_second))
+            * distance_rate**2
+            / derivative_norm**4
+        )
+        return self.compose_kinematics(
+            path_offset,
+            path_first,
+            path_second,
+            phase_dot,
+            phase_ddot,
+        )
+
+    def lissajous_arc_table(self, amp_x: float, amp_y: float, amp_z: float):
+        """Build and cache phase-to-arc-length data for one 1:2:3 lap."""
+
+        key = (float(amp_x), float(amp_y), float(amp_z))
+        cached = getattr(self, "_lissajous_arc_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1], cached[2]
+
+        phases = np.linspace(0.0, 2.0 * math.pi, 4097, dtype=np.float64)
+        derivatives = np.column_stack(
+            (
+                amp_x * np.cos(phases),
+                2.0 * amp_y * np.cos(2.0 * phases),
+                3.0 * amp_z * np.cos(3.0 * phases),
+            )
+        )
+        derivative_norms = np.linalg.norm(derivatives, axis=1)
+        phase_step = phases[1] - phases[0]
+        segment_lengths = (
+            0.5
+            * (derivative_norms[:-1] + derivative_norms[1:])
+            * phase_step
+        )
+        cumulative_length = np.concatenate(
+            (np.zeros(1, dtype=np.float64), np.cumsum(segment_lengths))
+        )
+        self._lissajous_arc_cache = (key, phases, cumulative_length)
+        return phases, cumulative_length
+
+    def circle_kinematics(self, time_s: float):
+        """Return a counter-clockwise circle starting with map-forward tangent."""
+
+        radius = abs(float(self.get_parameter("radius_m").value))
+        phase, phase_dot, phase_ddot = self.phase_kinematics(time_s)
+        return self.compose_kinematics(
+            (radius * math.sin(phase), -radius * math.cos(phase), 0.0),
+            (radius * math.cos(phase), radius * math.sin(phase), 0.0),
+            (-radius * math.sin(phase), radius * math.cos(phase), 0.0),
+            phase_dot,
+            phase_ddot,
+        )
+
+    def racetrack_kinematics(self, time_s: float):
+        """Return a constant-path-speed stadium/racetrack elongated along map X."""
+
+        radius = max(1e-6, abs(float(self.get_parameter("amp_y").value)))
+        outer_half_length = max(
+            radius, abs(float(self.get_parameter("amp_x").value))
+        )
+        straight_half_length = outer_half_length - radius
+        lap_length = 4.0 * straight_half_length + 2.0 * math.pi * radius
+        phase, phase_dot, phase_ddot = self.phase_kinematics(time_s)
+        distance = (phase % (2.0 * math.pi)) * lap_length / (2.0 * math.pi)
+
+        straight_length = 2.0 * straight_half_length
+        if distance < straight_length:
+            offset = (-straight_half_length + distance, -radius, 0.0)
+            tangent = (1.0, 0.0, 0.0)
+            curvature = (0.0, 0.0, 0.0)
+        elif distance < straight_length + math.pi * radius:
+            angle = -0.5 * math.pi + (distance - straight_length) / radius
+            offset = (
+                straight_half_length + radius * math.cos(angle),
+                radius * math.sin(angle),
+                0.0,
+            )
+            tangent = (-math.sin(angle), math.cos(angle), 0.0)
+            curvature = (-math.cos(angle) / radius, -math.sin(angle) / radius, 0.0)
+        elif distance < 2.0 * straight_length + math.pi * radius:
+            progress = distance - straight_length - math.pi * radius
+            offset = (straight_half_length - progress, radius, 0.0)
+            tangent = (-1.0, 0.0, 0.0)
+            curvature = (0.0, 0.0, 0.0)
+        else:
+            angle = (
+                0.5 * math.pi
+                + (distance - 2.0 * straight_length - math.pi * radius) / radius
+            )
+            offset = (
+                -straight_half_length + radius * math.cos(angle),
+                radius * math.sin(angle),
+                0.0,
+            )
+            tangent = (-math.sin(angle), math.cos(angle), 0.0)
+            curvature = (-math.cos(angle) / radius, -math.sin(angle) / radius, 0.0)
+
+        distance_per_phase = lap_length / (2.0 * math.pi)
+        first = np.asarray(tangent, dtype=np.float64) * distance_per_phase
+        second = np.asarray(curvature, dtype=np.float64) * distance_per_phase**2
+        return self.compose_kinematics(
+            offset, first, second, phase_dot, phase_ddot
+        )
+
+    def straight_line_kinematics(self, time_s: float):
+        """Return a smooth out-and-back line while keeping map-forward heading."""
+
+        half_length = abs(float(self.get_parameter("amp_x").value))
+        phase, phase_dot, phase_ddot = self.phase_kinematics(time_s)
+        offset = (-half_length * math.cos(phase), 0.0, 0.0)
+        first = (half_length * math.sin(phase), 0.0, 0.0)
+        second = (half_length * math.cos(phase), 0.0, 0.0)
+        sample = self.compose_kinematics(
+            offset, first, second, phase_dot, phase_ddot
+        )
+        return sample[0], sample[1], sample[2], 0.0
 
     def idle_hold_sample(self) -> TrajectorySample:
         """Hold the latest measured position until an approved task starts."""
@@ -836,7 +1016,7 @@ class TrajectoryCommandNode(Node):
         return tuple(quaternion), tuple(omega), tuple(acceleration)
 
     def attitude_quaternion(self, trajectory_type: str, time_s: float):
-        if trajectory_type in {"move_to_forward", "move_to_figure_eight_start"}:
+        if trajectory_type == "move_to_trajectory_start":
             start = next(
                 (
                     quaternion
@@ -849,29 +1029,22 @@ class TrajectoryCommandNode(Node):
                 ),
                 np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float64),
             )
-            duration = (
-                max(
-                    0.1,
-                    float(self.get_parameter("hold_before_motion_s").value)
-                    - float(self.get_parameter("move_duration_s").value),
-                )
-                if trajectory_type == "move_to_figure_eight_start"
-                else max(
-                    0.1, float(self.get_parameter("move_duration_s").value)
-                )
+            duration = max(
+                0.1,
+                float(self.get_parameter("hold_before_motion_s").value)
+                - float(self.get_parameter("move_duration_s").value),
             )
             fraction = float(np.clip(time_s / duration, 0.0, 1.0))
             blend = 10.0 * fraction**3 - 15.0 * fraction**4 + 6.0 * fraction**5
-            goal = np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
-            if trajectory_type == "move_to_figure_eight_start":
-                _offset, _velocity, _acceleration, start_yaw = (
-                    self.spatial_figure_eight_kinematics(0.0)
-                )
-                goal = self.rpy_quaternion(0.0, 0.0, start_yaw)
+            target_type = str(self.get_parameter("trajectory_type").value).lower()
+            _offset, _velocity, _acceleration, start_yaw = self.trajectory_kinematics(
+                target_type, 0.0
+            )
+            goal = self.rpy_quaternion(0.0, 0.0, start_yaw)
             return self.quaternion_slerp(start, goal, blend)
-        if trajectory_type == "spatial_figure_eight":
-            _offset, _velocity, _acceleration, yaw = (
-                self.spatial_figure_eight_kinematics(time_s)
+        if trajectory_type in AUTOMATIC_TRAJECTORY_TYPES:
+            _offset, _velocity, _acceleration, yaw = self.trajectory_kinematics(
+                trajectory_type, time_s
             )
             return self.rpy_quaternion(0.0, 0.0, yaw)
 
@@ -899,30 +1072,9 @@ class TrajectoryCommandNode(Node):
             base = self.initial_quaternion
         else:
             base = np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
-        rpy = np.zeros(3, dtype=np.float64)
-        if trajectory_type in {"step_roll", "step_pitch", "step_yaw"}:
-            if time_s >= float(self.get_parameter("step_time_s").value):
-                axis = {"step_roll": 0, "step_pitch": 1, "step_yaw": 2}[trajectory_type]
-                rpy[axis] = math.radians(
-                    float(self.get_parameter("step_amplitude").value)
-                )
-        elif mode == "six_dof_sine":
-            period = max(0.1, float(self.get_parameter("attitude_period_s").value))
-            phase = 2.0 * math.pi * time_s / period
-            amplitudes = np.radians(
-                [
-                    float(self.get_parameter("roll_amplitude_deg").value),
-                    float(self.get_parameter("pitch_amplitude_deg").value),
-                    float(self.get_parameter("yaw_amplitude_deg").value),
-                ]
-            )
-            rpy = amplitudes * np.asarray(
-                [math.sin(phase), math.sin(2.0 * phase), math.sin(0.5 * phase)]
-            )
-        elif mode == "fixed_identity":
-            base = np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
-        offset = self.rpy_quaternion(*rpy)
-        return self.quaternion_multiply(base, offset)
+        if mode == "fixed_identity":
+            return np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+        return base
 
     def angular_velocity_at(self, trajectory_type: str, time_s: float, step: float):
         before = self.attitude_quaternion(
@@ -970,14 +1122,9 @@ class TrajectoryCommandNode(Node):
     def validate_scenario_envelope(self):
         self.envelope_rejection_reason = ""
         trajectory_type = str(self.get_parameter("trajectory_type").value).lower()
+        control_mode = str(self.get_parameter("control_mode").value).lower()
         if (
-            trajectory_type in {
-                "move_to_hold",
-                "altitude_hold",
-                "station_hold",
-                "station_hold_fast",
-                "spatial_figure_eight",
-            }
+            trajectory_type in {"hold", *AUTOMATIC_TRAJECTORY_TYPES}
             and self.motion_start_position is None
         ):
             return False
@@ -1023,11 +1170,15 @@ class TrajectoryCommandNode(Node):
             or not np.all(attitude_min < attitude_max)
         ):
             return False
-        if trajectory_type in {"station_hold", "station_hold_fast"}:
+        if trajectory_type == "hold" and control_mode in {
+            "station_hold",
+            "station_hold_fast",
+            "rl_policy",
+        }:
             point = np.asarray(self.motion_start_position, dtype=np.float64)
             quaternion = np.asarray(self.motion_start_quaternion, dtype=np.float64)
             target = point.copy()
-            if target.shape == (3,):
+            if target.shape == (3,) and control_mode == "station_hold":
                 target[2] = float(self.get_parameter("center_z").value)
             return bool(
                 point.shape == (3,)
@@ -1042,7 +1193,7 @@ class TrajectoryCommandNode(Node):
                 and np.all(target >= minimum)
                 and np.all(target <= maximum)
             )
-        if trajectory_type == "altitude_hold":
+        if trajectory_type == "hold" and control_mode == "altitude_hold":
             point = np.asarray(self.motion_start_position, dtype=np.float64)
             quaternion = np.asarray(self.motion_start_quaternion, dtype=np.float64)
             angular_velocity = (
@@ -1102,7 +1253,7 @@ class TrajectoryCommandNode(Node):
             # map yaw is intentionally unrestricted; only tilt and rate are
             # safety-bounded for this altitude-only mode.
             return True
-        if trajectory_type == "spatial_figure_eight":
+        if trajectory_type in AUTOMATIC_TRAJECTORY_TYPES:
             move_duration = max(
                 0.1, float(self.get_parameter("move_duration_s").value)
             )
@@ -1112,8 +1263,8 @@ class TrajectoryCommandNode(Node):
             turn_duration = prelude_duration - move_duration
             if turn_duration < 0.1:
                 self.envelope_rejection_reason = (
-                    "figure-eight prelude must include at least 0.1 s to turn "
-                    "before the center approach"
+                    "automatic trajectory prelude must include at least 0.1 s "
+                    "for heading alignment after the start approach"
                 )
                 return False
             for prelude_time_s in np.linspace(0.0, prelude_duration, 201):
@@ -1121,13 +1272,15 @@ class TrajectoryCommandNode(Node):
                     np.clip(prelude_time_s, 0.0, move_duration)
                 )
                 turn_time_s = max(0.0, float(prelude_time_s) - move_duration)
-                move_sample = self.sample("move_to_hold", float(move_time_s))
+                move_sample = self.sample(
+                    "move_to_trajectory_start", float(move_time_s)
+                )
                 move_point = np.asarray(move_sample.position, dtype=np.float64)
                 move_orientation = self.attitude_quaternion(
-                    "move_to_figure_eight_start", turn_time_s
+                    "move_to_trajectory_start", turn_time_s
                 )
                 move_angular_velocity = self.angular_velocity_at(
-                    "move_to_figure_eight_start",
+                    "move_to_trajectory_start",
                     turn_time_s,
                     1.0
                     / max(
@@ -1145,14 +1298,25 @@ class TrajectoryCommandNode(Node):
                     or np.any(move_rpy[:2] > attitude_max[:2])
                 ):
                     self.envelope_rejection_reason = (
-                        "figure-eight center approach exceeds configured limits"
+                        "automatic trajectory start approach exceeds configured limits"
                     )
                     return False
+        if trajectory_type == "spatial_lissajous":
+            _phases, cumulative_length = self.lissajous_arc_table(
+                abs(float(self.get_parameter("amp_x").value)),
+                abs(float(self.get_parameter("amp_y").value)),
+                abs(float(self.get_parameter("amp_z").value)),
+            )
+            path_speed = max(
+                1.0e-9,
+                abs(float(self.get_parameter("trajectory_speed_mps").value)),
+            )
+            path_duration = float(cumulative_length[-1]) / path_speed
+        else:
+            path_duration = float(self.get_parameter("period_s").value)
         duration = max(
-            float(self.get_parameter("period_s").value)
+            path_duration
             + max(0.0, float(self.get_parameter("trajectory_ramp_s").value)),
-            2.0 * float(self.get_parameter("attitude_period_s").value),
-            float(self.get_parameter("step_time_s").value) + 1.0,
             float(self.get_parameter("move_duration_s").value) + 1.0,
         )
         for time_s in np.linspace(0.0, duration, 361):
@@ -1167,7 +1331,7 @@ class TrajectoryCommandNode(Node):
             rpy = self.quaternion_to_rpy(orientation)
             attitude_axes = (
                 slice(0, 2)
-                if trajectory_type == "spatial_figure_eight"
+                if trajectory_type in AUTOMATIC_TRAJECTORY_TYPES
                 else slice(None)
             )
             if (
@@ -1272,120 +1436,6 @@ class TrajectoryCommandNode(Node):
             ],
             dtype=np.float64,
         )
-
-    def _sample_spiral(self, time_s: float, omega: float):
-        radius_min = float(self.get_parameter("radius_min").value)
-        radius_max = float(self.get_parameter("radius_max").value)
-        radius_range = radius_max - radius_min
-        radial_phase = 0.5 * omega * time_s
-        radius = radius_min + 0.5 * radius_range * (1.0 - math.cos(radial_phase))
-        radius_dot = 0.25 * radius_range * omega * math.sin(radial_phase)
-        radius_ddot = 0.125 * radius_range * omega**2 * math.cos(radial_phase)
-        phase = omega * time_s
-        offset = (
-            radius * math.cos(phase),
-            radius * math.sin(phase),
-            0.0,
-        )
-        velocity = (
-            radius_dot * math.cos(phase) - radius * omega * math.sin(phase),
-            radius_dot * math.sin(phase) + radius * omega * math.cos(phase),
-            0.0,
-        )
-        acceleration = (
-            radius_ddot * math.cos(phase)
-            - 2.0 * radius_dot * omega * math.sin(phase)
-            - radius * omega**2 * math.cos(phase),
-            radius_ddot * math.sin(phase)
-            + 2.0 * radius_dot * omega * math.cos(phase)
-            - radius * omega**2 * math.sin(phase),
-            0.0,
-        )
-        return offset, velocity, acceleration
-
-    def _sample_chirp(self, time_s: float, omega: float):
-        amp_x = float(self.get_parameter("amp_x").value)
-        amp_y = float(self.get_parameter("amp_y").value)
-        chirp_rate = float(self.get_parameter("chirp_rate").value)
-        period = max(0.1, float(self.get_parameter("period_s").value))
-        w1 = chirp_rate * omega
-        chirp_k = (w1 - omega) / period
-        phase = omega * time_s + 0.5 * chirp_k * time_s**2
-        chirp_omega = omega + chirp_k * time_s
-        offset = (
-            amp_x * math.sin(phase),
-            amp_y * math.sin(2.0 * phase),
-            0.0,
-        )
-        velocity = (
-            amp_x * chirp_omega * math.cos(phase),
-            2.0 * amp_y * chirp_omega * math.cos(2.0 * phase),
-            0.0,
-        )
-        acceleration = (
-            amp_x * (chirp_k * math.cos(phase) - chirp_omega**2 * math.sin(phase)),
-            2.0
-            * amp_y
-            * (chirp_k * math.cos(2.0 * phase) - 2.0 * chirp_omega**2 * math.sin(2.0 * phase)),
-            0.0,
-        )
-        return offset, velocity, acceleration
-
-    def _sample_racetrack(self, time_s: float):
-        amp_x = float(self.get_parameter("amp_x").value)
-        radius = max(0.05, float(self.get_parameter("amp_y").value))
-        period = max(0.1, float(self.get_parameter("period_s").value))
-        half_straight = max(0.1, amp_x - radius)
-        path_length = 4.0 * half_straight + 2.0 * math.pi * radius
-        speed = path_length / period
-        s = (speed * time_s) % path_length
-
-        if s < 2.0 * half_straight:
-            return (
-                (-half_straight + s, radius, 0.0),
-                (speed, 0.0, 0.0),
-                (0.0, 0.0, 0.0),
-            )
-        if s < 2.0 * half_straight + math.pi * radius:
-            local_s = s - 2.0 * half_straight
-            theta = math.pi / 2.0 - local_s / radius
-            return (
-                half_straight + radius * math.cos(theta),
-                radius * math.sin(theta),
-                0.0,
-            ), (
-                speed * math.sin(theta),
-                -speed * math.cos(theta),
-                0.0,
-            ), (
-                -(speed**2 / radius) * math.cos(theta),
-                -(speed**2 / radius) * math.sin(theta),
-                0.0,
-            )
-        if s < 4.0 * half_straight + math.pi * radius:
-            local_s = s - (2.0 * half_straight + math.pi * radius)
-            return (
-                (half_straight - local_s, -radius, 0.0),
-                (-speed, 0.0, 0.0),
-                (0.0, 0.0, 0.0),
-            )
-
-        local_s = s - (4.0 * half_straight + math.pi * radius)
-        theta = -math.pi / 2.0 - local_s / radius
-        return (
-            -half_straight + radius * math.cos(theta),
-            radius * math.sin(theta),
-            0.0,
-        ), (
-            speed * math.sin(theta),
-            -speed * math.cos(theta),
-            0.0,
-        ), (
-            -(speed**2 / radius) * math.cos(theta),
-            -(speed**2 / radius) * math.sin(theta),
-            0.0,
-        )
-
 
 def main(args=None):
     rclpy.init(args=args)

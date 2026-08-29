@@ -1,17 +1,12 @@
-"""Action decoding helpers for policy outputs.
+"""Strict validation for direct policy actions."""
 
-Runners return plain numeric vectors. These helpers clamp and shape those
-vectors before control nodes publish concrete ROS command messages.
-"""
-
-def clamp_normalized(values, size):
-    # Clamp each model output defensively; a real policy can fail open during
-    # early integration, but control topics should stay in the declared range.
-    output = [0.0] * size
-    for index, value in enumerate(list(values)[:size]):
-        output[index] = max(-1.0, min(1.0, float(value)))
-    return output
+import math
 
 
 def decode_thruster_action(action):
-    return clamp_normalized(action, 8)
+    values = [float(value) for value in action]
+    if len(values) != 8:
+        raise ValueError("policy action must contain exactly eight values")
+    if not all(math.isfinite(value) and -1.0 <= value <= 1.0 for value in values):
+        raise ValueError("policy action must contain finite values in [-1, 1]")
+    return values

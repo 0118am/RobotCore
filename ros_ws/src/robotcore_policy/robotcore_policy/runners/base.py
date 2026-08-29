@@ -8,3 +8,9 @@ class PolicyRunner:
 
     def run(self, observation):
         raise NotImplementedError
+
+    def reset(self):
+        """Clear recurrent/history state after an input discontinuity."""
+
+    def close(self):
+        """Release optional runner resources."""

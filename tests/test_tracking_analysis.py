@@ -7,6 +7,7 @@ from scripts.analyze_tracking_runs import (
     estimate_trajectory_delay,
     plot_run,
     quaternion_wxyz_to_rpy,
+    select_experiment_window,
 )
 
 
@@ -34,6 +35,13 @@ def test_step_settling_time_requires_remaining_samples_in_band():
     actual = np.zeros_like(target)
     actual[2:, 0] = [0.02, 0.06, 0.085, 0.095, 0.101, 0.099, 0.10, 0.10]
     assert estimate_step_settling_time(time_s, target, actual, "step_x") == 2.0
+
+
+def test_experiment_window_requires_an_explicit_start_marker():
+    import pytest
+
+    with pytest.raises(ValueError, match="tracking_experiment start marker"):
+        select_experiment_window([{"type": "tracking_status", "time": 1}])
 
 
 def test_plot_run_emits_all_required_figures(tmp_path):

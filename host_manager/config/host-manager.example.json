@@ -18,7 +18,7 @@
     }
   ],
   "rosbag": {
-    "run_root": "/var/lib/robotcore/runs",
+    "run_root": "/home/nvidia/robotcore_logs/runs",
     "stale_after_seconds": 15
   },
   "apriltag_map": {
@@ -27,8 +27,7 @@
   },
   "control_config": {
     "pid_active_path": "/var/lib/robotcore/config/pid/active.json",
-    "pid_profiles_dir": "/var/lib/robotcore/config/pid/profiles",
-    "tasks_dir": "/var/lib/robotcore/config/tasks"
+    "pid_profiles_dir": "/var/lib/robotcore/config/pid/profiles"
   },
   "maintenance": {
     "upgrade_enabled": false,

@@ -1,4 +1,5 @@
 from pathlib import Path
+import math
 import sys
 
 import numpy as np
@@ -10,17 +11,26 @@ sys.path.insert(0, str(PACKAGE_ROOT))
 from robotcore_control.control_math import (  # noqa: E402
     ConditionalPid,
     PidGains,
+    attitude_with_heading,
     altitude_collective_pwm_commands,
     altitude_level_pwm_commands,
     altitude_station_pwm_commands,
     altitude_velocity_setpoint,
+    conditional_axis_integral_effort,
+    directional_velocity_feedforward,
     first_order_low_pass,
-    level_attitude_pd_efforts,
+    integral_reset_after_error_crossing,
+    level_attitude_rate_efforts,
     quaternion_apply,
     quaternion_error_body,
     quaternion_slerp,
+    quaternion_to_rpy,
     reject_vector_outlier,
     rpy_to_quaternion,
+    slew_rate_limit,
+    station_horizontal_pwm_mix,
+    station_velocity_setpoints,
+    surge_pitch_decoupling_effort,
     timestamped_rate_prediction,
 )
 
@@ -32,6 +42,28 @@ def test_altitude_setpoint_uses_only_target_and_actual_map_height():
     assert np.isclose(
         altitude_velocity_setpoint(0.2, 0.8, 0.0, 1.0), -0.6
     )
+
+
+def test_center_approach_preserves_planned_velocity_without_software_caps():
+    unrestricted = station_velocity_setpoints(
+        [-0.02, -0.196],
+        [-0.20, -1.20],
+        [0.30, 0.25],
+        0.50,
+        0.06,
+        center_approach=True,
+    )
+    ordinary = station_velocity_setpoints(
+        [-0.02, -0.196],
+        [-0.20, -1.20],
+        [0.30, 0.25],
+        0.50,
+        0.06,
+        center_approach=False,
+    )
+
+    assert np.allclose(unrestricted, [-0.08, -0.496])
+    assert np.allclose(ordinary, [-0.08, -0.06])
 
 
 def test_positive_flu_altitude_effort_uses_verified_negative_hardware_pwm():
@@ -58,42 +90,166 @@ def test_fast_station_vertical_mixer_preserves_level_control_at_individual_200us
         0.40, 0.08, 0.04, 0.40, -1.0
     )
 
-    # 0.40 normalized is one channel's 200 us offset on the 500 us hardware
-    # span. Attitude correction keeps its differential; collective height
+    # 0.40 PID effort is one channel's 200 us offset in the calibrated PID
+    # domain. Attitude correction keeps its differential; collective height
     # backs off enough that no individual T1--T4 channel exceeds that bound.
     assert np.max(np.abs(commands)) <= 0.40 + 1e-12
     assert np.isclose(commands[0] - commands[3], 0.24)
     assert np.isclose(np.mean(commands[:4]), -0.28)
 
 
-def test_level_pd_keeps_angle_stiffness_independent_from_delayed_rate_gain():
-    efforts, raw, saturated = level_attitude_pd_efforts(
+def test_level_cascade_converts_angle_error_to_bounded_rate_setpoint():
+    efforts, raw, desired_rate, saturated = level_attitude_rate_efforts(
         orientation_error=[0.10, -0.04],
         target_angular_rate=[0.0, 0.0],
         measured_angular_rate=[0.20, -0.10],
-        angle_kp=[0.45, 0.45],
-        rate_kp=[0.30, 0.55],
+        angle_to_rate_kp=[2.25, 0.80],
+        rate_kp=[0.20, 0.35],
+        angular_rate_limit=[0.12, 0.12],
         combined_limit=0.10,
     )
 
-    assert np.allclose(raw, [-0.015, 0.037])
+    assert np.allclose(desired_rate, [0.12, -0.032])
+    assert np.allclose(raw, [-0.016, 0.0238])
     assert np.allclose(efforts, raw)
     assert saturated is False
 
 
-def test_level_pd_preserves_axis_ratio_when_combined_output_is_limited():
-    efforts, raw, saturated = level_attitude_pd_efforts(
+def test_level_cascade_preserves_axis_ratio_when_combined_output_is_limited():
+    efforts, raw, desired_rate, saturated = level_attitude_rate_efforts(
         orientation_error=[0.0, 0.0],
         target_angular_rate=[0.0, 0.0],
         measured_angular_rate=[-0.50, 0.20],
-        angle_kp=[0.45, 0.45],
-        rate_kp=[0.30, 0.55],
+        angle_to_rate_kp=[2.25, 0.80],
+        rate_kp=[0.20, 0.35],
+        angular_rate_limit=[0.12, 0.12],
         combined_limit=0.10,
     )
 
-    assert np.allclose(raw, [0.15, -0.11])
-    assert np.allclose(efforts, raw * (0.10 / 0.26))
+    assert np.allclose(desired_rate, [0.0, 0.0])
+    assert np.allclose(raw, [0.10, -0.07])
+    assert np.allclose(efforts, raw * (0.10 / 0.17))
     assert saturated is True
+
+
+def test_level_cascade_combines_pitch_decoupling_before_effort_limit():
+    pitch_ff = surge_pitch_decoupling_effort(0.40, 0.04, 0.06, 0.04)
+    efforts, raw, _, saturated = level_attitude_rate_efforts(
+        orientation_error=[0.0, 0.0],
+        target_angular_rate=[0.0, 0.0],
+        measured_angular_rate=[-0.50, 0.20],
+        angle_to_rate_kp=[2.25, 0.80],
+        rate_kp=[0.20, 0.35],
+        angular_rate_limit=[0.12, 0.12],
+        combined_limit=0.10,
+        effort_feedforward=[0.0, pitch_ff],
+    )
+
+    assert np.isclose(pitch_ff, -0.016)
+    assert np.allclose(raw, [0.10, -0.086])
+    assert np.allclose(efforts, raw * (0.10 / 0.186))
+    assert saturated is True
+
+
+def test_level_cascade_adds_pitch_integral_before_effort_limit():
+    efforts, raw, _, saturated = level_attitude_rate_efforts(
+        orientation_error=[0.0, -0.10],
+        target_angular_rate=[0.0, 0.0],
+        measured_angular_rate=[0.0, 0.0],
+        angle_to_rate_kp=[2.25, 0.80],
+        rate_kp=[0.20, 0.35],
+        angular_rate_limit=[0.12, 0.12],
+        combined_limit=0.10,
+        effort_integral=[0.0, -0.03],
+    )
+
+    assert np.allclose(raw, [0.0, -0.058])
+    assert np.allclose(efforts, raw)
+    assert saturated is False
+
+
+def test_pitch_integral_effort_accumulates_and_respects_its_own_limit():
+    effort = conditional_axis_integral_effort(
+        0.0, -0.12, 0.08, 1.0, 0.04, [0.0, -0.042], 1, 0.10
+    )
+    limited = conditional_axis_integral_effort(
+        -0.039, -0.12, 0.08, 1.0, 0.04, [0.0, 0.0], 1, 0.10
+    )
+
+    assert np.isclose(effort, -0.0096)
+    assert np.isclose(limited, -0.04)
+
+
+def test_pitch_integral_effort_freezes_on_shared_saturation_but_unwinds():
+    frozen = conditional_axis_integral_effort(
+        -0.01, -0.12, 0.08, 1.0, 0.04, [0.05, -0.04], 1, 0.10
+    )
+    unwound = conditional_axis_integral_effort(
+        -0.02, 0.12, 0.08, 1.0, 0.04, [0.05, -0.04], 1, 0.10
+    )
+
+    assert np.isclose(frozen, -0.01)
+    assert np.isclose(unwound, -0.0104)
+
+
+def test_opposing_integral_resets_after_heading_error_crosses_zero():
+    reset, sign = integral_reset_after_error_crossing(
+        previous_error_sign=-1,
+        error=0.02,
+        integral_effort=-0.10,
+        hysteresis=0.003,
+    )
+
+    assert reset is True
+    assert sign == 1
+
+
+def test_integral_crossing_hysteresis_ignores_noise_and_aligned_bias():
+    noise_reset, noise_sign = integral_reset_after_error_crossing(
+        previous_error_sign=-1,
+        error=0.001,
+        integral_effort=-0.10,
+        hysteresis=0.003,
+    )
+    aligned_reset, aligned_sign = integral_reset_after_error_crossing(
+        previous_error_sign=-1,
+        error=0.02,
+        integral_effort=0.04,
+        hysteresis=0.003,
+    )
+
+    assert noise_reset is False
+    assert noise_sign == -1
+    assert aligned_reset is False
+    assert aligned_sign == 1
+
+
+def test_surge_pitch_decoupling_is_direction_specific_and_bounded():
+    assert np.isclose(
+        surge_pitch_decoupling_effort(0.40, 0.04, 0.06, 0.04), -0.016
+    )
+    assert np.isclose(
+        surge_pitch_decoupling_effort(-0.40, 0.04, 0.06, 0.04), 0.024
+    )
+    assert np.isclose(
+        surge_pitch_decoupling_effort(2.0, 0.04, 0.06, 0.04), -0.04
+    )
+
+
+def test_station_mixer_applies_level_effort_without_vertical_overwrite():
+    commands = altitude_station_pwm_commands(
+        0.20,
+        0.12,
+        0.0,
+        0.0,
+        0.40,
+        -1.0,
+        roll_effort=0.04,
+        pitch_effort=-0.03,
+    )
+
+    assert np.allclose(commands[:4], [-0.19, -0.13, -0.27, -0.21])
+    assert np.allclose(commands[4:], [-0.12, -0.12, 0.12, 0.12])
 
 
 def test_station_heading_uses_measured_t5_to_t8_yaw_directions_and_balance():
@@ -140,6 +296,20 @@ def test_station_combined_axes_preserve_ratios_at_live_pwm_limit():
 
     assert np.max(np.abs(limited)) <= 0.10 + 1e-12
     assert np.allclose(limited, reference * (0.10 / np.max(np.abs(reference))))
+
+
+def test_station_horizontal_mixer_reports_post_saturation_scale():
+    reference, reference_scale = station_horizontal_pwm_mix(
+        0.08, 0.08, 0.08, 1.0
+    )
+    limited, limited_scale = station_horizontal_pwm_mix(
+        0.08, 0.08, 0.08, 0.10
+    )
+
+    expected_scale = 0.10 / np.max(np.abs(reference))
+    assert np.isclose(reference_scale, 1.0)
+    assert np.isclose(limited_scale, expected_scale)
+    assert np.allclose(limited, reference * expected_scale)
 
 
 def test_altitude_pid_anti_windup_uses_live_pwm_limit():
@@ -224,6 +394,32 @@ def test_quaternion_slerp_is_sign_invariant_and_follows_shortest_arc():
     assert np.isclose(abs(np.dot(midpoint, negated_midpoint)), 1.0, atol=1e-10)
 
 
+def test_control_attitude_uses_imu_tilt_and_independent_map_heading():
+    disturbed_imu = rpy_to_quaternion(0.12, -0.08, np.deg2rad(-8.26))
+    body_state = rpy_to_quaternion(-0.03, 0.02, np.deg2rad(22.24))
+
+    fused = attitude_with_heading(disturbed_imu, body_state)
+
+    assert np.allclose(
+        quaternion_to_rpy(fused),
+        [0.12, -0.08, np.deg2rad(22.24)],
+        atol=1e-10,
+    )
+
+
+def test_control_attitude_heading_is_continuous_across_quaternion_wrap():
+    fused = attitude_with_heading(
+        rpy_to_quaternion(0.05, -0.04, np.deg2rad(170.0)),
+        rpy_to_quaternion(0.0, 0.0, np.deg2rad(-179.0)),
+    )
+
+    assert np.allclose(
+        quaternion_to_rpy(fused),
+        [0.05, -0.04, np.deg2rad(-179.0)],
+        atol=1e-10,
+    )
+
+
 def test_conditional_pid_does_not_wind_up_while_saturated():
     pid = ConditionalPid(
         PidGains(
@@ -245,6 +441,95 @@ def test_conditional_pid_does_not_wind_up_while_saturated():
     # stop instead of first unwinding a hidden integral.
     output = pid.step(setpoint=-0.1, measurement=0.0, dt=0.1)
     assert output < 0.0
+
+
+def test_station_velocity_integral_can_cross_measured_pwm_deadband():
+    pid = ConditionalPid(
+        PidGains(
+            kp=1.25,
+            ki=0.20,
+            kd=0.0,
+            integral_limit=0.8,
+            output_limit=0.4,
+        )
+    )
+
+    outputs = [
+        pid.step(setpoint=0.02, measurement=0.0, dt=0.02)
+        for _ in range(400)
+    ]
+
+    assert 0.0 < outputs[0] < 25.0 / 500.0
+    assert outputs[-1] > 25.0 / 500.0
+    assert outputs[-1] < 0.4
+    assert pid.integral > 0.0
+
+
+def test_fast_station_sway_feedforward_holds_effort_at_target_speed():
+    pid = ConditionalPid(PidGains(0.60, 0.0, 0.0, 0.5, 1.0))
+    feedforward = directional_velocity_feedforward(0.20, 1.80, 1.90, 0.40)
+
+    accelerating = pid.step(
+        setpoint=0.20,
+        measurement=0.15,
+        dt=0.02,
+        feedforward=feedforward,
+        output_limit=0.40,
+    )
+    at_target = pid.step(
+        setpoint=0.20,
+        measurement=0.20,
+        dt=0.02,
+        feedforward=feedforward,
+        output_limit=0.40,
+    )
+
+    assert np.isclose(feedforward, 0.36)
+    assert np.isclose(accelerating, 0.39)
+    assert np.isclose(at_target, 0.36)
+
+
+def test_fast_station_sway_feedforward_compensates_measured_direction_asymmetry():
+    assert np.isclose(
+        directional_velocity_feedforward(0.20, 1.80, 1.90, 0.40), 0.36
+    )
+    assert np.isclose(
+        directional_velocity_feedforward(-0.20, 1.80, 1.90, 0.40), -0.38
+    )
+
+
+def test_fast_station_effort_slew_limits_per_frame_pwm_change():
+    sway = slew_rate_limit(0.0, 0.40, 0.02, 1.20)
+    yaw = slew_rate_limit(0.0, 0.10, 0.02, 0.30)
+
+    assert np.isclose(sway, 12.0 / 500.0)
+    assert np.isclose(yaw, 3.0 / 500.0)
+
+
+def test_station_yaw_rate_loop_clears_deadband_at_five_degree_heading_error():
+    pid = ConditionalPid(
+        PidGains(
+            kp=0.70,
+            ki=0.12,
+            kd=0.0,
+            integral_limit=0.8,
+            output_limit=0.20,
+        )
+    )
+    five_degree_rate_setpoint = 0.90 * math.radians(5.0)
+
+    outputs = [
+        pid.step(setpoint=five_degree_rate_setpoint, measurement=0.0, dt=0.02)
+        for _ in range(1500)
+    ]
+
+    assert outputs[0] > 25.0 / 500.0
+    assert outputs[-1] > outputs[0]
+    assert np.isclose(
+        outputs[-1],
+        0.70 * five_degree_rate_setpoint + 0.12 * 0.8,
+    )
+    assert np.isclose(pid.integral, 0.8)
 
 
 def test_pid_reset_clears_derivative_and_integral_state():

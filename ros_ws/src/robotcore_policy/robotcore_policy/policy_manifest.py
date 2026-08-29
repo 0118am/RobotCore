@@ -19,6 +19,7 @@ class PolicyManifest:
     input_schema: list[str] = field(default_factory=list)
     output_schema: dict = field(default_factory=dict)
     isaac_contract: dict = field(default_factory=dict)
+    deployment_validation: dict = field(default_factory=dict)
 
 
 def load_policy_manifest(path: str, default_name: str, role: str) -> PolicyManifest:
@@ -45,12 +46,20 @@ def load_policy_manifest(path: str, default_name: str, role: str) -> PolicyManif
     data = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
     # Preserve unknown manifest extensions by ignoring them here; schema-specific
     # validation can be added once real policies arrive.
+    raw_model_path = str(data.get("model_path", ""))
+    model_path = raw_model_path
+    if raw_model_path and not Path(raw_model_path).is_absolute():
+        colocated_model = manifest_path.parent / raw_model_path
+        if colocated_model.exists():
+            model_path = str(colocated_model.resolve())
+
     return PolicyManifest(
         name=str(data.get("name", default_name)),
         role=str(data.get("role", role)),
         runner=str(data.get("runner", "dummy")),
-        model_path=str(data.get("model_path", "")),
+        model_path=model_path,
         input_schema=list(data.get("input_schema", [])),
         output_schema=dict(data.get("output_schema", {})),
         isaac_contract=dict(data.get("isaac_contract", {})),
+        deployment_validation=dict(data.get("deployment_validation", {})),
     )

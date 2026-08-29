@@ -13,6 +13,7 @@
   <exec_depend>robotcore_hardware</exec_depend>
   <exec_depend>robotcore_interfaces</exec_depend>
   <exec_depend>robotcore_policy</exec_depend>
+  <exec_depend>robotcore_policy_cpp</exec_depend>
   <exec_depend>robotcore_runtime</exec_depend>
   <exec_depend>robotcore_sensors</exec_depend>
   <exec_depend>isaac_ros_apriltag</exec_depend>

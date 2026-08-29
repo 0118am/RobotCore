@@ -51,7 +51,7 @@
 | Asset | Writable by |
 | --- | --- |
 | `/etc/robotcore/*.json`, systemd units, udev rules | root / release process |
-| `/var/lib/robotcore/runs` | `robotcore` runtime; host manager reads health only |
+| `/home/nvidia/robotcore_logs` | `robotcore:nvidia` setgid tree; runtime writes, local `nvidia` operator reads, host manager reads health only |
 | `/var/log` and journald | systemd/journald |
 | Aquaboard serial device | `robotcore` service and approved local operators via `dialout` |
 | Web static assets | release process; read-only at runtime |

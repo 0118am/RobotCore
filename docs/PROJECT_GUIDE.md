@@ -39,7 +39,7 @@ Design rules:
 | `robotcore_bringup` | launch files and system configuration |
 | `robotcore_runtime` | task manager, safety events, tracking, and run logging orchestration |
 | `robotcore_policy` | policy registry, model runners, observation builder, action decoder |
-| `robotcore_control` | thruster allocation, PWM mapping, vehicle control, safety filtering |
+| `robotcore_control` | direct thruster actions, vehicle control, and safety filtering |
 | `robotcore_sensors` | AprilTag/ZED/external-IMU localisation, sensor conditioning, and fixed transforms |
 | `robotcore_hardware` | ros2_control hardware interface, serial/CAN/Aboard packet boundary |
 | `control_interface` | browser project in `../ControlInterface`; its ROS-to-web bridge consumes installed interfaces |
@@ -81,14 +81,15 @@ Core topics:
 - `/robot/body_state`: the canonical 60 Hz EKF output containing base pose,
   body-frame velocity, and validity. The EKF contains only ZED VIO and AprilTag
   measurements. Its localization orientation is used for map/body coordinate
-  conversion, while PID attitude and angular-rate feedback subscribe directly
-  to `/sensors/external_imu`. Velocity is not obtained by finite-differencing
-  AprilTag poses.
+  conversion and absolute heading. PID combines that map yaw with external-IMU
+  roll/pitch and angular rate, preventing native magnetic-yaw jumps from
+  entering control. Velocity is not obtained by finite-differencing AprilTag
+  poses.
 - `/localization/status`: quantitative source ages, measured rates, transport
   delays, detected/mapped/inlier Tag counts, reprojection RMS, Tag/VIO
   innovation, rejection reasons, and EKF covariance. It is published at 60 Hz
   for the UI; the run logger persists it at 1 Hz.
-- `/control/thruster_cmd`: 8 normalized thruster commands.
+- `/control/thruster_cmd`: eight direct T1..T8 actions in `[-1, 1]`.
 - `/policy/body/status`: readiness and missing inputs.
 - `/safety/events`: aborts, failsafe transitions, limits, and warnings.
 - `/hardware/board_status`: Aboard link safety state and MCU-latched PWM
@@ -112,8 +113,9 @@ Core action:
 
 - Jetson runs ROS 2, policy inference, planning, vision, sensor bridge, and
   logging.
-- Aboard receives 8 normalized thruster commands, validates packets, maps to
-  PWM, handles heartbeat/failsafe state, returns board status, and forwards the
+- The Jetson bridge converts each direct action once with
+  `PWM_us = 1500 + 250 * action`. Aboard validates the resulting signed PWM
+  offsets, handles heartbeat/failsafe state, returns board status, and forwards the
   IMU connected to its UART8 as telemetry on the shared UART6 transport.
 - Aquaboard accepts only the CRC/session/sequence UART v2 command path and maps its
   eight logical channels to physical PWM indexes 8 through 15.

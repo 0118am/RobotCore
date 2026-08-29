@@ -1,3 +1,4 @@
+#include "robotcore_sensors/covariance.hpp"
 #include "robotcore_sensors/geometry.hpp"
 
 #include <diagnostic_msgs/msg/diagnostic_status.hpp>
@@ -83,15 +84,7 @@ Eigen::Matrix<double, 6, 6> covariance6(const Array & values)
       covariance(row, column) = values[6 * row + column];
     }
   }
-  return 0.5 * (covariance + covariance.transpose());
-}
-
-template<int Size>
-bool valid_covariance(const Eigen::Matrix<double, Size, Size> & covariance)
-{
-  if (!covariance.allFinite()) {return false;}
-  const Eigen::LDLT<Eigen::Matrix<double, Size, Size>> decomposition(covariance);
-  return decomposition.info() == Eigen::Success && decomposition.isPositive();
+  return covariance;
 }
 
 Eigen::Matrix<double, 6, 6> adjoint(const Eigen::Isometry3d & target_from_source)
@@ -116,7 +109,7 @@ Eigen::Matrix<double, 6, 6> pose_covariance_at_base(
   jacobian.block<3, 3>(0, 3) = -skew(lever_arm_odom);
   const Eigen::Matrix<double, 6, 6> result =
     jacobian * source_covariance * jacobian.transpose();
-  return 0.5 * (result + result.transpose());
+  return symmetrized_covariance<6>(result);
 }
 
 Eigen::Matrix<double, 6, 6> pose_covariance_in_filter_coordinates(
@@ -128,7 +121,7 @@ Eigen::Matrix<double, 6, 6> pose_covariance_in_filter_coordinates(
   jacobian.block<3, 3>(3, 3) = orientation.conjugate().toRotationMatrix();
   const Eigen::Matrix<double, 6, 6> result =
     jacobian * fixed_axis_covariance * jacobian.transpose();
-  return 0.5 * (result + result.transpose());
+  return symmetrized_covariance<6>(result);
 }
 
 template<typename Array>
@@ -158,8 +151,8 @@ double arrival_rate_hz(
   }
   const auto duration_ns = arrivals.back() - arrivals.front();
   return duration_ns > 0 ?
-    static_cast<double>(arrivals.size() - 1U) * 1e9 /
-    static_cast<double>(duration_ns) : 0.0;
+         static_cast<double>(arrivals.size() - 1U) * 1e9 /
+         static_cast<double>(duration_ns) : 0.0;
 }
 
 struct EkfState
@@ -181,20 +174,15 @@ struct EkfNoise
 class VioTagEkf
 {
 public:
-  explicit VioTagEkf(EkfNoise noise = {}) : noise_(noise) {}
+  explicit VioTagEkf(EkfNoise noise = {})
+  : noise_(noise) {}
 
-  void initialize(const EkfState & state)
+  bool initialize(const EkfState & state)
   {
     state_ = state;
     state_.orientation.normalize();
-    stabilize_covariance();
-    initialized_ = true;
-  }
-
-  void set_state(const EkfState & state)
-  {
-    state_ = state;
-    initialized_ = true;
+    initialized_ = stabilize_state_covariance();
+    return initialized_;
   }
 
   bool propagate_to(std::int64_t stamp)
@@ -239,11 +227,13 @@ public:
     process_covariance.block<3, 3>(9, 9).diagonal().setConstant(
       angular_variance * dt);
 
-    state_.covariance = transition * state_.covariance * transition.transpose() +
-      process_covariance;
+    const Matrix12d propagated_covariance =
+      (transition * state_.covariance * transition.transpose() +
+      process_covariance).eval();
+    state_.covariance = propagated_covariance;
     state_.stamp_ns = stamp;
-    stabilize_covariance();
-    return true;
+    initialized_ = stabilize_state_covariance();
+    return initialized_;
   }
 
   bool update_position(
@@ -350,7 +340,8 @@ private:
     bool position_state_only = false,
     double velocity_correction_limit_mps = INFINITY)
   {
-    if (!innovation.allFinite() || !measurement_covariance.allFinite() ||
+    if (!initialized_ || !innovation.allFinite() ||
+      !measurement_covariance.allFinite() ||
       !std::isfinite(gate_chi2) || gate_chi2 <= 0.0)
     {
       return false;
@@ -362,9 +353,11 @@ private:
     {
       return false;
     }
-    const Eigen::Matrix<double, Size, Size> innovation_covariance =
+    const Eigen::Matrix<double, Size, Size> raw_innovation_covariance =
       observation * state_.covariance * observation.transpose() +
       measurement_covariance;
+    const Eigen::Matrix<double, Size, Size> innovation_covariance =
+      symmetrized_covariance<Size>(raw_innovation_covariance);
     const Eigen::LDLT<Eigen::Matrix<double, Size, Size>> decomposition(
       innovation_covariance);
     if (decomposition.info() != Eigen::Success || !decomposition.isPositive()) {
@@ -401,11 +394,13 @@ private:
     }
     const Matrix12d identity = Matrix12d::Identity();
     const Matrix12d residual = identity - gain * observation;
-    state_.covariance = residual * state_.covariance * residual.transpose() +
-      gain * measurement_covariance * gain.transpose();
+    const Matrix12d updated_covariance =
+      (residual * state_.covariance * residual.transpose() +
+      gain * measurement_covariance * gain.transpose()).eval();
+    state_.covariance = updated_covariance;
     inject(correction);
-    stabilize_covariance();
-    return true;
+    initialized_ = stabilize_state_covariance();
+    return initialized_;
   }
 
   void inject(const Eigen::Matrix<double, 12, 1> & correction)
@@ -417,20 +412,14 @@ private:
     state_.angular_velocity += correction.segment<3>(9);
     Matrix12d reset = Matrix12d::Identity();
     reset.block<3, 3>(6, 6) -= 0.5 * skew(correction.segment<3>(6));
-    state_.covariance = reset * state_.covariance * reset.transpose();
+    const Matrix12d reset_covariance =
+      (reset * state_.covariance * reset.transpose()).eval();
+    state_.covariance = reset_covariance;
   }
 
-  void stabilize_covariance()
+  bool stabilize_state_covariance()
   {
-    state_.covariance = 0.5 * (state_.covariance + state_.covariance.transpose());
-    Eigen::SelfAdjointEigenSolver<Matrix12d> solver(state_.covariance);
-    if (solver.info() != Eigen::Success) {
-      state_.covariance = Matrix12d::Identity();
-      return;
-    }
-    const auto eigenvalues = solver.eigenvalues().cwiseMax(1e-12);
-    state_.covariance = solver.eigenvectors() * eigenvalues.asDiagonal() *
-      solver.eigenvectors().transpose();
+    return robotcore_sensors::stabilize_covariance<12>(state_.covariance);
   }
 
   EkfState state_;
@@ -523,11 +512,12 @@ public:
     }
 
     const auto sensor_qos = rclcpp::SensorDataQoS().keep_last(8);
+    const auto tag_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable();
     vio_sub_ = create_subscription<nav_msgs::msg::Odometry>(
       declare_parameter<std::string>("vio_topic", "/zedx/zed_node/odom"), sensor_qos,
       std::bind(&VioTagFusionComponent::on_vio, this, std::placeholders::_1));
     tag_sub_ = create_subscription<robotcore_interfaces::msg::AprilTagPoseEstimate>(
-      declare_parameter<std::string>("tag_topic", "/localization/apriltag_pose"), sensor_qos,
+      declare_parameter<std::string>("tag_topic", "/localization/apriltag_pose"), tag_qos,
       std::bind(&VioTagFusionComponent::on_tag, this, std::placeholders::_1));
     zed_status_sub_ = create_subscription<zed_msgs::msg::PosTrackStatus>(
       declare_parameter<std::string>(
@@ -603,14 +593,17 @@ private:
   Eigen::Matrix3d regularized_linear_velocity_covariance(
     const Eigen::Matrix3d & covariance) const
   {
-    const Eigen::Matrix3d symmetric = 0.5 * (covariance + covariance.transpose());
+    const Eigen::Matrix3d symmetric = symmetrized_covariance<3>(covariance);
     Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(symmetric);
     if (solver.info() != Eigen::Success) {return symmetric;}
     const double variance_floor = linear_velocity_stddev_floor_mps_ *
       linear_velocity_stddev_floor_mps_;
-    return solver.eigenvectors() *
-           solver.eigenvalues().cwiseMax(variance_floor).asDiagonal() *
-           solver.eigenvectors().transpose();
+    const Eigen::Vector3d eigenvalues =
+      solver.eigenvalues().cwiseMax(variance_floor);
+    const Eigen::Matrix3d regularized =
+      (solver.eigenvectors() * eigenvalues.asDiagonal() *
+      solver.eigenvectors().transpose()).eval();
+    return symmetrized_covariance<3>(regularized);
   }
 
   bool reset_on_clock_jump(std::int64_t ros_now_ns)
@@ -659,11 +652,9 @@ private:
     last_tag_translation_residual_ = NAN;
     last_tag_angle_residual_deg_ = NAN;
     measurements_.clear();
-    if (latest_vio_) {initialize_filter(*latest_vio_);}
-    else {
-      filter_ = VioTagEkf(noise_);
-      anchor_state_.reset();
-    }
+    if (latest_vio_ && initialize_filter(*latest_vio_)) {return;}
+    filter_ = VioTagEkf(noise_);
+    anchor_state_.reset();
   }
 
   bool update_cached_extrinsic(const std::string & source_frame)
@@ -702,12 +693,12 @@ private:
   {
     if (!require_zed_tracking_ok_) {return true;}
     return have_zed_status_ &&
-      last_zed_odometry_status_ == zed_msgs::msg::PosTrackStatus::OK &&
-      arrival_ns >= last_zed_status_arrival_ns_ &&
-      (arrival_ns - last_zed_status_arrival_ns_) * 1e-9 <= zed_status_timeout_s_;
+           last_zed_odometry_status_ == zed_msgs::msg::PosTrackStatus::OK &&
+           arrival_ns >= last_zed_status_arrival_ns_ &&
+           (arrival_ns - last_zed_status_arrival_ns_) * 1e-9 <= zed_status_timeout_s_;
   }
 
-  void initialize_filter(const Measurement & vio)
+  bool initialize_filter(const Measurement & vio)
   {
     EkfState state;
     state.stamp_ns = vio.stamp_ns;
@@ -736,9 +727,15 @@ private:
         initial_angular_velocity_stddev_ * initial_angular_velocity_stddev_);
     }
     filter_ = VioTagEkf(noise_);
-    filter_.initialize(state);
+    if (!filter_.initialize(state)) {
+      anchor_state_.reset();
+      measurements_.clear();
+      ++covariance_validation_failures_;
+      return false;
+    }
     anchor_state_ = filter_.state();
     measurements_.clear();
+    return true;
   }
 
   void on_vio(const nav_msgs::msg::Odometry::SharedPtr message)
@@ -783,7 +780,8 @@ private:
       message->twist.twist.angular.x,
       message->twist.twist.angular.y,
       message->twist.twist.angular.z;
-    const auto twist_transform = adjoint(*base_from_vio_source_);
+    const Eigen::Matrix<double, 6, 6> twist_transform =
+      adjoint(*base_from_vio_source_);
     const Eigen::Matrix<double, 6, 1> body_twist =
       twist_transform * source_twist;
     if (!body_twist.allFinite()) {
@@ -791,16 +789,35 @@ private:
       return;
     }
 
-    const auto pose_covariance_fixed = pose_covariance_at_base(
-      covariance6(message->pose.covariance), odom_from_source,
-      base_from_vio_source_->inverse());
+    Eigen::Matrix<double, 6, 6> source_pose_covariance =
+      covariance6(message->pose.covariance);
+    if (!normalize_measurement_covariance<6>(source_pose_covariance)) {
+      ++invalid_vio_pose_covariance_drops_;
+      return;
+    }
+    const Eigen::Matrix<double, 6, 6> pose_covariance_fixed =
+      pose_covariance_at_base(
+      source_pose_covariance, odom_from_source, base_from_vio_source_->inverse());
     if (!valid_covariance<6>(pose_covariance_fixed)) {
       ++invalid_vio_pose_covariance_drops_;
       return;
     }
-    const Eigen::Matrix<double, 6, 6> body_twist_covariance =
-      twist_transform * covariance6(message->twist.covariance) *
-      twist_transform.transpose();
+    Eigen::Matrix<double, 6, 6> source_twist_covariance =
+      covariance6(message->twist.covariance);
+    Eigen::Matrix<double, 6, 6> body_twist_covariance =
+      Eigen::Matrix<double, 6, 6>::Zero();
+    bool body_twist_covariance_valid =
+      normalize_measurement_covariance<6>(source_twist_covariance);
+    if (body_twist_covariance_valid) {
+      const Eigen::Matrix<double, 6, 6> transformed_twist_covariance =
+        (twist_transform * source_twist_covariance *
+        twist_transform.transpose()).eval();
+      body_twist_covariance = symmetrized_covariance<6>(transformed_twist_covariance);
+      constexpr double angular_velocity_stddev_rps = 0.10;
+      body_twist_covariance.block<3, 3>(3, 3).diagonal().array() +=
+        angular_velocity_stddev_rps * angular_velocity_stddev_rps;
+      body_twist_covariance_valid = valid_covariance<6>(body_twist_covariance);
+    }
 
     Measurement event;
     event.id = ++measurement_sequence_;
@@ -811,7 +828,7 @@ private:
     event.orientation = Eigen::Quaterniond(odom_from_base.linear()).normalized();
     event.pose_covariance = pose_covariance_in_filter_coordinates(
       pose_covariance_fixed, event.orientation);
-    event.has_twist = valid_covariance<6>(body_twist_covariance);
+    event.has_twist = body_twist_covariance_valid;
     event.body_twist = body_twist;
     if (event.has_twist) {
       event.twist_covariance = body_twist_covariance;
@@ -823,7 +840,7 @@ private:
     latest_vio_ = event;
 
     if (!filter_.initialized()) {
-      initialize_filter(event);
+      if (!initialize_filter(event)) {return;}
       record_accepted_vio(measurement_ns, arrival_ns);
       return;
     }
@@ -832,7 +849,7 @@ private:
       return;
     }
     if (measurement_ns - filter_.state().stamp_ns > 1000000000LL) {
-      initialize_filter(event);
+      if (!initialize_filter(event)) {return;}
       record_accepted_vio(measurement_ns, arrival_ns);
       return;
     }
@@ -934,11 +951,15 @@ private:
     MeasurementResult tracked;
     if (!anchor_state_) {return tracked;}
     VioTagEkf replay_filter(noise_);
-    replay_filter.initialize(*anchor_state_);
+    if (!replay_filter.initialize(*anchor_state_)) {
+      ++covariance_validation_failures_;
+      return tracked;
+    }
     for (const auto & event : measurements_) {
       if (!replay_filter.propagate_to(event.stamp_ns)) {break;}
       const auto result = apply_measurement(replay_filter, event);
       if (event.id == tracked_id) {tracked = result;}
+      if (!replay_filter.initialized()) {break;}
     }
     filter_ = replay_filter;
     return tracked;
@@ -952,7 +973,7 @@ private:
       return std::nullopt;
     }
     VioTagEkf temporary(noise_);
-    temporary.initialize(*anchor_state_);
+    if (!temporary.initialize(*anchor_state_)) {return std::nullopt;}
     for (const auto & event : measurements_) {
       if (event.stamp_ns > target_ns) {break;}
       if (!temporary.propagate_to(event.stamp_ns)) {return std::nullopt;}
@@ -991,7 +1012,7 @@ private:
     jacobian.block<3, 3>(3, 6) = state.orientation.toRotationMatrix();
     const Eigen::Matrix<double, 6, 6> result =
       jacobian * state.covariance * jacobian.transpose();
-    return 0.5 * (result + result.transpose());
+    return symmetrized_covariance<6>(result);
   }
 
   void on_tag(const robotcore_interfaces::msg::AprilTagPoseEstimate::SharedPtr message)
@@ -1037,8 +1058,9 @@ private:
       ++invalid_tag_drops_;
       return;
     }
-    const auto tag_covariance_map = covariance6(message->pose.covariance);
-    if (!valid_covariance<6>(tag_covariance_map)) {
+    Eigen::Matrix<double, 6, 6> tag_covariance_map =
+      covariance6(message->pose.covariance);
+    if (!normalize_measurement_covariance<6>(tag_covariance_map)) {
       ++invalid_tag_covariance_drops_;
       return;
     }
@@ -1046,15 +1068,22 @@ private:
       local_state->position, local_state->orientation);
     if (!map_from_odom_) {
       const Eigen::Isometry3d candidate = map_from_base * odom_from_base.inverse();
-      Eigen::Matrix<double, 6, 6> rotation =
-        Eigen::Matrix<double, 6, 6>::Zero();
-      rotation.block<3, 3>(0, 0) = candidate.linear();
-      rotation.block<3, 3>(3, 3) = candidate.linear();
-      const auto candidate_covariance = tag_covariance_map +
-        rotation * state_pose_covariance_fixed(*local_state) * rotation.transpose();
+      const Eigen::Matrix<double, 6, 6> state_covariance_odom =
+        state_pose_covariance_fixed(*local_state);
+      if (!valid_covariance<6>(state_covariance_odom)) {
+        ++covariance_validation_failures_;
+        return;
+      }
+      const Eigen::Matrix<double, 6, 6> candidate_covariance =
+        alignment_candidate_covariance(
+        tag_covariance_map, state_covariance_odom, odom_from_base, candidate);
+      if (!valid_covariance<6>(candidate_covariance)) {
+        ++covariance_validation_failures_;
+        return;
+      }
       add_alignment_candidate(candidate, candidate_covariance, tag_stamp_ns);
       if (alignment_candidates_.size() < 4U) {return;}
-      establish_alignment();
+      if (!establish_alignment()) {return;}
       record_accepted_tag(tag_stamp_ns, arrival_ns);
       return;
     }
@@ -1072,8 +1101,15 @@ private:
       Eigen::Matrix<double, 6, 6>::Zero();
     map_to_odom_rotation.block<3, 3>(0, 0) = map_from_odom_->linear().transpose();
     map_to_odom_rotation.block<3, 3>(3, 3) = map_from_odom_->linear().transpose();
-    const auto tag_covariance_odom = map_to_odom_rotation *
-      tag_covariance_map * map_to_odom_rotation.transpose();
+    const Eigen::Matrix<double, 6, 6> transformed_tag_covariance =
+      (map_to_odom_rotation * tag_covariance_map *
+      map_to_odom_rotation.transpose()).eval();
+    const Eigen::Matrix<double, 6, 6> tag_covariance_odom =
+      symmetrized_covariance<6>(transformed_tag_covariance);
+    if (!valid_covariance<6>(tag_covariance_odom)) {
+      ++covariance_validation_failures_;
+      return;
+    }
 
     Measurement event;
     event.id = ++measurement_sequence_;
@@ -1129,7 +1165,7 @@ private:
     while (alignment_candidates_.size() > 4U) {alignment_candidates_.pop_front();}
   }
 
-  void establish_alignment()
+  bool establish_alignment()
   {
     Eigen::Vector3d translation = Eigen::Vector3d::Zero();
     Eigen::Quaterniond orientation(alignment_candidates_.front().map_from_odom.linear());
@@ -1141,24 +1177,36 @@ private:
           Eigen::Quaterniond(alignment_candidates_[index].map_from_odom.linear())).normalized();
       }
     }
-    map_from_odom_ = pose_transform(
+    const Eigen::Isometry3d map_from_odom = pose_transform(
       translation / static_cast<double>(alignment_candidates_.size()), orientation);
-    alignment_covariance_.setZero();
+    Eigen::Matrix<double, 6, 6> alignment_covariance =
+      Eigen::Matrix<double, 6, 6>::Zero();
     const double count = static_cast<double>(alignment_candidates_.size());
     for (const auto & candidate : alignment_candidates_) {
-      alignment_covariance_ += candidate.covariance / (count * count);
+      // Consecutive candidates share the VIO trajectory and Tag map.  Dividing
+      // by count squared would assume independence and become overconfident.
+      // The average reported covariance is a conservative upper bound for the
+      // mean when those cross-correlations are unknown.
+      alignment_covariance += candidate.covariance / count;
       Eigen::Matrix<double, 6, 1> residual;
       residual.head<3>() = candidate.map_from_odom.translation() -
-        map_from_odom_->translation();
+        map_from_odom.translation();
+      // Candidate covariance is expressed with fixed axes in map, so the
+      // orientation residual must use the matching left perturbation.
       residual.tail<3>() = log_quaternion(
-        Eigen::Quaterniond(map_from_odom_->linear()).conjugate() *
-        Eigen::Quaterniond(candidate.map_from_odom.linear()));
-      alignment_covariance_ +=
-        residual * residual.transpose() / (count * (count - 1.0));
+        Eigen::Quaterniond(
+          candidate.map_from_odom.linear() * map_from_odom.linear().transpose()));
+      alignment_covariance += residual * residual.transpose() / (count - 1.0);
     }
-    alignment_covariance_ = 0.5 *
-      (alignment_covariance_ + alignment_covariance_.transpose());
+    alignment_covariance = symmetrized_covariance<6>(alignment_covariance);
     alignment_candidates_.clear();
+    if (!valid_covariance<6>(alignment_covariance)) {
+      ++covariance_validation_failures_;
+      return false;
+    }
+    map_from_odom_ = map_from_odom;
+    alignment_covariance_ = alignment_covariance;
+    return true;
   }
 
   std::string localization_source(bool absolute) const
@@ -1168,7 +1216,8 @@ private:
     return "ZED VIO EKF (local odom)";
   }
 
-  void fill_covariances(nav_msgs::msg::Odometry & odometry, const EkfState & state) const
+  bool fill_covariances(
+    nav_msgs::msg::Odometry & odometry, const EkfState & state) const
   {
     Eigen::Matrix3d odom_to_output_rotation = Eigen::Matrix3d::Identity();
     if (map_from_odom_) {odom_to_output_rotation = map_from_odom_->linear();}
@@ -1178,18 +1227,28 @@ private:
       Eigen::Matrix<double, 6, 12>::Zero();
     pose_jacobian.block<3, 3>(0, 0) = odom_to_output_rotation;
     pose_jacobian.block<3, 3>(3, 6) = output_from_body;
-    Eigen::Matrix<double, 6, 6> pose_covariance =
-      pose_jacobian * state.covariance * pose_jacobian.transpose();
+    const Eigen::Matrix<double, 6, 6> raw_state_pose_covariance =
+      (pose_jacobian * state.covariance * pose_jacobian.transpose()).eval();
+    const Eigen::Matrix<double, 6, 6> state_pose_covariance =
+      symmetrized_covariance<6>(raw_state_pose_covariance);
+    Eigen::Matrix<double, 6, 6> pose_covariance = state_pose_covariance;
     if (map_from_odom_) {
+      if (!valid_covariance<6>(alignment_covariance_)) {return false;}
       Eigen::Matrix<double, 6, 6> alignment_jacobian =
         Eigen::Matrix<double, 6, 6>::Identity();
       alignment_jacobian.block<3, 3>(0, 3) = -skew(
         map_from_odom_->linear() * state.position);
-      pose_covariance += alignment_jacobian * alignment_covariance_ *
-        alignment_jacobian.transpose();
+      const Eigen::Matrix<double, 6, 6> raw_alignment_contribution =
+        (alignment_jacobian * alignment_covariance_ *
+        alignment_jacobian.transpose()).eval();
+      const Eigen::Matrix<double, 6, 6> alignment_contribution =
+        symmetrized_covariance<6>(raw_alignment_contribution);
+      // Alignment was estimated from the same VIO history as the current
+      // state, but the replay buffer does not retain their cross-covariance.
+      // Use a guaranteed upper bound instead of assuming independence.
+      pose_covariance = covariance_sum_with_unknown_correlation<6>(
+        state_pose_covariance, alignment_contribution);
     }
-    pose_covariance = 0.5 * (pose_covariance + pose_covariance.transpose());
-    store_covariance(odometry.pose.covariance, pose_covariance);
 
     const Eigen::Vector3d body_velocity =
       state.orientation.conjugate() * state.velocity;
@@ -1199,9 +1258,18 @@ private:
       state.orientation.conjugate().toRotationMatrix();
     twist_jacobian.block<3, 3>(0, 6) = skew(body_velocity);
     twist_jacobian.block<3, 3>(3, 9).setIdentity();
+    const Eigen::Matrix<double, 6, 6> raw_twist_covariance =
+      (twist_jacobian * state.covariance * twist_jacobian.transpose()).eval();
     const Eigen::Matrix<double, 6, 6> twist_covariance =
-      twist_jacobian * state.covariance * twist_jacobian.transpose();
+      symmetrized_covariance<6>(raw_twist_covariance);
+    if (!valid_covariance<6>(pose_covariance) ||
+      !valid_covariance<6>(twist_covariance))
+    {
+      return false;
+    }
+    store_covariance(odometry.pose.covariance, pose_covariance);
     store_covariance(odometry.twist.covariance, twist_covariance);
+    return true;
   }
 
   void publish()
@@ -1247,7 +1315,13 @@ private:
     odometry.twist.twist.angular.x = state.angular_velocity.x();
     odometry.twist.twist.angular.y = state.angular_velocity.y();
     odometry.twist.twist.angular.z = state.angular_velocity.z();
-    fill_covariances(odometry, state);
+    if (!fill_covariances(odometry, state)) {
+      ++invalid_output_covariance_drops_;
+      RCLCPP_ERROR(
+        get_logger(), "invalid localization covariance; resetting estimator and map alignment");
+      clear_filter_and_alignment();
+      return;
+    }
     robotcore_interfaces::msg::BodyState body;
     body.header = odometry.header;
     body.pose = odometry.pose.pose;
@@ -1321,9 +1395,11 @@ private:
     status.localization_source = localization_source(absolute_valid);
     status.tag_observation_class = last_tag_estimate_.pose_valid ? "primary" : "";
     status.apriltag_rejection_reason = last_tag_estimate_.rejection_reason;
-    if (!vio_usable) {status.rejection_reason = "ZED VIO/EKF state is stale";}
-    else if (!map_from_odom_) {status.rejection_reason = "waiting for Tag map alignment";}
-    else {status.rejection_reason = "";}
+    if (!vio_usable) {
+      status.rejection_reason = "ZED VIO/EKF state is stale";
+    } else if (!map_from_odom_) {
+      status.rejection_reason = "waiting for Tag map alignment";
+    } else {status.rejection_reason = "";}
     status_pub_->publish(status);
   }
 
@@ -1354,6 +1430,8 @@ private:
     status.add("measurement_outside_history_drops", measurement_outside_history_drops_);
     status.add("invalid_vio_pose_covariance_drops", invalid_vio_pose_covariance_drops_);
     status.add("invalid_vio_twist_covariance_drops", invalid_vio_twist_covariance_drops_);
+    status.add("covariance_validation_failures", covariance_validation_failures_);
+    status.add("invalid_output_covariance_drops", invalid_output_covariance_drops_);
     status.add("vio_linear_velocity_stddev_floor_mps", linear_velocity_stddev_floor_mps_);
     status.add(
       "vio_linear_velocity_correction_limit_mps",
@@ -1444,6 +1522,8 @@ private:
   std::uint64_t old_tag_drops_{};
   std::uint64_t invalid_tag_drops_{};
   std::uint64_t invalid_tag_covariance_drops_{};
+  std::uint64_t covariance_validation_failures_{};
+  std::uint64_t invalid_output_covariance_drops_{};
   std::uint64_t vio_pose_gate_rejections_{};
   std::uint64_t vio_twist_gate_rejections_{};
   std::uint64_t vio_linear_velocity_correction_limits_{};

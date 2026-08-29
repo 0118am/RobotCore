@@ -9,6 +9,7 @@ SERVICE = ROOT / "host_manager" / "systemd" / "robotcore.service"
 ARGUS_DROP_IN = ROOT / "host_manager" / "systemd" / "robotcore-argus.conf"
 ARGUS_LIFECYCLE = ROOT / "host_manager" / "systemd" / "nvargus-robotcore.conf"
 ZED_LIFECYCLE = ROOT / "host_manager" / "systemd" / "zed-x-robotcore.conf"
+IMU_LIFECYCLE = ROOT / "host_manager" / "systemd" / "imu-daemon-robotcore.conf"
 EDGE_ENV = ROOT / "host_manager" / "systemd" / "edge.env.example"
 HOST_MANAGER_CONFIG = ROOT / "host_manager" / "config" / "host-manager.example.json"
 
@@ -25,17 +26,25 @@ def test_robot_service_restarts_the_complete_zed_stack():
     service = SERVICE.read_text(encoding="utf-8")
     argus_lifecycle = ARGUS_LIFECYCLE.read_text(encoding="utf-8")
     zed_lifecycle = ZED_LIFECYCLE.read_text(encoding="utf-8")
+    imu_lifecycle = IMU_LIFECYCLE.read_text(encoding="utf-8")
 
     assert "PrivateTmp=true" in service
     assert "BindReadOnlyPaths=/tmp/argus_socket" in service
     assert "BindReadOnlyPaths=/tmp/imu_daemon.sock" in service
     assert "After=network-online.target dev-robotcore-aboard.device nvargus-daemon.service" in service
-    assert "Requires=dev-robotcore-aboard.device nvargus-daemon.service zed_x_daemon.service" in service
+    assert "zed_x_daemon.service IMU_Daemon.service robotcore-performance.service" in service
+    assert "Requires=dev-robotcore-aboard.device nvargus-daemon.service zed_x_daemon.service IMU_Daemon.service" in service
     assert "KillMode=mixed" in service
     assert "PartOf=robotcore.service" in argus_lifecycle
     assert "Before=robotcore.service" in argus_lifecycle
     assert "PartOf=robotcore.service" in zed_lifecycle
     assert "Before=robotcore.service" in zed_lifecycle
+    assert "ExecStartPre=-/usr/bin/rm -f /tmp/imu_daemon.sock" not in zed_lifecycle
+    assert "PartOf=robotcore.service" in imu_lifecycle
+    assert "Before=robotcore.service" in imu_lifecycle
+    assert "ExecStartPre=-/usr/bin/rm -f /tmp/imu_daemon.sock" in imu_lifecycle
+    assert "ExecStartPost=" in imu_lifecycle
+    assert "/usr/bin/test -S /tmp/imu_daemon.sock" in imu_lifecycle
 
 
 def test_argus_drop_in_preserves_tmp_isolation_except_for_the_ipc_socket():
@@ -51,8 +60,12 @@ def test_argus_drop_in_preserves_tmp_isolation_except_for_the_ipc_socket():
 
 def test_example_edge_environment_uses_the_managed_map_default():
     edge_env = EDGE_ENV.read_text(encoding="utf-8")
-    configured_map = json.loads(HOST_MANAGER_CONFIG.read_text(encoding="utf-8"))[
+    host_config = json.loads(HOST_MANAGER_CONFIG.read_text(encoding="utf-8"))
+    configured_map = host_config[
         "apriltag_map"
     ]["path"]
 
     assert f"ROBOTCORE_APRILTAG_MAP_FILE={configured_map}" in edge_env
+    assert "ROS_LOG_DIR=/home/nvidia/robotcore_logs/ros" in edge_env
+    assert "ROBOTCORE_RUN_ROOT=/home/nvidia/robotcore_logs/runs" in edge_env
+    assert host_config["rosbag"]["run_root"] == "/home/nvidia/robotcore_logs/runs"

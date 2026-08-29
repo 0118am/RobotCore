@@ -1,0 +1,70 @@
+name: t60_precision_v7_model_499
+role: body
+runner: tensorrt
+model_path: policy.onnx
+
+input_schema:
+  - /robot/body_state
+  - /sensors/external_imu
+  - /runtime/trajectory_target
+  - /control/thruster_cmd
+
+output_schema:
+  type: direct_thruster_action
+  size: 8
+  range: [-1.0, 1.0]
+  output_layer: tanh
+  direct_hardware_command: true
+  pwm_mapping: "PWM_us = 1500 + 250 * action"
+  channel_order:
+    - T1_front_right_vertical
+    - T2_rear_right_vertical
+    - T3_front_left_vertical
+    - T4_rear_left_vertical
+    - T5_rear_left_horizontal
+    - T6_rear_right_horizontal
+    - T7_front_left_horizontal
+    - T8_front_right_horizontal
+
+deployment_validation:
+  mode: direct_thruster_action
+  authority: current_physical_vehicle
+  actuator_alignment: trained_physical_T1_T8
+  state_frame: robotcore_FLU
+  angular_velocity_frame: body_xyz
+
+isaac_contract:
+  recipe: t60_precision_v7
+  checkpoint: model_499
+  exported_at: 2026-08-29
+  source_artifact: auv_traj_policy_mlp_history_8_2026-08-29_model_499.onnx
+  sha256: 181122f0463510c6a4a518e60d04a3451bbf058550e98fb349651725fda03be9
+  observation_layout: t60_precision_v7_history8
+  observation_dim: 201
+  current_observation_dim: 33
+  history_length: 8
+  history_sample_dim: 21
+  action_dim: 8
+  input_name: obs
+  output_name: actions
+  control_rate_hz: 25
+  physics_rate_hz: 100
+  physics_steps_per_action: 4
+  state_delay_s: 0.05
+  angular_velocity_source: /sensors/external_imu
+  previous_action_source: /control/thruster_cmd
+  max_input_age_s: 0.25
+  history_order: newest_first
+  history_reset: zeros
+  history_commit: after_inference
+  running_normalization: false
+  output_valid_range: [-1.0, 1.0]
+  body_frame: FLU
+  body_axes: [forward, left, up]
+  quaternion_order: wxyz
+  quaternion_semantics: world_from_body
+  angular_velocity_frame: body
+  angular_velocity_order: [roll_rate, pitch_rate, yaw_rate]
+  positive_roll: left_side_up_right_side_down
+  positive_pitch: bow_down_stern_up
+  positive_yaw: bow_left_ccw_from_above

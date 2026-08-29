@@ -45,6 +45,29 @@ def altitude_velocity_setpoint(
     )
 
 
+def station_velocity_setpoints(
+    target_velocity_body: Iterable[float],
+    position_error_body: Iterable[float],
+    position_kp: Iterable[float],
+    surge_limit: float,
+    sway_limit: float,
+    *,
+    center_approach: bool,
+) -> np.ndarray:
+    """Return planar velocity targets, bypassing caps during center approach."""
+
+    target = vec(target_velocity_body, 2)
+    error = vec(position_error_body, 2)
+    gains = vec(position_kp, 2)
+    limits = vec([surge_limit, sway_limit], 2)
+    if np.any(gains < 0.0) or np.any(limits < 0.0):
+        raise ValueError("station position gains and speed limits must be non-negative")
+    requested = target + gains * error
+    if center_approach:
+        return requested
+    return np.clip(requested, -limits, limits)
+
+
 def altitude_collective_pwm_commands(
     pid_output: float, command_limit: float, command_sign: float
 ) -> np.ndarray:
@@ -118,40 +141,177 @@ def altitude_level_pwm_commands(
     return commands
 
 
-def level_attitude_pd_efforts(
+def level_attitude_rate_efforts(
     orientation_error: Iterable[float],
     target_angular_rate: Iterable[float],
     measured_angular_rate: Iterable[float],
-    angle_kp: Iterable[float],
+    angle_to_rate_kp: Iterable[float],
     rate_kp: Iterable[float],
+    angular_rate_limit: Iterable[float],
     combined_limit: float,
-) -> tuple[np.ndarray, np.ndarray, bool]:
-    """Return independently tuned roll/pitch angle and rate feedback.
+    effort_feedforward: Iterable[float] = (0.0, 0.0),
+    effort_integral: Iterable[float] = (0.0, 0.0),
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, bool]:
+    """Run a bounded angle-to-rate cascade for roll and pitch.
 
-    Keeping the angle and rate gains separate avoids weakening static leveling
-    when the delayed gyro loop must use a lower gain. The combined L1 limit is
+    The outer loop converts angle error into a bounded angular-rate setpoint.
+    The inner loop converts rate error into actuator-domain effort and adds
+    optional model/feedforward and integral terms. The combined L1 limit is
     the peak differential that can appear on any one T1--T4 channel.
     """
 
     error = vec(orientation_error, 2)
     target_rate = vec(target_angular_rate, 2)
     measured_rate = vec(measured_angular_rate, 2)
-    angle_gains = vec(angle_kp, 2)
+    angle_to_rate_gains = vec(angle_to_rate_kp, 2)
     rate_gains = vec(rate_kp, 2)
+    rate_limits = vec(angular_rate_limit, 2)
+    feedforward = vec(effort_feedforward, 2)
+    integral = vec(effort_integral, 2)
     limit = float(combined_limit)
     if (
-        np.any(angle_gains < 0.0)
+        np.any(angle_to_rate_gains < 0.0)
         or np.any(rate_gains < 0.0)
+        or np.any(rate_limits < 0.0)
         or not math.isfinite(limit)
         or limit < 0.0
     ):
-        raise ValueError("level PD gains and limit must be finite and non-negative")
+        raise ValueError(
+            "level cascade gains, rate limits and effort limit must be "
+            "finite and non-negative"
+        )
 
-    raw = angle_gains * error + rate_gains * (target_rate - measured_rate)
+    desired_rate = np.clip(
+        target_rate + angle_to_rate_gains * error,
+        -rate_limits,
+        rate_limits,
+    )
+    raw = (
+        rate_gains * (desired_rate - measured_rate)
+        + feedforward
+        + integral
+    )
     peak = float(np.sum(np.abs(raw)))
     if peak > limit and peak > 0.0:
-        return raw * (limit / peak), raw, True
-    return raw.copy(), raw, False
+        return raw * (limit / peak), raw, desired_rate, True
+    return raw.copy(), raw, desired_rate, False
+
+
+def conditional_axis_integral_effort(
+    current_effort: float,
+    error: float,
+    integral_gain: float,
+    dt: float,
+    effort_limit: float,
+    base_efforts: Iterable[float],
+    axis: int,
+    combined_limit: float,
+) -> float:
+    """Advance one integral effort without winding up behind an L1 limit.
+
+    ``base_efforts`` contains every non-integral term before the shared
+    roll/pitch limiter. Integration is held when it would increase saturation,
+    but an update that reduces the combined demand is always allowed so the
+    stored effort can unwind after the error reverses.
+    """
+
+    base = vec(base_efforts, 2)
+    values = (
+        current_effort,
+        error,
+        integral_gain,
+        dt,
+        effort_limit,
+        combined_limit,
+    )
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("integral effort inputs must be finite")
+    if integral_gain < 0.0 or effort_limit < 0.0 or combined_limit < 0.0:
+        raise ValueError("integral gain and effort limits must be non-negative")
+    if dt <= 0.0:
+        raise ValueError("integral timestep must be positive")
+    if axis not in (0, 1):
+        raise ValueError("integral effort axis must be 0 or 1")
+
+    limit = float(effort_limit)
+    current = float(np.clip(current_effort, -limit, limit))
+    proposed = float(
+        np.clip(
+            current + float(integral_gain) * float(error) * float(dt),
+            -limit,
+            limit,
+        )
+    )
+    current_total = base.copy()
+    current_total[axis] += current
+    proposed_total = base.copy()
+    proposed_total[axis] += proposed
+    current_peak = float(np.sum(np.abs(current_total)))
+    proposed_peak = float(np.sum(np.abs(proposed_total)))
+    if (
+        proposed_peak > float(combined_limit) + 1e-12
+        and proposed_peak > current_peak + 1e-12
+    ):
+        return current
+    return proposed
+
+
+def integral_reset_after_error_crossing(
+    previous_error_sign: int,
+    error: float,
+    integral_effort: float,
+    hysteresis: float,
+) -> tuple[bool, int]:
+    """Detect an error zero-crossing that leaves integral effort opposed.
+
+    The sign state changes only outside ``hysteresis`` so sensor noise near
+    zero cannot repeatedly reset a useful bias estimate. A crossing resets
+    only when the stored integral would drive against the new error.
+    """
+
+    values = (error, integral_effort, hysteresis)
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("integral crossing inputs must be finite")
+    if previous_error_sign not in (-1, 0, 1):
+        raise ValueError("previous error sign must be -1, 0, or 1")
+    if hysteresis < 0.0:
+        raise ValueError("integral crossing hysteresis must be non-negative")
+    if abs(error) <= hysteresis:
+        return False, previous_error_sign
+
+    current_error_sign = 1 if error > 0.0 else -1
+    crossed = previous_error_sign != 0 and current_error_sign != previous_error_sign
+    opposing = integral_effort * error < 0.0
+    return crossed and opposing, current_error_sign
+
+
+def surge_pitch_decoupling_effort(
+    applied_surge_effort: float,
+    forward_gain: float,
+    reverse_gain: float,
+    output_limit: float,
+) -> float:
+    """Cancel the measured pitch moment induced by applied surge effort."""
+
+    values = (
+        applied_surge_effort,
+        forward_gain,
+        reverse_gain,
+        output_limit,
+    )
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("surge-pitch decoupling inputs must be finite")
+    if forward_gain < 0.0 or reverse_gain < 0.0 or output_limit < 0.0:
+        raise ValueError("surge-pitch gains and limit must be non-negative")
+
+    gain = forward_gain if applied_surge_effort >= 0.0 else reverse_gain
+    return float(
+        np.clip(
+            -gain * applied_surge_effort,
+            -output_limit,
+            output_limit,
+        )
+    )
 
 
 def altitude_station_pwm_commands(
@@ -161,17 +321,47 @@ def altitude_station_pwm_commands(
     yaw_p_output: float,
     command_limit: float,
     altitude_command_sign: float,
+    *,
+    roll_effort: float = 0.0,
+    pitch_effort: float = 0.0,
 ) -> np.ndarray:
-    """Mix direct height and calibrated horizontal station-control outputs."""
+    """Mix height, level and calibrated horizontal station-control outputs."""
 
-    commands = altitude_collective_pwm_commands(
-        altitude_pid_output, command_limit, altitude_command_sign
+    commands = altitude_level_pwm_commands(
+        altitude_pid_output,
+        roll_effort,
+        pitch_effort,
+        command_limit,
+        altitude_command_sign,
     )
+    horizontal, _ = station_horizontal_pwm_mix(
+        surge_p_output,
+        sway_p_output,
+        yaw_p_output,
+        command_limit,
+    )
+    commands[4:] = horizontal
+    return commands
+
+
+def station_horizontal_pwm_mix(
+    surge_p_output: float,
+    sway_p_output: float,
+    yaw_p_output: float,
+    command_limit: float,
+) -> tuple[np.ndarray, float]:
+    """Mix T5--T8 and return the common scale applied at saturation."""
+
     if not all(
         math.isfinite(value)
-        for value in (surge_p_output, sway_p_output, yaw_p_output)
+        for value in (
+            surge_p_output,
+            sway_p_output,
+            yaw_p_output,
+            command_limit,
+        )
     ):
-        raise ValueError("station P outputs must be finite")
+        raise ValueError("station horizontal PWM inputs must be finite")
     limit = abs(float(command_limit))
     surge = float(np.clip(surge_p_output, -limit, limit))
     sway = float(np.clip(sway_p_output, -limit, limit))
@@ -196,10 +386,11 @@ def altitude_station_pwm_commands(
     # Preserve the requested direction ratios if simultaneous station axes
     # need more authority than the live web PWM limit permits.
     peak = float(np.max(np.abs(upper)))
+    scale = 1.0
     if peak > limit and peak > 0.0:
-        upper *= limit / peak
-    commands[4:] = upper
-    return commands
+        scale = limit / peak
+        upper *= scale
+    return upper, scale
 
 
 def first_order_low_pass(
@@ -221,6 +412,56 @@ def first_order_low_pass(
         raise ValueError("low-pass previous value must be finite")
     alpha = -math.expm1(-dt / time_constant_s)
     return float(previous + alpha * (sample - previous))
+
+
+def directional_velocity_feedforward(
+    velocity_setpoint: float,
+    positive_gain: float,
+    negative_gain: float,
+    output_limit: float,
+) -> float:
+    """Map a signed velocity target to bounded actuator-domain feedforward."""
+
+    values = (
+        velocity_setpoint,
+        positive_gain,
+        negative_gain,
+        output_limit,
+    )
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("velocity feedforward inputs must be finite")
+    if positive_gain < 0.0 or negative_gain < 0.0 or output_limit < 0.0:
+        raise ValueError("velocity feedforward gains and limit must be non-negative")
+    gain = positive_gain if velocity_setpoint >= 0.0 else negative_gain
+    return float(
+        np.clip(
+            gain * velocity_setpoint,
+            -output_limit,
+            output_limit,
+        )
+    )
+
+
+def slew_rate_limit(
+    previous: float,
+    requested: float,
+    dt: float,
+    rate_limit_per_s: float,
+) -> float:
+    """Bound one command's first derivative while preserving its direction."""
+
+    values = (previous, requested, dt, rate_limit_per_s)
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("slew-rate inputs must be finite")
+    if dt <= 0.0:
+        raise ValueError("slew-rate timestep must be positive")
+    if rate_limit_per_s < 0.0:
+        raise ValueError("slew-rate limit must be non-negative")
+    maximum_delta = rate_limit_per_s * dt
+    return float(
+        previous
+        + np.clip(requested - previous, -maximum_delta, maximum_delta)
+    )
 
 
 def reject_vector_outlier(
@@ -406,6 +647,38 @@ def rpy_to_quaternion(roll: float, pitch: float, yaw: float) -> np.ndarray:
             cr * sp * cy + sr * cp * sy,
             cr * cp * sy - sr * sp * cy,
         ]
+    )
+
+
+def quaternion_to_rpy(quaternion: Iterable[float]) -> np.ndarray:
+    """Convert a normalized quaternion to fixed-axis roll/pitch/yaw radians."""
+
+    w, x, y, z = normalize_quaternion(quaternion)
+    return np.asarray(
+        [
+            math.atan2(
+                2.0 * (w * x + y * z),
+                1.0 - 2.0 * (x * x + y * y),
+            ),
+            math.asin(float(np.clip(2.0 * (w * y - z * x), -1.0, 1.0))),
+            math.atan2(
+                2.0 * (w * z + x * y),
+                1.0 - 2.0 * (y * y + z * z),
+            ),
+        ],
+        dtype=np.float64,
+    )
+
+
+def attitude_with_heading(
+    tilt_quaternion: Iterable[float], heading_quaternion: Iterable[float]
+) -> np.ndarray:
+    """Combine IMU roll/pitch with an independent absolute-yaw reference."""
+
+    tilt_rpy = quaternion_to_rpy(tilt_quaternion)
+    heading_yaw = quaternion_to_rpy(heading_quaternion)[2]
+    return rpy_to_quaternion(
+        float(tilt_rpy[0]), float(tilt_rpy[1]), float(heading_yaw)
     )
 
 

@@ -117,15 +117,27 @@ class TrackingMonitorNode(Node):
             float(body.twist.linear.z),
         )
 
-        root_quat_w = (
+        imu_quat_w = (
             float(imu.orientation.w),
             float(imu.orientation.x),
             float(imu.orientation.y),
             float(imu.orientation.z),
         )
-        world_to_body = self.quat_conjugate_wxyz(root_quat_w)
+        localization_quat_w = (
+            float(body.pose.orientation.w),
+            float(body.pose.orientation.x),
+            float(body.pose.orientation.y),
+            float(body.pose.orientation.z),
+        )
+        imu_rpy = self.quaternion_to_rpy(imu_quat_w)
+        map_yaw = self.quaternion_to_rpy(localization_quat_w)[2]
+        control_attitude_w = self.rpy_quaternion(
+            imu_rpy[0], imu_rpy[1], map_yaw
+        )
+        map_to_body = self.quat_conjugate_wxyz(localization_quat_w)
+        attitude_to_body = self.quat_conjugate_wxyz(control_attitude_w)
         target_velocity_body = self.quat_apply_wxyz(
-            world_to_body,
+            map_to_body,
             (
                 float(target.target_twist.linear.x),
                 float(target.target_twist.linear.y),
@@ -133,7 +145,7 @@ class TrackingMonitorNode(Node):
             ),
         )
         target_acceleration_body = self.quat_apply_wxyz(
-            world_to_body,
+            map_to_body,
             (
                 float(target.target_accel.linear.x),
                 float(target.target_accel.linear.y),
@@ -144,9 +156,9 @@ class TrackingMonitorNode(Node):
         position_error_world = tuple(
             target_pos[index] - actual_pos[index] for index in range(3)
         )
-        position_error_body = self.quat_apply_wxyz(world_to_body, position_error_world)
+        position_error_body = self.quat_apply_wxyz(map_to_body, position_error_world)
         target_angular_velocity_body = self.quat_apply_wxyz(
-            world_to_body,
+            attitude_to_body,
             (
                 float(target.target_twist.angular.x),
                 float(target.target_twist.angular.y),
@@ -164,18 +176,26 @@ class TrackingMonitorNode(Node):
             float(target.target_pose.orientation.y),
             float(target.target_pose.orientation.z),
         )
-        orientation_error_body = self.quaternion_error_body(root_quat_w, target_quat_w)
+        orientation_error_body = self.quaternion_error_body(
+            control_attitude_w, target_quat_w
+        )
 
         status = TrackingStatus()
         status.header.stamp = now.to_msg()
         status.header.frame_id = body.header.frame_id or target.header.frame_id or "map"
         status.trajectory_type = str(target.trajectory_type)
+        status.control_mode = str(target.control_mode)
         status.valid = bool(valid)
         status.time_s = float(target.time_s)
         status.target_position.x, status.target_position.y, status.target_position.z = target_pos
         status.actual_position.x, status.actual_position.y, status.actual_position.z = actual_pos
         status.target_orientation = target.target_pose.orientation
-        status.actual_orientation = imu.orientation
+        (
+            status.actual_orientation.w,
+            status.actual_orientation.x,
+            status.actual_orientation.y,
+            status.actual_orientation.z,
+        ) = control_attitude_w
         self.assign_vector(status.target_velocity_body, target_velocity_body)
         self.assign_vector(status.actual_velocity_body, actual_velocity_body)
         self.assign_vector(status.target_acceleration_body, target_acceleration_body)
@@ -268,6 +288,31 @@ class TrackingMonitorNode(Node):
             vx + w * tx + (y * tz - z * ty),
             vy + w * ty + (z * tx - x * tz),
             vz + w * tz + (x * ty - y * tx),
+        )
+
+    @staticmethod
+    def quaternion_to_rpy(quaternion):
+        w, x, y, z = (float(value) for value in quaternion)
+        norm = math.sqrt(w * w + x * x + y * y + z * z)
+        if norm <= 1e-9:
+            raise ValueError("quaternion norm is zero")
+        w, x, y, z = (value / norm for value in (w, x, y, z))
+        return (
+            math.atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y)),
+            math.asin(max(-1.0, min(1.0, 2.0 * (w * y - z * x)))),
+            math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z)),
+        )
+
+    @staticmethod
+    def rpy_quaternion(roll, pitch, yaw):
+        cr, sr = math.cos(roll / 2.0), math.sin(roll / 2.0)
+        cp, sp = math.cos(pitch / 2.0), math.sin(pitch / 2.0)
+        cy, sy = math.cos(yaw / 2.0), math.sin(yaw / 2.0)
+        return (
+            cr * cp * cy + sr * sp * sy,
+            sr * cp * cy - cr * sp * sy,
+            cr * sp * cy + sr * cp * sy,
+            cr * cp * sy - sr * sp * cy,
         )
 
     @classmethod

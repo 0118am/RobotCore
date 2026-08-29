@@ -5,9 +5,10 @@ the web UI or the host-manager socket.
 
 1. Put the vehicle in maintenance state and physically verify propulsion is
    unavailable.  Record the release ID and current service health.
-2. Download/build the release in a staging directory.  Verify the approved
-   artifact digest and dependency lock data before it reaches `/opt/RobotCore` or
-   `/opt/ControlInterface`.
+2. Download/build the release in a staging directory. Verify the approved
+   artifact digest and dependency lock data before switching the
+   `ROBOTCORE_WORKSPACE` or `CONTROL_INTERFACE_WORKSPACE` paths declared in
+   `/etc/robotcore/edge.env`.
 3. Export `/etc/robotcore`, the current release metadata, and the latest run/log
    directory reference.  Confirm free space on the target volume.
 4. Stop `control-interface.service`, then `robotcore.service`.  Confirm the board has

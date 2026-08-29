@@ -20,6 +20,7 @@ ExecStartPre=/usr/bin/test -r ${ROBOTCORE_WORKSPACE}/install/setup.bash
 ExecStartPre=/usr/bin/test -r /etc/robotcore/cyclonedds.xml
 ExecStartPre=/usr/bin/test -r /opt/ros/humble/lib/librmw_cyclonedds_cpp.so
 ExecStartPre=/usr/bin/test -r ${CONTROL_INTERFACE_WORKSPACE}/install/setup.bash
+ExecStartPre=/usr/bin/test -w ${ROS_LOG_DIR}
 # ROS/colcon setup scripts are not nounset-safe. Enable -u only after every
 # overlay has been sourced so the launched server still gets strict handling.
 ExecStart=/usr/bin/bash -c 'set -eo pipefail; source /opt/ros/humble/setup.bash; source "${ROBOTCORE_WORKSPACE}/install/setup.bash"; source "${CONTROL_INTERFACE_WORKSPACE}/install/setup.bash"; set -u; exec ros2 launch control_interface web_operator.launch.py web_host:="${CONTROL_INTERFACE_HOST}" web_port:="${CONTROL_INTERFACE_PORT}" host_manager_socket:=/run/robotcore/host-manager.sock apriltag_map_file:="${ROBOTCORE_APRILTAG_MAP_FILE}"'
@@ -40,6 +41,7 @@ TimerSlackNSec=50us
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=read-only
+ReadWritePaths=/home/nvidia/robotcore_logs
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true

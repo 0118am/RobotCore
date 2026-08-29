@@ -6,7 +6,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PID_CONFIG = ROOT / "ros_ws/src/robotcore_control/config/pid/default.json"
-TASK_DIR = ROOT / "ros_ws/src/robotcore_runtime/config/tasks"
+TASK_DIR = ROOT.parent / "ControlInterface/control_interface/config/tasks"
 PID_NODE = ROOT / "ros_ws/src/robotcore_control/robotcore_control/six_dof_pid_node.py"
 TRACKING_EXPERIMENT_NODE = (
     ROOT
@@ -38,7 +38,7 @@ def test_default_pid_document_contains_every_reloadable_gain():
         assert len(document[field]) == 6
 
 
-def test_tracking_tasks_are_individual_named_pid_documents():
+def test_tracking_tasks_are_individual_named_controller_documents():
     task_paths = sorted(TASK_DIR.glob("*.json"))
     tasks = [
         json.loads(path.read_text(encoding="utf-8"))
@@ -47,24 +47,48 @@ def test_tracking_tasks_are_individual_named_pid_documents():
     ]
 
     assert {task["name"] for task in tasks} == {
+        "circle",
         "pose_hold",
+        "racetrack",
+        "rl_pose_hold",
         "station_hold",
         "station_hold_fast",
-        "spatial_figure_eight",
+        "spatial_lissajous",
+        "straight_line",
     }
     for task in tasks:
         assert task["kind"] == "tracking_task"
-        assert task["controller"] == "pid"
+        assert task["controller"] in {"pid", "rl", "selected"}
         assert task["duration_s"] > 0.0 or task.get("run_until_stopped") is True
-        assert task["mode"] in {
-            "altitude_hold",
-            "station_hold",
-            "station_hold_fast",
+        if "mode" in task:
+            assert task["mode"] in {
+                "altitude_hold",
+                "station_hold",
+                "station_hold_fast",
+                "rl_policy",
+            }
+        else:
+            assert task["controller"] == "selected"
+            assert set(task["compatible_modes"]) == {
+                "station_hold",
+                "station_hold_fast",
+                "rl_policy",
+            }
+        if task["controller"] == "rl":
+            assert task["control_law"] == "t60_precision_v7_model_499"
+        elif task["controller"] == "selected":
+            assert task["control_law"] == "selected"
+        elif task["name"] != "pose_hold":
+            assert task["control_law"] == "pid"
+        assert task["trajectory_name"] in {
+            "none",
+            "spatial_lissajous",
+            "circle",
+            "racetrack",
+            "straight_line",
         }
-        assert task["trajectory_name"] in {"none", "spatial_figure_eight"}
         assert task["trajectory"]["trajectory_type"]
         assert (TASK_DIR / f"{task['name']}.json").is_file()
-
 
 def test_pose_hold_is_manual_planar_control_with_automatic_height_hold():
     task = json.loads((TASK_DIR / "pose_hold.json").read_text(encoding="utf-8"))
@@ -72,25 +96,62 @@ def test_pose_hold_is_manual_planar_control_with_automatic_height_hold():
 
     assert task["label"] == "定高模式"
     assert task["run_until_stopped"] is True
-    assert trajectory["trajectory_type"] == "altitude_hold"
+    assert trajectory["trajectory_type"] == "hold"
     assert trajectory["attitude_mode"] == "hold_initial"
     assert trajectory["relative_to_initial_pose"] is False
     assert trajectory["center_z"] == 0.9
     assert trajectory["manual_vertical_speed_mps"] == 0.2
 
 
-def test_station_hold_combines_direct_height_position_and_heading_pd():
+def test_rl_policy_none_reuses_fast_station_target_from_start_height():
+    task = json.loads((TASK_DIR / "rl_pose_hold.json").read_text(encoding="utf-8"))
+    fast = json.loads(
+        (TASK_DIR / "station_hold_fast.json").read_text(encoding="utf-8")
+    )
+    trajectory = task["trajectory"]
+    fast_trajectory = fast["trajectory"]
+
+    assert task["mode"] == "rl_policy"
+    assert task["trajectory_name"] == "none"
+    assert task["controller"] == "rl"
+    assert task["control_law"] == "t60_precision_v7_model_499"
+    assert task["run_until_stopped"] is True
+    assert trajectory["trajectory_type"] == "hold"
+    assert trajectory["attitude_mode"] == fast_trajectory["attitude_mode"]
+    assert trajectory["relative_to_initial_pose"] is False
+    assert "center_z" not in trajectory
+    assert "center_z" not in fast_trajectory
+    assert (
+        trajectory["manual_vertical_speed_mps"]
+        == fast_trajectory["manual_vertical_speed_mps"]
+    )
+    assert (
+        trajectory["station_linear_input_gain_mps"]
+        == fast_trajectory["station_linear_input_gain_mps"]
+    )
+    assert (
+        trajectory["station_lateral_input_gain_mps"]
+        == fast_trajectory["station_lateral_input_gain_mps"]
+    )
+    assert (
+        trajectory["station_yaw_input_gain_rps"]
+        == fast_trajectory["station_yaw_input_gain_rps"]
+    )
+
+
+def test_station_hold_combines_direct_height_position_and_heading_pid():
     task = json.loads((TASK_DIR / "station_hold.json").read_text(encoding="utf-8"))
     trajectory = task["trajectory"]
 
     assert task["label"] == "定点模式"
-    assert task["control_law"] == "pd"
+    assert task["control_law"] == "pid"
     assert task["run_until_stopped"] is True
-    assert trajectory["trajectory_type"] == "station_hold"
+    assert trajectory["trajectory_type"] == "hold"
     assert trajectory["attitude_mode"] == "level_heading"
     assert trajectory["relative_to_initial_pose"] is False
     assert trajectory["center_z"] == 0.9
     assert trajectory["station_linear_input_gain_mps"] == 0.3
+    assert trajectory["station_lateral_input_gain_mps"] == 0.2
     assert trajectory["station_yaw_input_gain_rps"] == 0.6
 
 
@@ -103,9 +164,11 @@ def test_fast_station_hold_has_dedicated_high_authority_control_type():
     assert fast["label"] == "快速定点模式"
     assert fast["mode"] == "station_hold_fast"
     assert fast["trajectory_name"] == "none"
-    assert fast["trajectory"]["trajectory_type"] == "station_hold_fast"
+    assert fast["trajectory"]["trajectory_type"] == "hold"
+    assert "center_z" not in fast["trajectory"]
     assert standard["trajectory"]["station_linear_input_gain_mps"] == 0.3
     assert fast["trajectory"]["station_linear_input_gain_mps"] == 0.5
+    assert fast["trajectory"]["station_lateral_input_gain_mps"] == 0.2
     assert fast["trajectory"]["station_yaw_input_gain_rps"] == standard["trajectory"][
         "station_yaw_input_gain_rps"
     ]
@@ -114,32 +177,92 @@ def test_fast_station_hold_has_dedicated_high_authority_control_type():
     ]["manual_vertical_speed_mps"]
 
 
-def test_spatial_figure_eight_uses_station_mode_and_pool_center_prelude():
+def test_spatial_lissajous_task_uses_one_name_everywhere():
     task = json.loads(
-        (TASK_DIR / "spatial_figure_eight.json").read_text(encoding="utf-8")
+        (TASK_DIR / "spatial_lissajous.json").read_text(encoding="utf-8")
     )
     trajectory = task["trajectory"]
 
-    assert task["mode"] == "station_hold"
-    assert task["label"] == "spacial Lissajous"
-    assert task["trajectory_name"] == "spatial_figure_eight"
-    assert trajectory["trajectory_type"] == "spatial_figure_eight"
-    assert trajectory["attitude_mode"] == "path_tangent"
-    assert trajectory["relative_to_initial_pose"] is False
+    assert task["label"] == "Spatial Lissajous"
+    assert task["compatible_modes"] == [
+        "station_hold",
+        "station_hold_fast",
+        "rl_policy",
+    ]
+    assert task["controller"] == "selected"
+    assert task["control_law"] == "selected"
+    assert task["name"] == "spatial_lissajous"
+    assert task["trajectory_name"] == "spatial_lissajous"
+    assert trajectory["trajectory_type"] == "spatial_lissajous"
+    assert trajectory["trajectory_speed_mps"] == 0.25
+    assert "period_s" not in trajectory
     assert [trajectory["center_x"], trajectory["center_y"], trajectory["center_z"]] == [
         2.71,
         1.865,
         0.5,
     ]
-    assert trajectory["hold_before_motion_s"] == 25.0
-    assert trajectory["move_duration_s"] == 15.0
-    assert trajectory["trajectory_ramp_s"] == 10.0
     assert [trajectory["amp_x"], trajectory["amp_y"], trajectory["amp_z"]] == [
-        2.3,
-        1.2,
-        0.1,
+        2.0,
+        1.0,
+        0.3,
     ]
-    assert trajectory["period_s"] == 200.0
+
+
+def test_rl_policy_runtime_and_hardware_authority_are_enabled():
+    launch = EDGE_LAUNCH.read_text(encoding="utf-8")
+    safety = SAFETY_CONFIG.read_text(encoding="utf-8")
+    authority = COMMAND_AUTHORITY_NODE.read_text(encoding="utf-8")
+
+    assert 'DeclareLaunchArgument("enable_rl_policy_runtime", default_value="true")' in launch
+    assert 'DeclareLaunchArgument("allow_rl_hardware", default_value="true")' in launch
+    assert 'package="robotcore_policy_cpp"' in launch
+    assert 'executable="t60_policy"' in launch
+    assert '"policy_name": "t60_precision_v7_model_499"' in launch
+    assert '"policy_layout_hash"' not in launch
+    assert 'allow_rl_hardware: true' in safety
+    assert 'declare_parameter("allow_rl_hardware", true)' in authority
+    assert '"/policy/body/action"' in authority
+
+
+def test_tracking_experiment_waits_for_fresh_rl_policy_inference():
+    source = TRACKING_EXPERIMENT_NODE.read_text(encoding="utf-8")
+
+    assert 'PolicyStatus,' in source
+    assert '"/policy/body/status"' in source
+    assert 'controller not in {' in source
+    assert '"rl",' in source
+    assert "self.policy_status_sequence > controller_sequence_at_target" in source
+    assert "and policy.loaded" in source
+    assert "and policy.input_ready" in source
+    assert "int(policy.inference_count) > inference_count_at_target" in source
+
+
+def test_planar_automatic_tasks_share_fixed_height_and_start_prelude():
+    expected = {
+        "circle": "path_tangent",
+        "racetrack": "path_tangent",
+        "straight_line": "fixed_path_heading",
+    }
+
+    for task_name, attitude_mode in expected.items():
+        task = json.loads(
+            (TASK_DIR / f"{task_name}.json").read_text(encoding="utf-8")
+        )
+        trajectory = task["trajectory"]
+
+        assert task["compatible_modes"] == [
+            "station_hold",
+            "station_hold_fast",
+            "rl_policy",
+        ]
+        assert task["controller"] == "selected"
+        assert task["trajectory_name"] == task_name
+        assert trajectory["trajectory_type"] == task_name
+        assert trajectory["attitude_mode"] == attitude_mode
+        assert trajectory["center_z"] == 0.5
+        assert trajectory["hold_before_motion_s"] == 25.0
+        assert trajectory["move_duration_s"] == 15.0
+        assert trajectory["trajectory_ramp_s"] == 10.0
 
 
 def test_managed_task_defaults_keep_initial_altitude_at_point_nine_metres():
@@ -160,21 +283,28 @@ def test_tracking_experiment_does_not_abort_an_already_canceled_goal():
 def test_tracking_experiment_prepares_trajectory_while_disarmed_then_rearms():
     source = TRACKING_EXPERIMENT_NODE.read_text(encoding="utf-8")
 
-    disarm = source.index("disarm_result = await self.set_authority(False)")
+    neutralize = source.index('disarm_result = await self.set_authority("", False)')
+    select = source.index(
+        "select_result = await self.set_authority(controller, False)"
+    )
+    recorder = source.index("start_result = await self.run_start_client.call_async")
     configure = source.index("parameter_response = await self.parameter_client.call_async")
     validate = source.index("validation_result = await self.validate_client.call_async")
     reset = source.index("reset_result = await self.reset_client.call_async")
     ready = source.index("if not await self.wait_for_tracking_ready(", reset)
-    rearm = source.index("arm_result = await self.set_authority(True)")
+    rearm = source.index("arm_result = await self.set_authority(controller, True)")
 
-    assert disarm < configure < validate < reset < ready < rearm
-    assert "PID re-arm after trajectory reset failed" in source
-    assert "await self.wait_for_armed_status(0.5)" in source
+    assert neutralize < select < recorder < configure < validate < reset < ready < rearm
+    assert "await self.wait_for_disarmed_status(controller, 0.5)" in source
+    assert "re-arm after trajectory reset failed" in source
+    assert "arm_generation_before = int(self.authority.arm_generation)" in source
+    assert "controller, arm_generation_before, 0.5" in source
     assert "official_start_result = await self.reset_client.call_async" in source
     assert "self.trajectory_target_sequence > target_sequence_before_reset" in source
-    assert "self.pid_status_sequence > pid_sequence_at_target" in source
+    assert "self.pid_status_sequence > controller_sequence_at_target" in source
     assert "and pid.ready" in source
     assert "and pid.producing_command" in source
+    assert "must be selected, healthy, and explicitly armed" not in source
 
 
 def test_trajectory_envelope_contains_pose_hold_and_condition_limits():
@@ -195,28 +325,50 @@ def test_trajectory_envelope_contains_pose_hold_and_condition_limits():
     assert trajectory["max_angular_speed_rps"] == 0.60
     assert trajectory["attitude_min_rpy_deg"] == [-15.0, -15.0, -30.0]
     assert trajectory["attitude_max_rpy_deg"] == [15.0, 15.0, 30.0]
-    assert pid["altitude_pwm_ki"] == 0.8
-    assert pid["altitude_pwm_kd"] == 0.15
-    assert pid["altitude_velocity_filter_time_constant_s"] == 0.20
-    assert pid["altitude_position_kp"] == 0.35
-    assert pid["station_yaw_pwm_kp"] == 0.55
-    assert pid["station_yaw_heading_kp"] == 0.60
+    assert pid["altitude_pwm_kp"] == 1.4
+    assert pid["altitude_pwm_ki"] == 0.45
+    assert pid["altitude_pwm_kd"] == 0.22
+    assert pid["altitude_pwm_integral_limit"] == 0.5
+    assert pid["altitude_velocity_filter_time_constant_s"] == 0.10
+    assert pid["altitude_position_kp"] == 0.25
+    assert pid["station_sway_pwm_kp"] == 1.0
+    assert pid["fast_station_sway_pwm_kp"] == 0.60
+    assert pid["fast_station_sway_pwm_feedforward_positive_gain"] == 1.80
+    assert pid["fast_station_sway_pwm_feedforward_negative_gain"] == 1.90
+    assert pid["fast_station_sway_effort_slew_rate_per_s"] == 1.20
+    assert pid["station_sway_pwm_ki"] == 0.0
+    assert pid["station_sway_integral_limit"] == 0.5
+    assert pid["station_yaw_pwm_kp"] == 0.70
+    assert pid["station_yaw_pwm_ki"] == 0.12
+    assert pid["station_yaw_integral_limit"] == 0.8
+    assert pid["station_yaw_heading_kp"] == 0.90
     assert pid["station_horizontal_axis_limit"] == 0.12
     assert pid["station_yaw_axis_limit"] == 0.20
     assert pid["station_surge_rate_limit"] == 0.40
     assert pid["fast_station_surge_rate_limit"] == 0.50
+    assert pid["fast_station_sway_rate_limit"] == 0.20
+    assert pid["fast_station_lateral_yaw_axis_limit"] == 0.10
+    assert pid["fast_station_sway_yaw_compensation_gain"] == 0.055
+    assert pid["fast_station_lateral_yaw_effort_slew_rate_per_s"] == 0.30
     assert pid["station_yaw_rate_limit"] == 0.60
+    assert not any(name.startswith("lissajous_") for name in pid)
     assert pid["fast_station_level_pwm_limit"] == 0.10
-    assert pid["fast_station_roll_angle_kp"] == 0.45
-    assert pid["fast_station_pitch_angle_kp"] == 0.45
-    assert pid["fast_station_roll_rate_kp"] == 0.30
-    assert pid["fast_station_pitch_rate_kp"] == 0.55
+    assert pid["fast_station_roll_angle_to_rate_kp"] == 1.30
+    assert pid["fast_station_pitch_angle_to_rate_kp"] == 0.80
+    assert pid["fast_station_roll_rate_kp"] == 0.20
+    assert pid["fast_station_pitch_rate_kp"] == 0.35
+    assert pid["fast_station_pitch_rate_ki"] == 0.20
+    assert pid["fast_station_pitch_rate_integral_effort_limit"] == 0.10
+    assert pid["fast_station_surge_pitch_decoupling_enabled"] is True
+    assert pid["fast_station_surge_pitch_forward_gain"] == 0.08
+    assert pid["fast_station_surge_pitch_reverse_gain"] == 0.06
+    assert pid["fast_station_surge_pitch_limit"] == 0.06
     assert pid["imu_rate_history_samples"] == 5
     assert pid["imu_rate_prediction_horizon_s"] == 0.04
     assert pid["imu_rate_prediction_accel_limit_rps2"] == 4.0
     assert pid["imu_rate_prediction_delta_limit_rps"] == 0.12
     assert pid["imu_rate_filter_time_constant_s"] == 0.01
-    assert pid["imu_orientation_filter_time_constant_s"] == 0.05
+    assert pid["imu_orientation_filter_time_constant_s"] == 0.03
     assert '"control_rate_hz": 50.0' in EDGE_LAUNCH.read_text(encoding="utf-8")
 
     task = json.loads((TASK_DIR / "pose_hold.json").read_text(encoding="utf-8"))
@@ -239,7 +391,8 @@ def test_command_sources_are_isolated_and_authority_owns_final_output():
 
     assert '"/control/manual/thruster_cmd", "manual", "web_operator"' in authority
     assert '"/control/pid/thruster_cmd", "pid", "pid_controller"' in authority
-    assert '"/control/rl/thruster_cmd", "rl", "rl_action_adapter"' in authority
+    assert '"/policy/body/action"' in authority
+    assert 'command->source = "t60_policy"' in authority
     assert '"/control/thruster_cmd"' in authority
     legacy_shared_topic = "/control/" + "thruster_" + "candidate"
     assert legacy_shared_topic not in authority
@@ -259,7 +412,8 @@ def test_rosbag_topic_list_captures_target_state_pid_output_and_safety():
         "/control/pid/wrench",
         "/control/manual/thruster_cmd",
         "/control/pid/thruster_cmd",
-        "/control/rl/thruster_cmd",
+        "/policy/body/action",
+        "/policy/body/status",
         "/control/thruster_cmd",
         "/control/authority/status",
         "/safety/events",
@@ -280,16 +434,19 @@ def test_pid_node_exposes_station_live_document_and_direct_control():
     assert 'ThrusterCommand, "/control/manual/thruster_cmd"' not in source
     assert '"/control/authority/status"' in source
     assert '"/control/pwm_limit_us"' not in source
-    assert "command_limit = float(message.command_limit)" in source
-    assert 'altitude_mode = target_mode == "altitude_hold"' in source
-    assert "station_mode = target_mode in {" in source
-    assert '"spatial_figure_eight",' in source
+    assert "action_limit = float(message.action_limit)" in source
+    assert 'control_mode = str(target.control_mode).lower()' in source
+    assert 'altitude_mode = control_mode == "altitude_hold"' in source
+    assert 'station_mode = control_mode in {"station_hold", "station_hold_fast"}' in source
+    assert 'fast_station_mode = control_mode == "station_hold_fast"' in source
     assert 'missing.append("unsupported_trajectory_type")' in source
+    assert 'missing.append("unsupported_control_mode")' in source
+    assert 'missing.append("incompatible_trajectory_control_mode")' in source
     assert "elif direct_altitude_mode:" in source
     assert 'self.declare_parameter("imu_topic", "/sensors/external_imu")' in source
     assert 'self.declare_parameter("imu_rate_history_samples", 5)' in source
     assert 'self.declare_parameter("imu_rate_filter_time_constant_s", 0.01)' in source
-    assert 'self.declare_parameter("imu_orientation_filter_time_constant_s", 0.05)' in source
+    assert 'self.declare_parameter("imu_orientation_filter_time_constant_s", 0.03)' in source
     assert "qos_profile_sensor_data" in source
     assert 'missing.append("/sensors/external_imu")' in source
     assert "external_imu_not_base_link" not in source
@@ -304,6 +461,7 @@ def test_pid_node_exposes_station_live_document_and_direct_control():
     assert "self.imu_ns = now_ns" in source
     assert "self.imu_filter_ns = sample_ns" in source
     assert "quaternion_slerp(" in source
+    assert "orientation = attitude_with_heading(" in source
     assert "current_q = self.imu_orientation_filtered" in source
     assert "localization_q = quaternion_from_message(body.pose.orientation)" in source
     assert "map_to_body = quaternion_conjugate(localization_q)" in source
@@ -315,42 +473,102 @@ def test_pid_node_exposes_station_live_document_and_direct_control():
     assert "SixAxisPid" not in source
     assert '"thruster_config_path"' not in source
     assert ".allocate(" not in source
+
+    tracking_monitor = TRACKING_MONITOR_NODE.read_text(encoding="utf-8")
+    assert "map_yaw = self.quaternion_to_rpy(localization_quat_w)[2]" in tracking_monitor
+    assert "control_attitude_w = self.rpy_quaternion(" in tracking_monitor
+    assert "status.actual_orientation.w" in tracking_monitor
     assert "mix_station_pwm" not in source
     assert "station_controller" not in source
     assert "altitude_station_pwm_commands" in source
     assert "desired_surge_velocity" in source
     assert "desired_sway_velocity" in source
     assert 'self.declare_parameter("station_surge_pwm_kp", 1.5)' in source
-    assert 'self.declare_parameter("station_sway_pwm_kp", 1.25)' in source
-    assert 'self.declare_parameter("station_yaw_pwm_kp", 0.55)' in source
+    assert 'self.declare_parameter("station_surge_pwm_ki", 0.25)' in source
+    assert 'self.declare_parameter("station_sway_pwm_kp", 1.0)' in source
+    assert 'self.declare_parameter("fast_station_sway_pwm_kp", 0.60)' in source
+    assert '"fast_station_sway_pwm_feedforward_positive_gain", 1.80' in source
+    assert '"fast_station_sway_pwm_feedforward_negative_gain", 1.90' in source
+    assert 'self.declare_parameter("fast_station_sway_effort_slew_rate_per_s", 1.20)' in source
+    assert 'self.declare_parameter("station_sway_pwm_ki", 0.0)' in source
+    assert 'self.declare_parameter("station_sway_integral_limit", 0.5)' in source
+    assert 'self.declare_parameter("station_yaw_pwm_kp", 0.70)' in source
+    assert 'self.declare_parameter("station_yaw_pwm_ki", 0.12)' in source
+    assert 'self.declare_parameter("station_yaw_integral_limit", 0.8)' in source
+    assert 'self.declare_parameter("lissajous_' not in source
     assert 'self.declare_parameter("fast_station_level_pwm_limit", 0.10)' in source
-    assert 'self.declare_parameter("fast_station_roll_angle_kp", 0.45)' in source
-    assert 'self.declare_parameter("fast_station_pitch_angle_kp", 0.45)' in source
-    assert 'self.declare_parameter("fast_station_roll_rate_kp", 0.30)' in source
-    assert 'self.declare_parameter("fast_station_pitch_rate_kp", 0.55)' in source
-    assert 'fast_station_mode = target_mode == "station_hold_fast"' in source
-    assert "self.command_limit\n                    if fast_station_mode" in source
-    assert "altitude_level_pwm_commands" in source
-    assert "level_attitude_pd_efforts(" in source
-    assert "self.fast_station_level_angle_kp" in source
+    assert 'self.declare_parameter("fast_station_roll_angle_to_rate_kp", 1.30)' in source
+    assert 'self.declare_parameter("fast_station_pitch_angle_to_rate_kp", 0.80)' in source
+    assert 'self.declare_parameter("fast_station_roll_rate_kp", 0.20)' in source
+    assert 'self.declare_parameter("fast_station_pitch_rate_kp", 0.35)' in source
+    assert 'self.declare_parameter("fast_station_pitch_rate_ki", 0.20)' in source
+    assert '"fast_station_pitch_rate_integral_effort_limit", 0.10' in source
+    assert 'self.declare_parameter("fast_station_surge_pitch_decoupling_enabled", True)' in source
+    assert 'self.declare_parameter("fast_station_surge_pitch_forward_gain", 0.08)' in source
+    assert 'self.declare_parameter("fast_station_surge_pitch_reverse_gain", 0.06)' in source
+    assert 'self.declare_parameter("fast_station_surge_pitch_limit", 0.06)' in source
+    assert "if fast_station_mode or trajectory_start_approach" in source
+    assert "altitude_level_pwm_commands" not in source
+    assert "level_attitude_pd_efforts(" not in source
+    assert "commands[:4] =" not in source
+    assert "level_attitude_rate_efforts(" in source
+    assert "conditional_axis_integral_effort(" in source
+    assert "self.fast_station_pitch_rate_integral_effort = 0.0" in source
+    assert "surge_pitch_decoupling_effort(" in source
+    assert "self.fast_station_level_angle_to_rate_kp" in source
     assert "self.fast_station_level_rate_kp" in source
     assert "individual PWM <=" in source
-    assert 'self.declare_parameter("station_yaw_heading_kp", 0.60)' in source
+    assert 'self.declare_parameter("station_yaw_heading_kp", 0.90)' in source
     assert 'self.declare_parameter("station_horizontal_axis_limit", 0.12)' in source
     assert 'self.declare_parameter("station_yaw_axis_limit", 0.20)' in source
     assert 'self.declare_parameter("station_surge_rate_limit", 0.40)' in source
     assert 'self.declare_parameter("fast_station_surge_rate_limit", 0.50)' in source
+    assert 'self.declare_parameter("fast_station_sway_rate_limit", 0.20)' in source
+    assert (
+        'self.declare_parameter("fast_station_lateral_yaw_axis_limit", 0.10)'
+        in source
+    )
+    assert '"fast_station_sway_yaw_compensation_gain", 0.055' in source
+    assert '"fast_station_lateral_yaw_effort_slew_rate_per_s", 0.30' in source
     assert 'self.declare_parameter("station_yaw_rate_limit", 0.60)' in source
-    assert 'self.declare_parameter("altitude_position_kp", 0.35)' in source
+    assert 'self.declare_parameter("altitude_position_kp", 0.25)' in source
     assert "self.station_yaw_heading_kp * orientation_error_body[2]" in source
     assert "self.fast_station_surge_rate_limit" in source
+    assert "self.fast_station_sway_rate_limit" in source
+    assert "self.fast_station_lateral_yaw_axis_limit" in source
+    assert "directional_velocity_feedforward(" in source
+    assert "slew_rate_limit(" in source
+    assert "yaw_feedforward" in source
+    assert "straight_lateral_maneuver" in source
+    assert "sway_rate_limit" in source
+    assert "self.outer_position_kp[:2]" in source
+    assert 'trajectory_phase == "start_approach"' in source
+    assert "target.trajectory_phase" in source
+    assert 'getattr(target, "trajectory_phase"' not in source
+    assert "station_velocity_setpoints(" in source
+    assert "center_approach=trajectory_start_approach" in source
+    assert "self.station_surge_pid.step(" in source
+    assert "self.fast_station_sway_pid" in source
+    assert "requested_sway_effort = sway_pid.step(" in source
+    assert "self.station_yaw_pid.step(" in source
+    assert "self.station_yaw_pid.reset()" in source
+    assert "yaw_maneuver_active or straight_lateral_maneuver" in source
+    assert 'yaw_integral_state = "maneuver-disabled"' in source
+    assert 'yaw_integral_state = "lateral-disabled"' in source
+    assert 'yaw_integral_state = "hold-reset"' in source
+    assert 'yaw_integral_state = "zero-cross-reset"' in source
+    assert "integral_reset_after_error_crossing(" in source
+    assert "self.station_surge_pid.integral = surge_integral_before" in source
+    assert "self.station_yaw_pid.integral = yaw_integral_before" in source
+    assert '"surge/sway PID; yaw PI "' in source
+    assert '"yaw I "' in source
     assert "allocate_linearized_reference" not in source
 
 
 def test_pid_command_stays_neutral_between_arm_and_explicit_start():
     source = PID_NODE.read_text(encoding="utf-8")
 
-    assert 'idle_mode = target_mode == "idle"' in source
+    assert 'idle_mode = control_mode == "idle"' in source
     assert 'status_message = "ready; neutral until Start"' in source
 
 
@@ -361,11 +579,12 @@ def test_tracking_action_waits_with_ros_future_instead_of_asyncio_event_loop():
     assert "from rclpy.task import Future" in source
     assert "await self.wait_for_next_feedback(0.1)" in source
     assert "callback_group=self.wait_callback_group" in source
-    assert 'get_package_share_directory("robotcore_runtime")' in source
-    assert "if not path.is_file():" in source
-    assert "if task_name not in {" in source
-    assert '"spatial_figure_eight",' in source
-    assert '"tracking strategy is not approved"' in source
+    assert 'get_package_share_directory("robotcore_runtime")' not in source
+    assert "task = self.load_task(task_name)" in source
+    assert 'task.get("kind") != "tracking_task"' in source
+    assert 'str(task.get("name", "")) != task_name' in source
+    assert "if task_name not in {" not in source
+    assert '"tracking strategy is not approved"' not in source
 
 
 def test_estimated_body_state_uses_message_validity_without_stale_source_names():
@@ -387,5 +606,5 @@ def test_tracking_action_stops_trajectory_before_every_active_run_cleanup():
     assert 'Trigger, "/runtime/trajectory/stop"' in source
     assert source.count("await self.stop_trajectory()") == 2
     assert source.index("await self.stop_trajectory()", source.index("finally:")) < source.index(
-        "await self.disarm()", source.index("finally:")
+        "await self.disarm(controller)", source.index("finally:")
     )

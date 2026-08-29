@@ -16,7 +16,9 @@ RestartSec=2
 UMask=0007
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectHome=true
+# Hide every home directory except the operator-visible RobotCore log tree.
+ProtectHome=tmpfs
+BindReadOnlyPaths=/home/nvidia/robotcore_logs
 ProtectSystem=full
 ReadWritePaths=/run/robotcore /etc/robotcore /var/lib/robotcore
 

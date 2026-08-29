@@ -5,6 +5,7 @@ model_path: dummy://body/zero_thrusters
 input_schema:
   - /robot/body_state
 output_schema:
-  type: normalized_thruster
+  type: direct_thruster_action
   size: 8
   range: [-1.0, 1.0]
+  pwm_mapping: "PWM_us = 1500 + 250 * action"

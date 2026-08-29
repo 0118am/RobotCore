@@ -11,41 +11,100 @@ command_authority:
     state_timeout_s: 0.15
     target_timeout_s: 0.15
     safety_heartbeat_timeout_s: 0.25
-    # One limit for manual, PID and RL. The measured force model is valid only
-    # for |p - 1500| <= 200 us. Commands are applied immediately (no slew).
-    pwm_limit_us: 200.0
-    allow_rl_hardware: false
+    # One limit for manual, PID and RL. Direct action +/-1 maps to 1250/1750 us.
+    # All eight actions are multiplied by pwm_limit_us / 250, preserving their
+    # signs and relative allocation without per-channel clipping.
+    # Commands are applied immediately (no authority-layer slew).
+    pwm_limit_us: 250.0
+    allow_rl_hardware: true
 pid_controller:
   ros__parameters:
     # Dedicated actuator-domain altitude PID. Live tests show installed
     # T1-T4 +PWM moves toward -Z, hence command_sign=-1 for an FLU loop.
-    altitude_pwm_kp: 2.0
-    altitude_pwm_ki: 0.8
-    altitude_pwm_kd: 0.15
-    altitude_pwm_integral_limit: 0.4
-    altitude_velocity_filter_time_constant_s: 0.20
+    # Reduce position/velocity stiffness and integral effort, shorten the
+    # estimator lag, and retain more derivative damping after the observed
+    # height overshoot and repeated zero crossings.
+    altitude_pwm_kp: 1.4
+    altitude_pwm_ki: 0.45
+    altitude_pwm_kd: 0.22
+    altitude_pwm_integral_limit: 0.5
+    altitude_velocity_filter_time_constant_s: 0.10
     altitude_pwm_command_sign: -1.0
-    altitude_position_kp: 0.35
-    # Direct station mode keeps translation conservative while giving yaw
-    # enough authority to clear the measured +/-25 us thruster deadband.
+    altitude_position_kp: 0.25
+    # Horizontal velocity PID retains the field-validated proportional gains.
+    # Surge keeps a slow integral term to learn drag/current bias and cross the
+    # measured +/-25 us deadband. The finite figure-eight center approach
+    # bypasses software velocity limits; the live unified PWM limit remains
+    # authoritative.
     station_surge_pwm_kp: 1.5
-    station_sway_pwm_kp: 1.25
-    station_yaw_pwm_kp: 0.55
-    station_yaw_heading_kp: 0.60
+    station_surge_pwm_ki: 0.25
+    station_surge_pwm_kd: 0.0
+    station_surge_integral_limit: 1.0
+    # Disable lateral integral for the station-hold A/B test: logs showed its
+    # retained effort overpowering velocity braking at each target crossing
+    # and sustaining a side-to-side limit cycle through the thruster deadband.
+    station_sway_pwm_kp: 1.0
+    # The P=1.8 pool run reached 0.154/-0.139 m/s steady sway, but spent 31%
+    # of the run saturated and excited a roughly 2.2 Hz yaw reversal. Use P
+    # only to trim velocity error. Direction-specific feedforward supplies the
+    # drag/current effort needed near the explicit 0.20 m/s target; the higher
+    # negative-direction gain follows the measured current asymmetry.
+    fast_station_sway_pwm_kp: 0.60
+    fast_station_sway_pwm_feedforward_positive_gain: 1.80
+    fast_station_sway_pwm_feedforward_negative_gain: 1.90
+    # At 50 Hz, 1.20 PID-effort/s limits sway changes to 12 us per frame,
+    # versus the measured 172 us single-frame jump in the P=1.8 run.
+    fast_station_sway_effort_slew_rate_per_s: 1.20
+    station_sway_pwm_ki: 0.0
+    station_sway_pwm_kd: 0.0
+    station_sway_integral_limit: 0.5
+    # Yaw is also an angle-to-rate cascade. A slow rate-loop integral removes
+    # persistent current/thruster bias; its 0.8 rad error-state cap limits the
+    # direct I contribution to 0.096 PID effort (48 us).
+    station_yaw_pwm_kp: 0.70
+    station_yaw_pwm_ki: 0.12
+    station_yaw_integral_limit: 0.8
+    station_yaw_heading_kp: 0.90
     station_horizontal_axis_limit: 0.12
     station_yaw_axis_limit: 0.20
     station_surge_rate_limit: 0.40
     fast_station_surge_rate_limit: 0.50
+    # Full right-stick lateral translation is a 0.20 m/s velocity request.
+    # The common 200 us per-thruster bound remains the final actuator limit.
+    fast_station_sway_rate_limit: 0.20
+    # Straight lateral runs coupled into a +/-0.20 yaw correction and produced
+    # rapid heading reversals. Limit automatic heading correction while sway is
+    # commanded; explicit operator yaw retains station_yaw_axis_limit above.
+    fast_station_lateral_yaw_axis_limit: 0.10
+    # The measured nonlinear T5-T8 model predicts about +0.07 N*m yaw moment
+    # at +0.40 sway. A small opposite feedforward removes that static coupling;
+    # a 0.30 PID-effort/s yaw slew cap suppresses the observed rapid reversals.
+    fast_station_sway_yaw_compensation_gain: 0.055
+    fast_station_lateral_yaw_effort_slew_rate_per_s: 0.30
     station_yaw_rate_limit: 0.60
-    # The measured roll loop has about 160 ms command-to-angular-acceleration
-    # delay. Its old 0.9 rate gain exceeded the fitted delayed-integrator
-    # stability boundary (~0.43). Keep angle stiffness independent from the
-    # lower gyro gains and bound combined T1-T4 differential to 50 us.
+    # Measured command-to-angular-acceleration lag is about 80 ms on roll and
+    # 130 ms on pitch. Use an explicit angle-to-rate cascade: the roll outer
+    # gain is softened to damp the measured 0.5-0.7 Hz forward-motion rocking,
+    # while pitch is deliberately slower and its delayed rate gain is reduced.
+    # The 0.12 rad/s rate cap comes from real_pool_pid.yaml. Combined T1-T4
+    # differential stays bounded to 50 us.
     fast_station_level_pwm_limit: 0.10
-    fast_station_roll_angle_kp: 0.45
-    fast_station_pitch_angle_kp: 0.45
-    fast_station_roll_rate_kp: 0.30
-    fast_station_pitch_rate_kp: 0.55
+    fast_station_roll_angle_to_rate_kp: 1.30
+    fast_station_pitch_angle_to_rate_kp: 0.80
+    fast_station_roll_rate_kp: 0.20
+    fast_station_pitch_rate_kp: 0.35
+    # The pitch rate integral now builds quickly enough during a forward run to
+    # remove the measured steady bow-down bias. Its contribution remains under
+    # the shared 0.10 roll/pitch limit and conditional anti-windup.
+    fast_station_pitch_rate_ki: 0.20
+    fast_station_pitch_rate_integral_effort_limit: 0.10
+    # Applied (post-axis-limit) surge feeds a direction-specific actuator-domain
+    # pitch correction. It is combined with rate feedback before the shared
+    # attitude limit and altitude anti-windup headroom are calculated.
+    fast_station_surge_pitch_decoupling_enabled: true
+    fast_station_surge_pitch_forward_gain: 0.08
+    fast_station_surge_pitch_reverse_gain: 0.06
+    fast_station_surge_pitch_limit: 0.06
     # Native-100-Hz gyro conditioning: reject only isolated spikes, fit the
     # latest five timestamped samples, and predict the bounded 40 ms command-
     # application horizon. The final 10 ms low-pass is about 16 Hz, avoiding
@@ -56,7 +115,7 @@ pid_controller:
     imu_rate_prediction_accel_limit_rps2: 4.0
     imu_rate_prediction_delta_limit_rps: 0.12
     imu_rate_filter_time_constant_s: 0.01
-    imu_orientation_filter_time_constant_s: 0.05
+    imu_orientation_filter_time_constant_s: 0.03
 
 trajectory_command:
   ros__parameters:

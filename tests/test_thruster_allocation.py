@@ -25,6 +25,12 @@ CONFIG = (
 )
 
 
+def pid_effort_to_action(values):
+    """Mirror the PID node's calibrated 500-us effort to 250-us action conversion."""
+
+    return np.clip(np.asarray(values, dtype=np.float64) * 2.0, -1.0, 1.0)
+
+
 def test_validated_vector_model_is_full_rank_and_measured():
     allocator = ThrusterAllocator.from_yaml(CONFIG)
     assert allocator.rank == 6
@@ -40,7 +46,7 @@ def test_allocator_tracks_feasible_wrench_and_returns_eight_commands():
     target = allocator.wrench_for_commands(source_commands)
     result = allocator.allocate(target)
     assert len(result.commands) == 8
-    assert all(-0.4 <= value <= 0.4 for value in result.commands)
+    assert all(-0.8 <= value <= 0.8 for value in result.commands)
     assert result.residual < 0.05
     assert result.saturation_fraction == 0.0
 
@@ -48,7 +54,7 @@ def test_allocator_tracks_feasible_wrench_and_returns_eight_commands():
 def test_allocator_bounds_infeasible_wrench():
     allocator = ThrusterAllocator.from_yaml(CONFIG)
     result = allocator.allocate([10000.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-    assert all(-0.4 <= value <= 0.4 for value in result.commands)
+    assert all(-0.8 <= value <= 0.8 for value in result.commands)
     assert result.saturation_fraction > 0.0
     assert result.residual > 1000.0
 
@@ -127,8 +133,8 @@ def test_pwm_model_clamps_endpoints_and_obeys_deadband():
         thruster.force_vector_for_pwm(1200.0),
         thruster.force_vector_for_pwm(1300.0),
     )
-    assert np.isclose(thruster.command_for_effective(175.0), 0.4)
-    assert np.isclose(thruster.command_for_effective(-175.0), -0.4)
+    assert np.isclose(thruster.command_for_effective(175.0), 0.8)
+    assert np.isclose(thruster.command_for_effective(-175.0), -0.8)
 
 
 def test_vertical_subset_allocator_keeps_horizontal_thrusters_neutral():
@@ -146,7 +152,7 @@ def test_vertical_subset_allocator_keeps_horizontal_thrusters_neutral():
 
 def test_field_verified_positive_pwm_thruster_pair_yaw_directions():
     allocator = ThrusterAllocator.from_yaml(CONFIG)
-    positive_pwm = 0.2
+    positive_pwm = 0.4
 
     t5_t8 = np.zeros(8)
     t5_t8[[4, 7]] = positive_pwm
@@ -161,12 +167,12 @@ def test_field_verified_positive_pwm_thruster_pair_yaw_directions():
 def test_station_yaw_balance_reduces_translation_in_measured_thruster_model():
     allocator = ThrusterAllocator.from_yaml(CONFIG)
 
-    counter_clockwise = altitude_station_pwm_commands(
+    counter_clockwise = pid_effort_to_action(altitude_station_pwm_commands(
         0.0, 0.0, 0.0, 0.08, 0.2, -1.0
-    )
-    clockwise = altitude_station_pwm_commands(
+    ))
+    clockwise = pid_effort_to_action(altitude_station_pwm_commands(
         0.0, 0.0, 0.0, -0.08, 0.2, -1.0
-    )
+    ))
     ccw_wrench = allocator.wrench_for_commands(counter_clockwise)
     cw_wrench = allocator.wrench_for_commands(clockwise)
 
@@ -175,9 +181,9 @@ def test_station_yaw_balance_reduces_translation_in_measured_thruster_model():
     assert np.linalg.norm(ccw_wrench[:2]) < 0.06
     assert np.linalg.norm(cw_wrench[:2]) < 0.06
 
-    full_ccw = altitude_station_pwm_commands(
+    full_ccw = pid_effort_to_action(altitude_station_pwm_commands(
         0.0, 0.0, 0.0, 0.20, 0.4, -1.0
-    )
+    ))
     full_wrench = allocator.wrench_for_commands(full_ccw)
     assert full_wrench[5] > 0.45
     assert np.linalg.norm(full_wrench[:2]) < 0.08
@@ -185,9 +191,9 @@ def test_station_yaw_balance_reduces_translation_in_measured_thruster_model():
 
 def test_station_sway_balance_is_lateral_in_measured_thruster_model():
     allocator = ThrusterAllocator.from_yaml(CONFIG)
-    commands = altitude_station_pwm_commands(
+    commands = pid_effort_to_action(altitude_station_pwm_commands(
         0.0, 0.0, 0.08, 0.0, 0.2, -1.0
-    )
+    ))
     wrench = allocator.wrench_for_commands(commands)
 
     assert wrench[1] > 0.25
@@ -201,8 +207,8 @@ def test_t7_t8_reverse_pwm_reverses_individual_yaw_direction():
     for channel in (6, 7):
         positive = np.zeros(8)
         negative = np.zeros(8)
-        positive[channel] = 0.2
-        negative[channel] = -0.2
+        positive[channel] = 0.4
+        negative[channel] = -0.4
 
         positive_yaw = allocator.wrench_for_commands(positive)[5]
         negative_yaw = allocator.wrench_for_commands(negative)[5]
@@ -214,20 +220,24 @@ def test_t7_t8_reverse_pwm_reverses_individual_yaw_direction():
 def test_field_verified_positive_pwm_vertical_collective_moves_down():
     allocator = ThrusterAllocator.from_yaml(CONFIG)
     commands = np.zeros(8)
-    commands[:4] = 0.2
+    commands[:4] = 0.4
 
     assert allocator.wrench_for_commands(commands)[2] < -6.0
 
 
 def test_fast_station_level_mixer_has_correct_measured_roll_and_pitch_signs():
     allocator = ThrusterAllocator.from_yaml(CONFIG)
-    positive_roll = altitude_level_pwm_commands(0.0, 0.12, 0.0, 0.4, -1.0)
-    positive_pitch = altitude_level_pwm_commands(0.0, 0.0, 0.12, 0.4, -1.0)
+    positive_roll = pid_effort_to_action(
+        altitude_level_pwm_commands(0.0, 0.12, 0.0, 0.4, -1.0)
+    )
+    positive_pitch = pid_effort_to_action(
+        altitude_level_pwm_commands(0.0, 0.0, 0.12, 0.4, -1.0)
+    )
 
     assert allocator.wrench_for_commands(positive_roll)[3] > 0.5
     assert allocator.wrench_for_commands(positive_pitch)[4] > 0.35
-    assert max(abs(value) for value in positive_roll) <= 0.4
-    assert max(abs(value) for value in positive_pitch) <= 0.4
+    assert max(abs(value) for value in positive_roll) <= 0.8
+    assert max(abs(value) for value in positive_pitch) <= 0.8
 
 
 def test_vector_model_positions_are_already_relative_to_center_of_mass():

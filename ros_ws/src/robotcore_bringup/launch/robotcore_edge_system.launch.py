@@ -22,6 +22,16 @@ def generate_launch_description():
         "ROBOTCORE_RUN_ROOT", str(Path.cwd() / "data" / "robotcore_runs")
     )
     config_root = Path(os.environ.get("ROBOTCORE_CONFIG_ROOT", "/var/lib/robotcore/config"))
+    task_config_dir = (
+        Path(
+            os.environ.get(
+                "CONTROL_INTERFACE_WORKSPACE", "/home/nvidia/ControlInterface"
+            )
+        )
+        / "control_interface"
+        / "config"
+        / "tasks"
+    )
 
     return LaunchDescription(
         [
@@ -52,6 +62,21 @@ def generate_launch_description():
             # confirmed. Individual authority, localisation and target gates
             # remain fail-closed even though the tracking processes are live.
             DeclareLaunchArgument("enable_pool_tracking", default_value="true"),
+            DeclareLaunchArgument("enable_rl_policy_runtime", default_value="true"),
+            # The policy is trained in the physical T1-T8 command convention.
+            # Arming, localisation, target freshness and safety gates remain mandatory.
+            DeclareLaunchArgument("allow_rl_hardware", default_value="true"),
+            DeclareLaunchArgument(
+                "rl_policy_model",
+                default_value=PathJoinSubstitution(
+                    [
+                        FindPackageShare("robotcore_policy"),
+                        "models",
+                        "t60_precision_v7_model_499",
+                        "policy.onnx",
+                    ]
+                ),
+            ),
             DeclareLaunchArgument(
                 "apriltag_detections_topic",
                 default_value="/localization/apriltag/detections",
@@ -85,10 +110,6 @@ def generate_launch_description():
             # Production systemd units set this false and run control_interface as the
             # separate, least-privileged control-interface.service.
             DeclareLaunchArgument("enable_web_ui", default_value="true"),
-            # The authority command is normalized against the ESC's complete
-            # 1000–2000 us range around the 1500 us neutral command. Browser
-            # manual control applies its own operator-selected 0–500 us limit.
-            DeclareLaunchArgument("manual_thruster_span_us", default_value="500"),
             DeclareLaunchArgument("thruster_command_timeout_ms", default_value="150"),
             DeclareLaunchArgument(
                 "pool_control_config",
@@ -106,10 +127,10 @@ def generate_launch_description():
                     [FindPackageShare("robotcore_control"), "config", "real_pool_thrusters.yaml"]
                 ),
             ),
-            DeclareLaunchArgument("task_config_dir", default_value=str(config_root / "tasks")),
+            DeclareLaunchArgument("task_config_dir", default_value=str(task_config_dir)),
             DeclareLaunchArgument(
                 "record_topics_path",
-                default_value=str(config_root / "tasks" / "record_topics.json"),
+                default_value=str(task_config_dir / "record_topics.json"),
             ),
             SetEnvironmentVariable(name="ROBOTCORE_RUN_ROOT", value=run_root),
             SetEnvironmentVariable(name="ROBOTCORE_CONFIG_ROOT", value=str(config_root)),
@@ -300,11 +321,36 @@ def generate_launch_description():
                 ],
             ),
             Node(
+                package="robotcore_policy_cpp",
+                executable="t60_policy",
+                name="t60_policy",
+                output="screen",
+                condition=IfCondition(
+                    LaunchConfiguration("enable_rl_policy_runtime")
+                ),
+                parameters=[
+                    {
+                        "policy_name": "t60_precision_v7_model_499",
+                        "model_path": LaunchConfiguration("rl_policy_model"),
+                        "control_rate_hz": 25.0,
+                        "max_input_age_s": 0.25,
+                    }
+                ],
+            ),
+            Node(
                 package="robotcore_control_cpp",
                 executable="command_authority",
                 name="command_authority",
                 output="screen",
-                parameters=[LaunchConfiguration("pool_control_config")],
+                parameters=[
+                    LaunchConfiguration("pool_control_config"),
+                    {
+                        "allow_rl_hardware": ParameterValue(
+                            LaunchConfiguration("allow_rl_hardware"),
+                            value_type=bool,
+                        )
+                    },
+                ],
             ),
             Node(
                 package="robotcore_runtime",
@@ -354,10 +400,6 @@ def generate_launch_description():
                         "baud": ParameterValue(LaunchConfiguration("baud"), value_type=int),
                         "imu_yaw_offset_deg": ParameterValue(
                             LaunchConfiguration("imu_yaw_offset_deg"), value_type=float
-                        ),
-                        "span_us": ParameterValue(
-                            LaunchConfiguration("manual_thruster_span_us"),
-                            value_type=int,
                         ),
                         "command_timeout_ms": ParameterValue(
                             LaunchConfiguration("thruster_command_timeout_ms"),

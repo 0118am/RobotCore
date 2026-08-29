@@ -33,7 +33,6 @@ host_manager/
   systemd/                # service and udev templates, not auto-installed
   workflows/              # human-approved upgrade and flashing runbooks
   POLICY.md               # authority and authentication boundary
-  MIGRATION.md            # phased adoption from the current launch
 ```
 
 This directory is intentionally not a ROS package.  It can manage the ROS
@@ -53,17 +52,16 @@ sudo robotcore-hostctl restart --service robot
 
 The daemon only permits `status`, `devices`, `rosbag-status`, `logs`, `start`,
 `stop`, `restart`, `maintenance-status`, AprilTag map operations, `pid-config`,
-`pid-save`, `task-list`, `task-get`, and `task-save`. It cannot execute an
-upgrade or flash. PID and task documents are stored below the root-owned
-`/var/lib/robotcore/config` tree configured by `control_config`; the browser
-never writes those files directly. AprilTag updates and deletion are disabled
+and `pid-save`. It cannot execute an upgrade or flash. PID documents are stored
+below the root-owned `/var/lib/robotcore/config` tree configured by
+`control_config`. Task documents belong to ControlInterface and are not managed
+by this daemon. AprilTag updates and deletion are disabled
 until `apriltag_map.web_edit_enabled` is explicitly enabled in root-owned
 configuration.
 
 ## Deployment sequence
 
-The full migration, rollback, acceptance gates, configuration ownership, and
-the treatment of update/flash operations are in [MIGRATION.md](MIGRATION.md).
-Do not install the templates directly from a development checkout.  Review the
-example configuration, copy it to `/etc/robotcore/host-manager.json`, then follow the
-runbook one phase at a time.
+Use the current service installer and verification procedure in
+[`../docs/SERVICE_STARTUP.md`](../docs/SERVICE_STARTUP.md). Do not install the
+templates directly from an unreviewed checkout. Review the example
+configuration before copying it to `/etc/robotcore/host-manager.json`.

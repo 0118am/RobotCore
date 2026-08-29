@@ -43,9 +43,7 @@ def make_manager(root: Path) -> HostManager:
 
 def make_control_manager(root: Path) -> HostManager:
     pid_root = root / "pid"
-    task_root = root / "tasks"
     pid_root.mkdir(parents=True)
-    task_root.mkdir(parents=True)
     default_pid = json.loads(
         (ROOT / "ros_ws/src/robotcore_control/config/pid/default.json").read_text(
             encoding="utf-8"
@@ -54,8 +52,6 @@ def make_control_manager(root: Path) -> HostManager:
     (pid_root / "active.json").write_text(
         json.dumps(default_pid), encoding="utf-8"
     )
-    for source in (ROOT / "ros_ws/src/robotcore_runtime/config/tasks").glob("*.json"):
-        (task_root / source.name).write_bytes(source.read_bytes())
     return HostManager(
         {
             "schema_version": 1,
@@ -63,7 +59,6 @@ def make_control_manager(root: Path) -> HostManager:
             "control_config": {
                 "pid_active_path": str(pid_root / "active.json"),
                 "pid_profiles_dir": str(pid_root / "profiles"),
-                "tasks_dir": str(task_root),
             },
         }
     )
@@ -224,28 +219,3 @@ def test_pid_config_save_updates_active_and_named_profile_atomically():
         )
         assert profile == config
 
-
-def test_task_files_are_listed_read_and_written_by_name():
-    with tempfile.TemporaryDirectory() as directory:
-        root = Path(directory)
-        manager = make_control_manager(root)
-
-        tasks = manager.handle({"action": "task-list"})["tasks"]
-        assert {task["name"] for task in tasks} == {
-            "pose_hold",
-            "station_hold",
-            "station_hold_fast",
-            "spatial_figure_eight",
-        }
-        assert "record_topics" not in {task["name"] for task in tasks}
-
-        task = manager.handle({"action": "task-get", "name": "pose_hold"})["task"]
-        task["name"] = "altitude_hold_test"
-        task["label"] = "Altitude hold test"
-        task["trajectory"]["manual_vertical_speed_mps"] = 0.1
-        manager.handle({"action": "task-save", "task": task})
-
-        saved = manager.handle(
-            {"action": "task-get", "name": "altitude_hold_test"}
-        )["task"]
-        assert saved["trajectory"]["manual_vertical_speed_mps"] == 0.1

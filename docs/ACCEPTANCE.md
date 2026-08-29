@@ -69,7 +69,8 @@ This file defines the first-stage system-chain acceptance target.
 
 ## Control
 
-- [ ] `/control/thruster_cmd` carries 8 normalized thruster values.
+- [ ] `/control/thruster_cmd` carries eight direct T1..T8 actions in `[-1, 1]`;
+      the bridge maps them exactly to `1250..1750 us`.
 - [ ] `SafetyMonitor` can abort and force zero thruster output.
 
 ## Policy Runtime

@@ -10,6 +10,10 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 unit_root=/etc/systemd/system
 config_root=/etc/robotcore
 edge_env=${config_root}/edge.env
+host_manager_config=${config_root}/host-manager.json
+log_root=/home/nvidia/robotcore_logs
+ros_log_dir=${log_root}/ros
+run_root=${log_root}/runs
 
 robot_workspace=${repo_root}/ros_ws
 web_workspace=/home/nvidia/ControlInterface
@@ -96,6 +100,10 @@ getent passwd robotcore >/dev/null || {
   echo "service account 'robotcore' does not exist" >&2
   exit 1
 }
+getent passwd nvidia >/dev/null || {
+  echo "local operator account 'nvidia' does not exist" >&2
+  exit 1
+}
 
 # The development installs live below a 0750 home directory. Grant only path
 # traversal on that one parent; do not add the service account to the user's
@@ -119,10 +127,17 @@ runuser -u robotcore -- test -r "${zed_workspace}/install/setup.bash" || {
   exit 1
 }
 
+# Keep ROS launch logs and experiment/rosbag output in the local operator's
+# home while granting the service account only the required subtree.  The
+# setgid nvidia group makes new files directly readable by the local operator
+# without adding robotcore to the nvidia group or exposing the rest of $HOME.
+install -d -o robotcore -g nvidia -m 2770 "${log_root}" "${ros_log_dir}" "${run_root}"
+
 install -d -m 0750 "${config_root}"
 install -d -m 0755 "${unit_root}/robotcore.service.d"
 install -d -m 0755 "${unit_root}/nvargus-daemon.service.d"
 install -d -m 0755 "${unit_root}/zed_x_daemon.service.d"
+install -d -m 0755 "${unit_root}/IMU_Daemon.service.d"
 install -m 0644 "${repo_root}/host_manager/systemd/robotcore.service" "${unit_root}/robotcore.service"
 install -m 0644 "${repo_root}/host_manager/systemd/control-interface.service" "${unit_root}/control-interface.service"
 install -m 0644 "${repo_root}/host_manager/systemd/robotcore-host-manager.service" "${unit_root}/robotcore-host-manager.service"
@@ -134,6 +149,8 @@ install -m 0644 "${repo_root}/host_manager/systemd/nvargus-robotcore.conf" \
   "${unit_root}/nvargus-daemon.service.d/robotcore.conf"
 install -m 0644 "${repo_root}/host_manager/systemd/zed-x-robotcore.conf" \
   "${unit_root}/zed_x_daemon.service.d/robotcore.conf"
+install -m 0644 "${repo_root}/host_manager/systemd/imu-daemon-robotcore.conf" \
+  "${unit_root}/IMU_Daemon.service.d/robotcore.conf"
 install -m 0644 "${repo_root}/host_manager/config/cyclonedds.xml" "${config_root}/cyclonedds.xml"
 install -m 0644 "${repo_root}/host_manager/systemd/99-robotcore-dds.conf" \
   /etc/sysctl.d/99-robotcore-dds.conf
@@ -147,6 +164,10 @@ rm -f /usr/local/libexec/robotcore-camera-ipc-ready
 
 if [[ ! -e ${edge_env} ]]; then
   install -m 0640 "${repo_root}/host_manager/systemd/edge.env.example" "${edge_env}"
+fi
+if [[ ! -e ${host_manager_config} ]]; then
+  install -m 0640 "${repo_root}/host_manager/config/host-manager.example.json" \
+    "${host_manager_config}"
 fi
 
 set_env_value() {
@@ -166,16 +187,29 @@ set_env_value ROS_LOCALHOST_ONLY 1
 set_env_value ROS_DOMAIN_ID 42
 set_env_value RMW_IMPLEMENTATION rmw_cyclonedds_cpp
 set_env_value CYCLONEDDS_URI file:///etc/robotcore/cyclonedds.xml
-set_env_value ROBOTCORE_RUN_ROOT /var/lib/robotcore/runs
+set_env_value ROS_LOG_DIR "${ros_log_dir}"
+set_env_value ROBOTCORE_RUN_ROOT "${run_root}"
 set_env_value ROBOTCORE_CONFIG_ROOT /var/lib/robotcore/config
+
+# Keep the root-owned host-manager health probe on the same run tree.  The
+# schema contains exactly one rosbag.run_root key; fail closed if it is absent.
+sed -i -E \
+  "s|(\"run_root\"[[:space:]]*:[[:space:]]*)\"[^\"]*\"|\\1\"${run_root}\"|" \
+  "${host_manager_config}"
+grep -Eq \
+  "\"run_root\"[[:space:]]*:[[:space:]]*\"${run_root}\"" \
+  "${host_manager_config}" || {
+  echo "host-manager config has no writable rosbag.run_root field" >&2
+  exit 1
+}
 chown root:robotcore "${edge_env}" "${config_root}/cyclonedds.xml"
 chmod 0640 "${edge_env}" "${config_root}/cyclonedds.xml"
+chown root:root "${host_manager_config}"
+chmod 0640 "${host_manager_config}"
 install -d -o robotcore -g robotcore -m 0750 /var/lib/robotcore
-install -d -o robotcore -g robotcore -m 0750 /var/lib/robotcore/runs
 install -d -o root -g robotops -m 0750 /var/lib/robotcore/config
 install -d -o root -g robotops -m 0750 /var/lib/robotcore/config/pid
 install -d -o root -g robotops -m 0750 /var/lib/robotcore/config/pid/profiles
-install -d -o root -g robotops -m 0750 /var/lib/robotcore/config/tasks
 if [[ ! -e /var/lib/robotcore/config/pid/active.json ]]; then
   install -o root -g robotops -m 0640 \
     "${repo_root}/ros_ws/src/robotcore_control/config/pid/default.json" \
@@ -186,28 +220,13 @@ if [[ ! -e /var/lib/robotcore/config/pid/profiles/default.json ]]; then
     "${repo_root}/ros_ws/src/robotcore_control/config/pid/default.json" \
     /var/lib/robotcore/config/pid/profiles/default.json
 fi
-for task_file in "${repo_root}"/ros_ws/src/robotcore_runtime/config/tasks/*.json; do
-  task_name=$(basename "${task_file}")
-  if [[ ! -e /var/lib/robotcore/config/tasks/${task_name} ]]; then
-    install -o root -g robotops -m 0640 "${task_file}" \
-      "/var/lib/robotcore/config/tasks/${task_name}"
-  fi
-done
-# Remove managed task files that no longer exist in the deployed source tree.
-# This keeps upgrades aligned with the current allow-listed task set.
-for installed_task in /var/lib/robotcore/config/tasks/*.json; do
-  task_name=$(basename "${installed_task}")
-  if [[ ! -e "${repo_root}/ros_ws/src/robotcore_runtime/config/tasks/${task_name}" ]]; then
-    rm -f -- "${installed_task}"
-  fi
-done
-
 # Apply only RobotCore's queue tuning. Loading every host sysctl fragment here
 # produces unrelated Jetson/container warnings and can obscure a real failure.
 sysctl -p /etc/sysctl.d/99-robotcore-dds.conf
 systemd-analyze verify \
   "${unit_root}/robotcore-performance.service" \
   "${unit_root}/robotcore-host-manager.service" \
+  "${unit_root}/IMU_Daemon.service" \
   "${unit_root}/robotcore.service" \
   "${unit_root}/control-interface.service" \
   "${unit_root}/robotcore-stack.target"

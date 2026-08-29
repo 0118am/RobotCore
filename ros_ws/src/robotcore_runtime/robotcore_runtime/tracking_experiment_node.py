@@ -1,12 +1,13 @@
-"""Operator-armed, allow-listed tracking experiment action server."""
+"""Operator-started tracking experiment action server."""
 
 from __future__ import annotations
 
 import json
+import os
+import re
 from pathlib import Path
 
 import rclpy
-from ament_index_python.packages import get_package_share_directory
 from rclpy.action import ActionServer, CancelResponse
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.node import Node
@@ -16,7 +17,12 @@ from rcl_interfaces.srv import SetParameters
 from std_srvs.srv import Trigger
 
 from robotcore_interfaces.action import RunTrackingExperiment
-from robotcore_interfaces.msg import ControlAuthorityStatus, PidStatus, TrajectoryTarget
+from robotcore_interfaces.msg import (
+    ControlAuthorityStatus,
+    PidStatus,
+    PolicyStatus,
+    TrajectoryTarget,
+)
 from robotcore_interfaces.srv import SetControlAuthority, StartRun, StopRun
 
 
@@ -25,6 +31,7 @@ class TrackingExperimentNode(Node):
 
     ALLOWED_PARAMETER_TYPES = {
         "trajectory_type": Parameter.Type.STRING,
+        "control_mode": Parameter.Type.STRING,
         "attitude_mode": Parameter.Type.STRING,
         "relative_to_initial_pose": Parameter.Type.BOOL,
         "center_x": Parameter.Type.DOUBLE,
@@ -34,17 +41,14 @@ class TrackingExperimentNode(Node):
         "amp_x": Parameter.Type.DOUBLE,
         "amp_y": Parameter.Type.DOUBLE,
         "amp_z": Parameter.Type.DOUBLE,
+        "radius_m": Parameter.Type.DOUBLE,
         "period_s": Parameter.Type.DOUBLE,
+        "trajectory_speed_mps": Parameter.Type.DOUBLE,
         "trajectory_ramp_s": Parameter.Type.DOUBLE,
-        "roll_amplitude_deg": Parameter.Type.DOUBLE,
-        "pitch_amplitude_deg": Parameter.Type.DOUBLE,
-        "yaw_amplitude_deg": Parameter.Type.DOUBLE,
-        "attitude_period_s": Parameter.Type.DOUBLE,
-        "step_amplitude": Parameter.Type.DOUBLE,
-        "step_time_s": Parameter.Type.DOUBLE,
         "move_duration_s": Parameter.Type.DOUBLE,
         "manual_vertical_speed_mps": Parameter.Type.DOUBLE,
         "station_linear_input_gain_mps": Parameter.Type.DOUBLE,
+        "station_lateral_input_gain_mps": Parameter.Type.DOUBLE,
         "station_yaw_input_gain_rps": Parameter.Type.DOUBLE,
     }
     SCENARIO_PARAMETER_DEFAULTS = {
@@ -59,7 +63,17 @@ class TrackingExperimentNode(Node):
     def __init__(self):
         super().__init__("tracking_experiment")
         self.declare_parameter(
-            "task_config_dir", "src/robotcore_runtime/config/tasks"
+            "task_config_dir",
+            str(
+                Path(
+                    os.environ.get(
+                        "CONTROL_INTERFACE_WORKSPACE", "/home/nvidia/ControlInterface"
+                    )
+                )
+                / "control_interface"
+                / "config"
+                / "tasks"
+            ),
         )
         self.declare_parameter("trajectory_node_name", "/trajectory_command")
         self.authority = None
@@ -67,6 +81,8 @@ class TrackingExperimentNode(Node):
         self.trajectory_target_sequence = 0
         self.latest_pid_status = None
         self.pid_status_sequence = 0
+        self.latest_policy_status = None
+        self.policy_status_sequence = 0
         # Action execute callbacks are advanced by rclpy's executor, not by an
         # asyncio event loop.  Use a separate callback group for one-shot ROS
         # timers so the action can yield without blocking the executor or
@@ -90,6 +106,13 @@ class TrackingExperimentNode(Node):
             PidStatus,
             "/control/pid/status",
             self.on_pid_status,
+            10,
+            callback_group=self.wait_callback_group,
+        )
+        self.create_subscription(
+            PolicyStatus,
+            "/policy/body/status",
+            self.on_policy_status,
             10,
             callback_group=self.wait_callback_group,
         )
@@ -118,19 +141,58 @@ class TrackingExperimentNode(Node):
         )
 
     def task_path(self, task_name):
+        if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", str(task_name)) is None:
+            raise ValueError("invalid managed task name")
         filename = f"{task_name}.json"
-        path = Path(str(self.get_parameter("task_config_dir").value)) / filename
-        if not path.is_file():
-            path = (
-                Path(get_package_share_directory("robotcore_runtime"))
-                / "config"
-                / "tasks"
-                / filename
-            )
-        return path
+        return Path(str(self.get_parameter("task_config_dir").value)) / filename
 
     def load_task(self, task_name):
-        return json.loads(self.task_path(task_name).read_text(encoding="utf-8"))
+        task = json.loads(self.task_path(task_name).read_text(encoding="utf-8"))
+        if (
+            not isinstance(task, dict)
+            or task.get("schema_version") != 1
+            or task.get("kind") != "tracking_task"
+            or str(task.get("name", "")) != task_name
+            or not isinstance(task.get("trajectory"), dict)
+        ):
+            raise ValueError("invalid managed tracking task document")
+        return task
+
+    @staticmethod
+    def resolve_control_mode(task, requested_mode):
+        """Resolve a fixed task mode or validate an explicit compatible mode."""
+
+        requested_mode = str(requested_mode).lower()
+        fixed_mode = str(task.get("mode", "")).lower()
+        compatible_modes = {
+            str(mode).lower() for mode in task.get("compatible_modes", [])
+        }
+        if not requested_mode:
+            requested_mode = fixed_mode
+        if requested_mode not in {
+            "altitude_hold",
+            "station_hold",
+            "station_hold_fast",
+            "rl_policy",
+        }:
+            return "", "a supported control mode must be selected"
+        if fixed_mode and requested_mode != fixed_mode:
+            return "", f"task requires control mode {fixed_mode}"
+        if compatible_modes and requested_mode not in compatible_modes:
+            allowed = ", ".join(sorted(compatible_modes))
+            return "", f"task control mode must be one of: {allowed}"
+        if not fixed_mode and not compatible_modes:
+            return "", "task does not declare a compatible control mode"
+        return requested_mode, ""
+
+    @staticmethod
+    def resolve_controller(task, control_mode):
+        """Resolve the actuator controller from one explicit task declaration."""
+
+        configured = str(task.get("controller", "")).lower()
+        if configured == "selected":
+            return "rl" if str(control_mode).lower() == "rl_policy" else "pid"
+        return configured if configured in {"pid", "rl"} else ""
 
     def on_authority(self, message):
         self.authority = message
@@ -143,66 +205,98 @@ class TrackingExperimentNode(Node):
         self.latest_pid_status = message
         self.pid_status_sequence += 1
 
+    def on_policy_status(self, message):
+        self.latest_policy_status = message
+        self.policy_status_sequence += 1
+
     async def execute(self, goal_handle):
         request = goal_handle.request
         task_name = str(request.scenario)
-        if task_name not in {
-            "pose_hold",
-            "station_hold",
-            "station_hold_fast",
-            "spatial_figure_eight",
-        }:
+        try:
+            task = self.load_task(task_name)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
             return self.finish(
-                goal_handle, False, "tracking strategy is not approved"
+                goal_handle,
+                False,
+                f"managed tracking task is unavailable or invalid: {exc}",
             )
-        task = self.load_task(task_name)
         scenario = dict(task["trajectory"])
         run_until_stopped = bool(task.get("run_until_stopped", False))
-        if str(request.controller) != task["controller"] or str(request.controller) != "pid":
-            return self.finish(goal_handle, False, "only the pid controller is approved")
-        if (
-            self.authority is None
-            or not self.authority.armed
-            or self.authority.selected_source != "pid"
-            or self.authority.fault_latched
-        ):
+        control_mode, control_mode_error = self.resolve_control_mode(
+            task, request.control_mode
+        )
+        if control_mode_error:
+            return self.finish(goal_handle, False, control_mode_error)
+        controller = self.resolve_controller(task, control_mode)
+        if str(request.controller).lower() != controller or controller not in {
+            "pid",
+            "rl",
+        }:
+            return self.finish(goal_handle, False, "task controller is not approved")
+        if self.authority is None or self.authority.fault_latched:
             return self.finish(
-                goal_handle, False, "PID must be selected, healthy, and explicitly armed"
+                goal_handle,
+                False,
+                f"{controller.upper()} authority status must be available and healthy",
+            )
+
+        # The Start action owns the complete automatic-control transition.
+        # First neutralize whichever source is currently selected, then select
+        # this task's controller while still disarmed.  The controller is
+        # armed only after the scenario target and a fresh controller output
+        # have both been observed below.
+        disarm_result = await self.set_authority("", False)
+        if disarm_result is None or not disarm_result.accepted:
+            return self.finish(
+                goal_handle,
+                False,
+                "could not disarm current authority before preparing trajectory",
+            )
+        select_result = await self.set_authority(controller, False)
+        if select_result is None or not select_result.accepted:
+            return self.finish(
+                goal_handle,
+                False,
+                f"could not select {controller.upper()} while disarmed",
+            )
+        if not await self.wait_for_disarmed_status(controller, 0.5):
+            return self.finish(
+                goal_handle,
+                False,
+                f"{controller.upper()} disarmed selection was not confirmed",
             )
 
         duration = float(request.duration_s)
         if duration <= 0.0:
             duration = float(task["duration_s"])
         if not self.run_start_client.wait_for_service(timeout_sec=2.0):
-            await self.disarm()
+            await self.disarm(controller)
             return self.finish(goal_handle, False, "run recorder service unavailable")
         start_request = StartRun.Request()
         start_request.task_name = str(task["name"])
-        start_request.controller = str(task["controller"])
+        start_request.controller = controller
         start_request.duration_s = duration
         start_result = await self.run_start_client.call_async(start_request)
         if not start_result.success:
-            await self.disarm()
+            await self.disarm(controller)
             return self.finish(goal_handle, False, start_result.message)
         run_dir = start_result.run_dir
 
         # Parameter updates and full-envelope validation are synchronous
-        # callbacks in trajectory_command.  They can briefly pause its target
-        # timer, so never leave automatic authority armed while preparing a
-        # new task.  Re-arm only after reset and a fresh PID publication.
-        disarm_result = await self.set_authority(False)
-        if disarm_result is None or not disarm_result.accepted:
-            return await self.fail_active_run(
-                goal_handle, run_dir, "could not disarm PID while preparing trajectory"
-            )
-
+        # callbacks in trajectory_command. Automatic authority remains
+        # disarmed throughout preparation and is armed only after reset and a
+        # fresh controller publication.
         if not self.parameter_client.wait_for_service(timeout_sec=2.0):
             return await self.fail_active_run(
-                goal_handle, run_dir, "trajectory parameter service unavailable"
+                goal_handle,
+                run_dir,
+                "trajectory parameter service unavailable",
+                controller,
             )
 
         scenario_parameters = dict(self.SCENARIO_PARAMETER_DEFAULTS)
         scenario_parameters.update(scenario)
+        scenario_parameters["control_mode"] = control_mode
         parameters = []
         for name, parameter_type in self.ALLOWED_PARAMETER_TYPES.items():
             if name in scenario_parameters:
@@ -214,38 +308,51 @@ class TrackingExperimentNode(Node):
         parameter_response = await self.parameter_client.call_async(parameter_request)
         if not all(result.successful for result in parameter_response.results):
             return await self.fail_active_run(
-                goal_handle, run_dir, "trajectory scenario parameters rejected"
+                goal_handle,
+                run_dir,
+                "trajectory scenario parameters rejected",
+                controller,
             )
         if not self.validate_client.wait_for_service(timeout_sec=2.0):
             return await self.fail_active_run(
-                goal_handle, run_dir, "trajectory validation service unavailable"
+                goal_handle,
+                run_dir,
+                "trajectory validation service unavailable",
+                controller,
             )
         validation_result = await self.validate_client.call_async(Trigger.Request())
         if not validation_result.success:
             return await self.fail_active_run(
-                goal_handle, run_dir, validation_result.message
+                goal_handle, run_dir, validation_result.message, controller
             )
         if not self.reset_client.wait_for_service(timeout_sec=2.0):
             return await self.fail_active_run(
-                goal_handle, run_dir, "trajectory reset service unavailable"
+                goal_handle,
+                run_dir,
+                "trajectory reset service unavailable",
+                controller,
             )
         target_sequence_before_reset = self.trajectory_target_sequence
         reset_result = await self.reset_client.call_async(Trigger.Request())
         if not reset_result.success:
             return await self.fail_active_run(
-                goal_handle, run_dir, reset_result.message
+                goal_handle, run_dir, reset_result.message, controller
             )
         if not await self.wait_for_tracking_ready(
             target_sequence_before_reset,
             str(scenario_parameters["trajectory_type"]),
+            control_mode,
+            controller,
             1.0,
         ):
             return await self.fail_active_run(
                 goal_handle,
                 run_dir,
-                "reset trajectory target and ready PID command were not observed",
+                f"reset trajectory target and ready {controller.upper()} command were not observed",
+                controller,
             )
-        arm_result = await self.set_authority(True)
+        arm_generation_before = int(self.authority.arm_generation)
+        arm_result = await self.set_authority(controller, True)
         if arm_result is None or not arm_result.accepted or not arm_result.armed:
             arm_message = (
                 str(arm_result.message)
@@ -253,20 +360,28 @@ class TrackingExperimentNode(Node):
                 else "control authority service unavailable"
             )
             return await self.fail_active_run(
-                goal_handle, run_dir, f"PID re-arm after trajectory reset failed: {arm_message}"
+                goal_handle,
+                run_dir,
+                f"{controller.upper()} re-arm after trajectory reset failed: {arm_message}",
+                controller,
             )
-        if not await self.wait_for_armed_status(0.5):
+        if not await self.wait_for_armed_status(
+            controller, arm_generation_before, 0.5
+        ):
             return await self.fail_active_run(
-                goal_handle, run_dir, "PID re-arm was not confirmed by authority status"
+                goal_handle,
+                run_dir,
+                f"{controller.upper()} re-arm was not confirmed by authority status",
+                controller,
             )
         # Readiness was established with the same zero-time approach target.
         # Reset the trajectory clock once more so the full 15-second smooth
-        # center approach begins after authority is active, not during the
+        # fixed-start approach begins after authority is active, not during the
         # disarmed readiness handshake.
         official_start_result = await self.reset_client.call_async(Trigger.Request())
         if not official_start_result.success:
             return await self.fail_active_run(
-                goal_handle, run_dir, official_start_result.message
+                goal_handle, run_dir, official_start_result.message, controller
             )
         started = self.get_clock().now().nanoseconds
         success = True
@@ -286,6 +401,7 @@ class TrackingExperimentNode(Node):
                 if (
                     self.authority is None
                     or not self.authority.armed
+                    or self.authority.selected_source != controller
                     or self.authority.fault_latched
                 ):
                     success = False
@@ -309,7 +425,7 @@ class TrackingExperimentNode(Node):
             try:
                 await self.stop_trajectory()
             finally:
-                await self.disarm()
+                await self.disarm(controller)
         await self.stop_run(success, message)
         if success:
             goal_handle.succeed()
@@ -345,11 +461,11 @@ class TrackingExperimentNode(Node):
         self.wait_timers.add(timer)
         await future
 
-    async def fail_active_run(self, goal_handle, run_dir, message):
+    async def fail_active_run(self, goal_handle, run_dir, message, controller):
         try:
             await self.stop_trajectory()
         finally:
-            await self.disarm()
+            await self.disarm(controller)
         await self.stop_run(False, message)
         result = self.finish(goal_handle, False, message)
         result.run_dir = run_dir
@@ -366,11 +482,11 @@ class TrackingExperimentNode(Node):
             return None
         return await self.trajectory_stop_client.call_async(Trigger.Request())
 
-    async def set_authority(self, arm):
+    async def set_authority(self, source, arm):
         if not self.authority_client.wait_for_service(timeout_sec=1.0):
             return None
         request = SetControlAuthority.Request()
-        request.source = "pid"
+        request.source = str(source).lower()
         request.arm = bool(arm)
         request.clear_fault = False
         request.update_pwm_limit = False
@@ -378,51 +494,97 @@ class TrackingExperimentNode(Node):
         return await self.authority_client.call_async(request)
 
     async def wait_for_tracking_ready(
-        self, target_sequence_before_reset, trajectory_type, timeout_s
+        self,
+        target_sequence_before_reset,
+        trajectory_type,
+        control_mode,
+        controller,
+        timeout_s,
     ):
-        """Wait for a reset target and then a PID status produced from it."""
+        """Wait for a reset target and a fresh selected-controller output."""
 
         deadline_ns = self.get_clock().now().nanoseconds + int(timeout_s * 1e9)
-        pid_sequence_at_target = None
+        controller_sequence_at_target = None
+        inference_count_at_target = 0
         expected_type = str(trajectory_type).lower()
+        expected_control_mode = str(control_mode).lower()
+        controller = str(controller).lower()
         while self.get_clock().now().nanoseconds < deadline_ns:
             target = self.latest_trajectory_target
             if (
-                pid_sequence_at_target is None
+                controller_sequence_at_target is None
                 and self.trajectory_target_sequence > target_sequence_before_reset
                 and target is not None
                 and target.valid
                 and str(target.trajectory_type).lower() == expected_type
+                and str(target.control_mode).lower() == expected_control_mode
             ):
-                pid_sequence_at_target = self.pid_status_sequence
-            pid = self.latest_pid_status
+                if controller == "pid":
+                    controller_sequence_at_target = self.pid_status_sequence
+                else:
+                    controller_sequence_at_target = self.policy_status_sequence
+                    if self.latest_policy_status is not None:
+                        inference_count_at_target = int(
+                            self.latest_policy_status.inference_count
+                        )
+            if controller == "pid":
+                pid = self.latest_pid_status
+                if (
+                    controller_sequence_at_target is not None
+                    and self.pid_status_sequence > controller_sequence_at_target
+                    and pid is not None
+                    and pid.ready
+                    and pid.producing_command
+                    and not pid.missing_inputs
+                ):
+                    return True
+            else:
+                policy = self.latest_policy_status
+                if (
+                    controller_sequence_at_target is not None
+                    and self.policy_status_sequence > controller_sequence_at_target
+                    and policy is not None
+                    and policy.loaded
+                    and policy.input_ready
+                    and not policy.missing_inputs
+                    and int(policy.inference_count) > inference_count_at_target
+                ):
+                    return True
+            await self.wait_for_next_feedback(0.02)
+        return False
+
+    async def wait_for_disarmed_status(self, source, timeout_s):
+        deadline_ns = self.get_clock().now().nanoseconds + int(timeout_s * 1e9)
+        while self.get_clock().now().nanoseconds < deadline_ns:
             if (
-                pid_sequence_at_target is not None
-                and self.pid_status_sequence > pid_sequence_at_target
-                and pid is not None
-                and pid.ready
-                and pid.producing_command
-                and not pid.missing_inputs
+                self.authority is not None
+                and not self.authority.armed
+                and not self.authority.fault_latched
+                and self.authority.selected_source == str(source).lower()
             ):
                 return True
             await self.wait_for_next_feedback(0.02)
         return False
 
-    async def wait_for_armed_status(self, timeout_s):
+    async def wait_for_armed_status(
+        self, source, previous_arm_generation, timeout_s
+    ):
         deadline_ns = self.get_clock().now().nanoseconds + int(timeout_s * 1e9)
         while self.get_clock().now().nanoseconds < deadline_ns:
             if (
                 self.authority is not None
                 and self.authority.armed
                 and not self.authority.fault_latched
-                and self.authority.selected_source == "pid"
+                and self.authority.selected_source == str(source).lower()
+                and int(self.authority.arm_generation)
+                > int(previous_arm_generation)
             ):
                 return True
             await self.wait_for_next_feedback(0.02)
         return False
 
-    async def disarm(self):
-        return await self.set_authority(False)
+    async def disarm(self, source):
+        return await self.set_authority(source, False)
 
     def finish(self, goal_handle, success, message):
         if success:

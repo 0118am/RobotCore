@@ -3,6 +3,7 @@
 from .dummy_runner import DummyRunner
 from .mmn_runner import MmnRunner
 from .onnx_runner import OnnxRunner
+from .tensorrt_runner import TensorRtRunner
 from .torch_runner import TorchRunner
 
 
@@ -14,6 +15,8 @@ def create_runner(manifest):
         return DummyRunner(manifest)
     if runner == "onnx":
         return OnnxRunner(manifest)
+    if runner in {"tensorrt", "trt"}:
+        return TensorRtRunner(manifest)
     if runner in {"pth", "torch"}:
         return TorchRunner(manifest)
     if runner == "mmn":

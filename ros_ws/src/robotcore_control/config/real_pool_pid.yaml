@@ -1,7 +1,7 @@
 # Conservative gains matched to the live operator PWM limit and measured model.
 configured: true
 profile_name: station_hold_conservative_v2
-outer_position_kp: [0.40, 0.35, 0.25]
+outer_position_kp: [0.55, 0.50, 0.25]
 outer_orientation_kp: [0.45, 0.45, 0.60]
 max_linear_velocity_mps: [0.40, 0.08, 0.05]
 max_angular_velocity_rps: [0.12, 0.12, 0.16]

@@ -13,17 +13,19 @@ def load_yaml(relative: str):
     return yaml.safe_load((SENSORS / relative).read_text(encoding="utf-8"))
 
 
-def test_zed_camera_uses_one_fixed_30_hz_frame_rate():
+def test_zed_camera_grabs_at_30_hz_and_caps_processing_at_15_hz():
     parameters = load_yaml("config/zedx_minimal_open.yaml")["/**"]["ros__parameters"]
 
     assert parameters["general"]["grab_frame_rate"] == 30
-    assert parameters["general"]["pub_frame_rate"] == 30.0
+    assert parameters["general"]["grab_compute_capping_fps"] == 15.0
+    assert parameters["general"]["pub_frame_rate"] == 15.0
+    assert parameters["general"]["pub_resolution"] == "NATIVE"
+    assert parameters["general"]["camera_max_reconnect"] == 5
     assert parameters["general"]["sdk_use_monotonic_clock"] is True
     assert parameters["debug"]["use_pub_timestamps"] is False
     assert parameters["general"]["grab_resolution"] == "SVGA"
-    assert parameters["general"]["pub_downscale_factor"] == 1.0
     assert parameters["sensors"]["publish_imu"] is False
-    assert parameters["depth"]["depth_mode"] == "NEURAL_LIGHT"
+    assert parameters["depth"]["depth_mode"] == "NONE"
     assert parameters["pos_tracking"]["pos_tracking_enabled"] is True
     assert parameters["pos_tracking"]["pos_tracking_mode"] == "GEN_3"
     assert parameters["pos_tracking"]["imu_fusion"] is True
@@ -52,6 +54,16 @@ def test_vio_tag_fusion_is_one_native_cpp_ekf():
     assert "MeasurementResult replay(" in source
     assert "state_at(" in source
     assert "alignment_covariance_" in source
+    assert "alignment_candidate_covariance(" in source
+    assert "covariance_sum_with_unknown_correlation<6>(" in source
+    assert "pose_covariance += alignment_jacobian" not in source
+    assert "const auto candidate_covariance" not in source
+    assert "0.5 * (state_.covariance + state_.covariance.transpose())" not in source
+    assert "0.5 * (alignment_covariance_ + alignment_covariance_.transpose())" not in source
+    assert "0.5 * (pose_covariance + pose_covariance.transpose())" not in source
+    assert "symmetrized_covariance<6>(raw_state_pose_covariance)" in source
+    assert "symmetrized_covariance<6>(raw_alignment_contribution)" in source
+    assert "invalid localization covariance; resetting estimator" in source
     assert "SensorDataQoS().keep_last(8)" in source
     assert "enforce_covariance_floors" not in source
     assert "use_vio_velocity_covariance_fallback" not in source

@@ -14,7 +14,8 @@ ZED 960x600@30
   -> C++ EKF Tag 位置延迟测量更新
 
 ZED VIO @30 Hz -> C++ EKF 位姿/twist 观测更新
-Aquaboard IMU @100 Hz -> C++ bridge -> PID/轨迹航向直接输入（绕过 EKF）
+Aquaboard IMU @100 Hz -> C++ bridge -> PID roll/pitch 与角速度直接输入
+BodyState @60 Hz -> PID/轨迹绝对 map yaw
 
 BodyState @60 Hz
   -> Python 六自由度 PID/推进器分配 @60 Hz（显式启用 pool tracking 时）

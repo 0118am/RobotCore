@@ -52,6 +52,7 @@ constexpr std::uint8_t kKnownStatusFlags =
   kStatusFlagImuCalibrationOk | kStatusFlagImuCalibrationFail;
 constexpr std::uint16_t kMinimumReportedPwmUs = 1000U;
 constexpr std::uint16_t kMaximumReportedPwmUs = 2000U;
+constexpr double kActionPwmSpanUs = 250.0;
 constexpr std::uint32_t kMaximumAckSequenceLag = 8U;
 constexpr std::size_t kDispatchHistoryDepth = 16U;
 constexpr auto kCommandPeriod = 20ms;
@@ -161,13 +162,6 @@ public:
       "serial_port", "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B7A033320-if00");
     const auto requested_baud = declare_parameter<std::int64_t>("baud", 115200);
     baud_ = static_cast<int>(std::clamp<std::int64_t>(requested_baud, 1, 4000000));
-    const auto requested_span_us = declare_parameter<std::int64_t>("span_us", 500);
-    span_us_ = static_cast<int>(std::clamp<std::int64_t>(requested_span_us, 1, 500));
-    if (span_us_ != requested_span_us) {
-      RCLCPP_WARN(
-        get_logger(), "span_us %ld clamped to the firmware-safe range [1, 500]",
-        requested_span_us);
-    }
     command_timeout_ms_ = static_cast<int>(std::max<std::int64_t>(
       1, declare_parameter<std::int64_t>("command_timeout_ms", 150)));
     heartbeat_timeout_ms_ = static_cast<int>(std::max<std::int64_t>(
@@ -198,7 +192,7 @@ public:
         on_command(message);
       });
     tag_pose_sub_ = create_subscription<robotcore_interfaces::msg::AprilTagPoseEstimate>(
-      "/localization/apriltag_pose", rclcpp::SensorDataQoS().keep_last(4),
+      "/localization/apriltag_pose", rclcpp::QoS(rclcpp::KeepLast(1)).reliable(),
       std::bind(&AboardBridgeNode::on_tag_pose, this, std::placeholders::_1));
     body_state_sub_ = create_subscription<robotcore_interfaces::msg::BodyState>(
       "/robot/body_state", rclcpp::QoS(10),
@@ -1131,7 +1125,7 @@ private:
     const auto publisher_count = command_sub_->get_publisher_count();
     const auto now_ns = steady_now_ns();
     bool values_valid = true;
-    for (const auto value : message->normalized) {
+    for (const auto value : message->action) {
       if (!std::isfinite(value) || value < -1.0F || value > 1.0F) {
         values_valid = false;
         break;
@@ -1159,9 +1153,9 @@ private:
     command_arm_generation_ = message->arm_generation;
     command_source_ = message->source;
     command_offsets_.fill(0);
-    for (std::size_t i = 0; i < message->normalized.size(); ++i) {
+    for (std::size_t i = 0; i < message->action.size(); ++i) {
       command_offsets_[i] = static_cast<std::int16_t>(
-        std::lround(static_cast<double>(message->normalized[i]) * span_us_));
+        std::lround(static_cast<double>(message->action[i]) * kActionPwmSpanUs));
     }
     last_command_ns_ = now_ns;
     command_timeout_latched_ = false;
@@ -1776,7 +1770,7 @@ private:
   }
 
   std::string port_, authority_node_name_, authority_node_namespace_;
-  int baud_{}, span_us_{}, command_timeout_ms_{}, heartbeat_timeout_ms_{};
+  int baud_{}, command_timeout_ms_{}, heartbeat_timeout_ms_{};
   double gyro_stddev_{}, accel_stddev_{};
   std::atomic<double> imu_yaw_offset_rad_{0.0};
   std::atomic<bool> imu_attitude_valid_{false};

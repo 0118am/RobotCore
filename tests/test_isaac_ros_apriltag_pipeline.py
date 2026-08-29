@@ -47,6 +47,27 @@ def test_map_localizer_consumes_cuda_corners_without_detecting_images():
     assert "vpiSubmitAprilTagDetector" not in source
 
 
+def test_tag_correction_chain_is_reliable_and_does_not_queue_stale_estimates():
+    localizer = LOCALIZER.read_text(encoding="utf-8")
+    fusion = (
+        ROOT / "ros_ws/src/robotcore_sensors/src/vio_tag_fusion_component.cpp"
+    ).read_text(encoding="utf-8")
+    bridge = (
+        ROOT / "ros_ws/src/robotcore_hardware/src/aboard_bridge_node.cpp"
+    ).read_text(encoding="utf-8")
+
+    reliable_latest = "rclcpp::QoS(rclcpp::KeepLast(1)).reliable()"
+    assert reliable_latest in localizer
+    assert 'detections_topic_, tag_qos' in localizer
+    assert '"/localization/apriltag_pose"), tag_qos' in localizer
+    assert reliable_latest in fusion
+    assert '"tag_topic", "/localization/apriltag_pose"), tag_qos' in fusion
+    assert (
+        '"/localization/apriltag_pose", '
+        'rclcpp::QoS(rclcpp::KeepLast(1)).reliable()'
+    ) in bridge
+
+
 def test_map_is_loaded_only_at_startup_or_by_explicit_relocalization():
     source = LOCALIZER.read_text(encoding="utf-8")
 

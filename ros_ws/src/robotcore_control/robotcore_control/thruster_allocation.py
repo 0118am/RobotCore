@@ -105,10 +105,10 @@ class VectorThruster:
         pwm_offset = math.copysign(self.deadband_us + abs(value), value)
         return float(np.clip(pwm_offset / self.hardware_span_us, -1.0, 1.0))
 
-    def normalized_effective_bounds(
+    def action_effective_bounds(
         self, command_limit: float
     ) -> tuple[float, float]:
-        """Convert a live normalized PWM bound into nonlinear-solver bounds."""
+        """Convert a live direct-action bound into nonlinear-solver bounds."""
 
         limit_us = abs(float(command_limit)) * self.hardware_span_us
         reverse_effective = max(
@@ -381,7 +381,7 @@ class ThrusterAllocator:
         )
 
     def wrench_for_commands(self, commands: Iterable[float]) -> np.ndarray:
-        """Evaluate the exact configured vector model for normalized hardware commands."""
+        """Evaluate the exact configured vector model for direct hardware actions."""
 
         if not self.vector_mode:
             raise ValueError("wrench_for_commands requires the vector force model")
@@ -426,7 +426,7 @@ class ThrusterAllocator:
             upper_bounds = np.ones(len(active), dtype=np.float64)
         else:
             live_bounds = [
-                self.thrusters[channel].normalized_effective_bounds(command_limit)
+                self.thrusters[channel].action_effective_bounds(command_limit)
                 for channel in active
             ]
             lower_bounds = np.asarray(

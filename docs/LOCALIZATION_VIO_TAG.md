@@ -13,10 +13,10 @@
 
 `map -> base_link = (map -> odom) * (odom -> base_link)`
 
-`BodyState.pose.orientation` 是定位坐标变换的一部分，来自 ZED/Tag EKF；控制器只用它把
-地图位置误差和地图线速度转换到 `base_link`，不把它作为姿态反馈。姿态误差和角速度反馈
-由 PID 直接订阅 `/sensors/external_imu`。轨迹节点也直接从该话题锁存定点模式航向，因此
-外置 IMU 与定位 EKF 完全解耦。
+`BodyState.pose.orientation` 来自 ZED/Tag EKF，用于把地图位置误差和地图线速度转换到
+`base_link`，并提供绝对 map yaw。控制姿态由外部 IMU 的低延迟 roll/pitch 与该 map yaw
+组成，角速度仍直接取 `/sensors/external_imu`。轨迹节点也从 `BodyState` 锁存定点模式
+航向，因此磁航向跳变不会进入控制误差或目标航向。
 
 VG/AH/MINS 数字协议的 `0x06` 48 字节浮点帧已经给出 PITCH、ROLL、YAW，所以 Aquaboard
 直接转发设备原生姿态，不运行 Madgwick、Mahony 或其他软件 AHRS。ZED SDK 内部继续用
@@ -29,8 +29,8 @@ VG/AH/MINS 数字协议的 `0x06` 48 字节浮点帧已经给出 PITCH、ROLL、
 | `/zedx/zed_node/odom` | 目标 30 Hz | 局部位姿、机体系 twist 及协方差 |
 | `/zedx/zed_node/pose/status` | 目标 30 Hz | 只接收 `odometry_status=OK` 的 VIO |
 | `/localization/apriltag_pose` | 随检测 | 地图绝对位姿及协方差 |
-| `/sensors/external_imu` | 目标 100 Hz | 绕过 EKF，直接供 PID、轨迹航向和 UI 使用 |
-| `/robot/body_state` | 60 Hz | EKF 定位状态输出；姿态仅用于定位坐标变换 |
+| `/sensors/external_imu` | 目标 100 Hz | 直接提供控制 roll/pitch、三轴角速度和 UI 原始遥测 |
+| `/robot/body_state` | 60 Hz | EKF 定位状态输出，并提供控制和轨迹使用的绝对 map yaw |
 | `/localization/status` | 60 Hz | 后验协方差、频率、延迟、创新量和健康状态 |
 
 融合节点直接把相机坐标转换到 `base_link`，不发布中间
@@ -81,10 +81,11 @@ VIO 本身过期才表示没有可用位置估计。
 
 地图重载会清空受旧地图约束的测量历史，由最近有效 VIO 重新初始化，再用四个一致 Tag
 建立新坐标关系，避免旧地图修正残留在状态中。对齐完成后的 Tag 位姿可更新 EKF 的位置
-和定位姿态；该定位姿态不进入 PID 的姿态误差或角速度反馈。
+和定位姿态；该定位姿态的 yaw 进入航向误差，roll/pitch 和角速度仍来自外部 IMU。
 
 ## ZED 性能配置
 
-相机原生采集 SVGA 960x600、30 Hz，发布缩放为 1.0，深度模式为 NEURAL_LIGHT，以满足
-GEN_3 VIO。ROS 不发布无人订阅的 ZED IMU、深度图和点云；SDK 内部 IMU 融合保持启用。
-浏览器压缩图像按需订阅，并在 UI 侧限制为 15 Hz。
+相机原生采集 SVGA 960x600、30 Hz，以保持较短的曝光间隔；SDK 计算和 ROS 图像发布均
+限制为 15 Hz，避免处理超过实时预算后持续丢帧。ZED SDK 5.2+ 的 GEN_3 VIO 不依赖
+深度，因此深度模式设为 NONE。ROS 不发布 ZED IMU、深度图和点云；SDK 内部 IMU 融合
+保持启用。浏览器压缩图像按需订阅，并在 UI 侧限制为 15 Hz。

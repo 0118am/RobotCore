@@ -8,6 +8,7 @@ import json
 import hashlib
 import math
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -15,7 +16,6 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from ament_index_python.packages import get_package_share_directory
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
@@ -44,6 +44,16 @@ class RunLogger(Node):
 
     def __init__(self):
         super().__init__("run_logger")
+        task_config_dir = (
+            Path(
+                os.environ.get(
+                    "CONTROL_INTERFACE_WORKSPACE", "/home/nvidia/ControlInterface"
+                )
+            )
+            / "control_interface"
+            / "config"
+            / "tasks"
+        )
         # ROBOTCORE_RUN_ROOT lets launch files keep log output in the workspace while
         # still allowing deployment scripts to redirect logs to mounted storage.
         self.declare_parameter("run_root", os.environ.get("ROBOTCORE_RUN_ROOT", "data/robotcore_runs"))
@@ -55,10 +65,10 @@ class RunLogger(Node):
             "safety_config_path", "src/robotcore_control/config/real_pool_safety.yaml"
         )
         self.declare_parameter(
-            "task_config_dir", "src/robotcore_runtime/config/tasks"
+            "task_config_dir", str(task_config_dir)
         )
         self.declare_parameter(
-            "record_topics_path", "src/robotcore_runtime/config/tasks/record_topics.json"
+            "record_topics_path", str(task_config_dir / "record_topics.json")
         )
         self.declare_parameter("rosbag_executable", "/opt/ros/humble/bin/ros2")
         # JSONL is an operator-readable summary, not the full-rate transport
@@ -312,18 +322,12 @@ class RunLogger(Node):
         )
 
     def task_path(self, task_name):
-        """Resolve the same managed-or-installed task document used to execute it."""
+        """Resolve the managed task document used to execute the run."""
 
+        if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", str(task_name)) is None:
+            raise ValueError("invalid managed task name")
         filename = f"{task_name}.json"
-        path = Path(str(self.get_parameter("task_config_dir").value)) / filename
-        if path.is_file():
-            return path
-        return (
-            Path(get_package_share_directory("robotcore_runtime"))
-            / "config"
-            / "tasks"
-            / filename
-        )
+        return Path(str(self.get_parameter("task_config_dir").value)) / filename
 
     def publish_run_dir(self):
         if self.run_dir is None:
@@ -375,7 +379,7 @@ class RunLogger(Node):
             {
                 "source": msg.source,
                 "enable": bool(msg.enable),
-                "normalized": [float(v) for v in msg.normalized],
+                "action": [float(v) for v in msg.action],
             },
         )
 
@@ -386,6 +390,8 @@ class RunLogger(Node):
             "trajectory_target",
             {
                 "trajectory_type": msg.trajectory_type,
+                "control_mode": msg.control_mode,
+                "trajectory_phase": msg.trajectory_phase,
                 "time_s": float(msg.time_s),
                 "position": [
                     float(msg.target_pose.position.x),
@@ -429,6 +435,7 @@ class RunLogger(Node):
             "tracking_status",
             {
                 "trajectory_type": msg.trajectory_type,
+                "control_mode": msg.control_mode,
                 "time_s": float(msg.time_s),
                 "valid": bool(msg.valid),
                 "target_position": [
@@ -517,7 +524,7 @@ class RunLogger(Node):
                 "selected_command_age_s": float(msg.selected_command_age_s),
                 "body_state_age_s": float(msg.body_state_age_s),
                 "target_age_s": float(msg.target_age_s),
-                "command_limit": float(msg.command_limit),
+                "action_limit": float(msg.action_limit),
                 "localization_source": msg.localization_source,
             },
         )

@@ -9,15 +9,16 @@ measured: true
 damping: 0.0001
 axis_weights: [1.0, 1.0, 1.0, 0.5, 0.5, 0.5]
 
-# Hardware commands remain normalized against the bridge's +/-500 us span.
-# The model clamps physical PWM to 1300..1700 us and maps the +/-25 us
-# deadband to zero force. Thus model-valid normalized commands are +/-0.4.
+# Direct actions map to PWM with 1500 + 250 * action. The measured model only
+# has calibration data from 1300..1700 us and maps the +/-25 us deadband to
+# zero force; values beyond that data range are conservatively clamped by the
+# diagnostic force model, not by the hardware command path.
 pwm_force_model:
   neutral_pwm_us: 1500.0
   minimum_pwm_us: 1300.0
   maximum_pwm_us: 1700.0
   deadband_us: 25.0
-  hardware_span_us: 500.0
+  hardware_span_us: 250.0
 
 thrusters:
   - channel: 0

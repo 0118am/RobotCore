@@ -62,8 +62,14 @@ ROS_LOCALHOST_ONLY=1
 ROS_DOMAIN_ID=42
 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 CYCLONEDDS_URI=file:///etc/robotcore/cyclonedds.xml
-ROBOTCORE_RUN_ROOT=/var/lib/robotcore/runs
+ROS_LOG_DIR=/home/nvidia/robotcore_logs/ros
+ROBOTCORE_RUN_ROOT=/home/nvidia/robotcore_logs/runs
 ```
+
+安装脚本创建 `/home/nvidia/robotcore_logs/{ros,runs}`，由 `robotcore:nvidia`
+持有并启用 setgid：服务负责写入，`nvidia` 用户可直接读取。ROS launch/node 文件
+日志写入 `ros/`，实验摘要和 rosbag2 写入 `runs/`；systemd 标准输出仍由 journald 保存。旧的
+`/var/lib/robotcore` 日志不会自动移动或删除。
 
 首次还必须安装 Cyclone DDS：
 

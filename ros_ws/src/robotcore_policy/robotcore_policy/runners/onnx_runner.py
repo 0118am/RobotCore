@@ -6,6 +6,7 @@ builder and this runner can stay explicit about sim-to-sim assumptions.
 """
 
 from .base import PolicyRunner
+from ..t60_observation import OBSERVATION_LAYOUT, T60ObservationState
 
 
 class OnnxRunner(PolicyRunner):
@@ -27,13 +28,30 @@ class OnnxRunner(PolicyRunner):
         self.input_name = self.session.get_inputs()[0].name
         self.output_name = self.session.get_outputs()[0].name
         self.observation_dim = int(self.contract.get("observation_dim", 20))
+        self.observation_layout = self.contract.get("observation_layout", "")
+        self.observation_state = (
+            T60ObservationState()
+            if self.observation_layout == OBSERVATION_LAYOUT
+            else None
+        )
 
     def run(self, observation):
         """Run ONNX inference and return a flat action vector."""
 
-        obs = self._build_observation_vector(observation)
+        obs = (
+            self.observation_state.build(observation)
+            if self.observation_state is not None
+            else self._build_observation_vector(observation)
+        )
         output = self.session.run([self.output_name], {self.input_name: obs})[0]
-        return self.np.asarray(output, dtype=self.np.float32).reshape(-1).tolist()
+        action = self.np.asarray(output, dtype=self.np.float32).reshape(-1)
+        if self.observation_state is not None:
+            self.observation_state.commit()
+        return action.tolist()
+
+    def reset(self):
+        if self.observation_state is not None:
+            self.observation_state.reset()
 
     def _build_observation_vector(self, observation):
         """Build IsaacLab WarpAUVTraj 20-D observation from ROS body state.

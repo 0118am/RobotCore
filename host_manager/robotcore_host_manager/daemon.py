@@ -36,9 +36,6 @@ ALLOWED_ACTIONS = {
     "apriltag-delete",
     "pid-config",
     "pid-save",
-    "task-list",
-    "task-get",
-    "task-save",
 }
 
 PID_VECTOR_FIELDS = {
@@ -121,7 +118,7 @@ class HostManager:
 
     def rosbag_status(self) -> dict[str, Any]:
         config = self.config.get("rosbag", {})
-        root = Path(str(config.get("run_root", "/var/lib/robotcore/runs")))
+        root = Path(str(config.get("run_root", "/home/nvidia/robotcore_logs/runs")))
         stale_after = max(1, int(config.get("stale_after_seconds", 15)))
         candidates: list[Path] = []
         if root.is_dir():
@@ -333,7 +330,6 @@ class HostManager:
         return {
             "pid_active": Path(config["pid_active_path"]),
             "pid_profiles": Path(config["pid_profiles_dir"]),
-            "tasks": Path(config["tasks_dir"]),
         }
 
     @staticmethod
@@ -397,47 +393,6 @@ class HostManager:
             "config": document,
         }
 
-    def task_list(self) -> dict[str, Any]:
-        tasks = []
-        for path in sorted(self._control_config()["tasks"].glob("*.json")):
-            document = json.loads(path.read_text(encoding="utf-8"))
-            if document.get("kind") == "tracking_task":
-                tasks.append(document)
-        return {"accepted": True, "tasks": tasks}
-
-    def task_get(self, raw_name: Any) -> dict[str, Any]:
-        name = self._config_name(raw_name)
-        path = self._control_config()["tasks"] / f"{name}.json"
-        return {
-            "accepted": True,
-            "path": str(path),
-            "task": json.loads(path.read_text(encoding="utf-8")),
-        }
-
-    def save_task(self, raw: Any) -> dict[str, Any]:
-        if not isinstance(raw, dict):
-            raise ValueError("task must be an object")
-        name = self._config_name(raw["name"])
-        trajectory = dict(raw["trajectory"])
-        document = {
-            "schema_version": 1,
-            "kind": "tracking_task",
-            "name": name,
-            "label": str(raw["label"]),
-            "controller": str(raw["controller"]),
-            "duration_s": float(raw["duration_s"]),
-            "run_until_stopped": bool(raw.get("run_until_stopped", False)),
-            "trajectory": trajectory,
-        }
-        path = self._control_config()["tasks"] / f"{name}.json"
-        self._write_json(path, document)
-        return {
-            "accepted": True,
-            "message": f"saved tracking task {name}",
-            "path": str(path),
-            "task": document,
-        }
-
     def handle(self, request: dict[str, Any]) -> dict[str, Any]:
         action = str(request.get("action", ""))
         if action not in ALLOWED_ACTIONS:
@@ -460,12 +415,6 @@ class HostManager:
             return self.pid_config()
         if action == "pid-save":
             return self.save_pid(request["config"])
-        if action == "task-list":
-            return self.task_list()
-        if action == "task-get":
-            return self.task_get(request["name"])
-        if action == "task-save":
-            return self.save_task(request["task"])
         role = str(request.get("service", ""))
         if action == "logs":
             return self.logs(role)

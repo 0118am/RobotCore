@@ -26,7 +26,6 @@ setup(
     entry_points={
         "console_scripts": [
             "pid_controller = robotcore_control.six_dof_pid_node:main",
-            "rl_action_adapter = robotcore_control.rl_action_adapter:main",
         ],
     },
 )

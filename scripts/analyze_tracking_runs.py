@@ -166,7 +166,7 @@ def load_events(run_dir):
 
 
 def select_experiment_window(events):
-    """Use the latest controlled experiment window, or the full log for legacy runs."""
+    """Return the latest explicitly delimited tracking experiment window."""
 
     markers = [
         event for event in events if event.get("type") == "tracking_experiment"
@@ -175,7 +175,7 @@ def select_experiment_window(events):
         event for event in markers if event.get("payload", {}).get("phase") == "start"
     ]
     if not starts:
-        return events, {}
+        raise ValueError("run is missing a tracking_experiment start marker")
     start = starts[-1]
     start_time = int(start.get("time", 0))
     ends = [
@@ -276,13 +276,13 @@ def analyze_run(run_dir, output_dir):
     )
 
     command_values = np.asarray(
-        [item["payload"].get("normalized", [0.0] * 8) for item in commands],
+        [item["payload"].get("action", [0.0] * 8) for item in commands],
         dtype=np.float64,
     )
     command_times = np.asarray([item.get("time", 0) for item in commands], dtype=np.float64) * 1e-9
-    command_limit = 0.15
+    command_limit = 1.0
     if authority:
-        command_limit = float(authority[-1]["payload"].get("command_limit", command_limit))
+        command_limit = float(authority[-1]["payload"].get("action_limit", command_limit))
     if command_values.size:
         metrics["command_rms"] = float(np.sqrt(np.mean(command_values**2)))
         metrics["command_total_variation"] = float(
@@ -363,7 +363,7 @@ def plot_run(name, tracking, command_values, output_dir):
     axis_command = figure.add_subplot(224)
     if command_values.size:
         axis_command.plot(command_values)
-    axis_command.set_title("Final normalized thruster commands")
+    axis_command.set_title("Final direct thruster actions")
     figure.suptitle(name)
     figure.tight_layout()
     figure.savefig(output_dir / f"{name}_tracking.png", dpi=150)
@@ -480,7 +480,7 @@ def plot_run(name, tracking, command_values, output_dir):
         command_figure, axis = plt.subplots(figsize=(14, 6))
         axis.plot(command_values)
         axis.set_xlabel("command sample")
-        axis.set_ylabel("normalized command")
+        axis.set_ylabel("action")
         axis.set_ylim(-1.02, 1.02)
         axis.grid(True, alpha=0.3)
         axis.legend([f"T{index + 1}" for index in range(command_values.shape[1])], ncol=4)

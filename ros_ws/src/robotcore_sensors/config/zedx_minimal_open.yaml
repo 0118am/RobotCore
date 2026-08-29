@@ -1,6 +1,6 @@
 # Stable ZED X Mini profile for GEN_3 VIO plus AprilTag global localisation.
-# NEURAL_LIGHT keeps the SDK depth pipeline available to positional tracking;
-# depth products themselves remain unpublished.
+# Camera acquisition remains at 30 Hz for exposure timing, while SDK compute
+# and ROS publication are capped at the sustainable 15 Hz processing rate.
 ---
 /**:
   ros__parameters:
@@ -10,23 +10,21 @@
       serial_number: 0
       camera_id: 1
       grab_resolution: SVGA
-      # Keep camera acquisition and ROS image publication on one fixed clock.
-      # There is no separate high-rate grab path or downstream frame cap.
+      # Keep physical acquisition at 30 Hz for short exposure intervals.
       grab_frame_rate: 30
-      # Native 960x600 avoids the 1920x1200 acquisition/downscale path while
-      # preserving calibrated geometry for AprilTag PnP.
-      pub_resolution: CUSTOM
-      pub_downscale_factor: 1.0
-      # Match acquisition exactly: ZED image, CameraInfo and CUDA AprilTag
-      # input all run from the same 30 Hz frame stream.
-      pub_frame_rate: 30.0
+      # Publish the native 960x600 frame without an unnecessary resize path.
+      pub_resolution: NATIVE
+      # Process and publish at a rate that fits the measured platform budget.
+      # The capture sensor continues running at 30 Hz independently.
+      grab_compute_capping_fps: 15.0
+      pub_frame_rate: 15.0
       # Keep the SDK's camera clock immune to NTP/system-clock steps.  The
       # wrapper converts this monotonic timestamp back into the ROS epoch at
       # camera open, so delayed AprilTag measurements remain replayable by the
       # fixed-lag estimator without inheriting publication latency.
       sdk_use_monotonic_clock: true
       camera_timeout_sec: 5
-      camera_max_reconnect: 1
+      camera_max_reconnect: 5
       # This is the deployed stereo calibration for the
       # ZED X Mini with serial 50649148. Install it at this service-readable
       # path; the ZED SDK then uses it to generate the rectified image and
@@ -66,10 +64,9 @@
               jpeg_quality: 80
 
     depth:
-      # ZED disables positional tracking when depth mode is NONE. Use its
-      # lowest-overhead neural depth mode for internal VIO only; AprilTag still
-      # consumes only rectified RGB and CameraInfo.
-      depth_mode: NEURAL_LIGHT
+      # ZED SDK 5.2+ GEN_3 positional tracking operates without depth. No
+      # production consumer uses a depth product, so avoid neural depth work.
+      depth_mode: NONE
       depth_stabilization: 0
       publish_depth_map: false
       publish_depth_info: false
