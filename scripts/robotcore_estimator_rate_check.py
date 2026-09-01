@@ -31,15 +31,15 @@ class EstimatorRateCheck(Node):
         self.duration_s = max(3.0, float(duration_s))
         self.started_ns = self.get_clock().now().nanoseconds
         self.vio_publisher = self.create_publisher(
-            Odometry, "/zedx/zed_node/odom", 10
+            Odometry, "/zedx/zed_node/odom", 1
         )
         self.zed_status_publisher = self.create_publisher(
-            PosTrackStatus, "/zedx/zed_node/pose/status", 10
+            PosTrackStatus, "/zedx/zed_node/pose/status", 1
         )
         self.tag_publisher = self.create_publisher(
-            AprilTagPoseEstimate, "/localization/apriltag_pose", 10
+            AprilTagPoseEstimate, "/localization/apriltag_pose", 1
         )
-        self.create_subscription(BodyState, "/robot/body_state", self.on_body_state, 100)
+        self.create_subscription(BodyState, "/robot/body_state", self.on_body_state, 1)
         self.create_timer(1.0 / 30.0, self.publish_zed_status)
         self.create_timer(1.0 / 30.0, self.publish_vio)
         self.create_timer(1.0 / 30.0, self.publish_tag_anchor)

@@ -2,21 +2,16 @@
 <package format="3">
   <name>robotcore_control</name>
   <version>0.1.0</version>
-  <description>Thruster allocation, PWM mapping, vehicle control, and safety filters.</description>
+  <description>Direct actuator-domain vehicle control and safety filters.</description>
   <maintainer email="maintainer@example.com">RobotCore Team</maintainer>
   <license>MIT</license>
 
   <buildtool_depend>ament_python</buildtool_depend>
 
   <exec_depend>robotcore_interfaces</exec_depend>
-  <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
-  <exec_depend>python3-scipy</exec_depend>
-  <exec_depend>python3-yaml</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
-  <exec_depend>std_msgs</exec_depend>
-  <exec_depend>std_srvs</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>

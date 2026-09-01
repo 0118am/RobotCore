@@ -67,6 +67,10 @@ if(BUILD_TESTING)
   ament_add_gtest(test_covariance test/test_covariance.cpp)
   target_include_directories(test_covariance PRIVATE include)
   target_link_libraries(test_covariance Eigen3::Eigen)
+
+  ament_add_gtest(test_alignment test/test_alignment.cpp)
+  target_include_directories(test_alignment PRIVATE include)
+  target_link_libraries(test_alignment Eigen3::Eigen)
 endif()
 
 ament_export_include_directories(include)

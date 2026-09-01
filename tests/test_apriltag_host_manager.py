@@ -41,29 +41,6 @@ def make_manager(root: Path) -> HostManager:
     )
 
 
-def make_control_manager(root: Path) -> HostManager:
-    pid_root = root / "pid"
-    pid_root.mkdir(parents=True)
-    default_pid = json.loads(
-        (ROOT / "ros_ws/src/robotcore_control/config/pid/default.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    (pid_root / "active.json").write_text(
-        json.dumps(default_pid), encoding="utf-8"
-    )
-    return HostManager(
-        {
-            "schema_version": 1,
-            "services": {},
-            "control_config": {
-                "pid_active_path": str(pid_root / "active.json"),
-                "pid_profiles_dir": str(pid_root / "profiles"),
-            },
-        }
-    )
-
-
 def test_apriltag_map_upsert_is_validated_and_atomic():
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
@@ -199,23 +176,3 @@ def test_lifecycle_failure_includes_service_status_and_recent_logs(monkeypatch):
     assert result["status"]["output"] == "ActiveState=failed"
     assert result["recent_logs"]["output"] == "unit failed: missing device"
     assert ["systemctl", "start", "robotcore.service"] in calls
-
-
-def test_pid_config_save_updates_active_and_named_profile_atomically():
-    with tempfile.TemporaryDirectory() as directory:
-        root = Path(directory)
-        manager = make_control_manager(root)
-        config = manager.handle({"action": "pid-config"})["config"]
-        config["profile_name"] = "pool_tune_01"
-        config["configured"] = True
-        config["inner_kp"][0] = 12.5
-
-        saved = manager.handle({"action": "pid-save", "config": config})
-
-        assert saved["accepted"] is True
-        assert manager.handle({"action": "pid-config"})["config"] == config
-        profile = json.loads(
-            (root / "pid/profiles/pool_tune_01.json").read_text(encoding="utf-8")
-        )
-        assert profile == config
-

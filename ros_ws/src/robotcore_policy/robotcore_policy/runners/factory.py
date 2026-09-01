@@ -1,10 +1,8 @@
 """Factory for creating policy runners from manifest metadata."""
 
 from .dummy_runner import DummyRunner
-from .mmn_runner import MmnRunner
 from .onnx_runner import OnnxRunner
 from .tensorrt_runner import TensorRtRunner
-from .torch_runner import TorchRunner
 
 
 def create_runner(manifest):
@@ -17,8 +15,4 @@ def create_runner(manifest):
         return OnnxRunner(manifest)
     if runner in {"tensorrt", "trt"}:
         return TensorRtRunner(manifest)
-    if runner in {"pth", "torch"}:
-        return TorchRunner(manifest)
-    if runner == "mmn":
-        return MmnRunner(manifest)
     raise ValueError(f"Unsupported policy runner: {manifest.runner}")

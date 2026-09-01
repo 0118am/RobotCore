@@ -11,7 +11,7 @@ import math
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Imu
 
 from robotcore_interfaces.msg import BodyState, TrackingStatus, TrajectoryTarget
@@ -22,6 +22,9 @@ class TrackingMonitorNode(Node):
 
     def __init__(self):
         super().__init__("tracking_monitor_node")
+        sensor_qos = QoSProfile(
+            depth=1, reliability=ReliabilityPolicy.BEST_EFFORT
+        )
         self.declare_parameter("publish_rate_hz", 20.0)
         self.declare_parameter("max_input_age_s", 0.15)
         self.declare_parameter("imu_topic", "/sensors/external_imu")
@@ -36,19 +39,19 @@ class TrackingMonitorNode(Node):
         self.previous_velocity_ns: int | None = None
         self.filtered_acceleration_body = (0.0, 0.0, 0.0)
 
-        self.publisher = self.create_publisher(TrackingStatus, "/runtime/tracking_status", 10)
-        self.create_subscription(BodyState, "/robot/body_state", self.on_body_state, 10)
+        self.publisher = self.create_publisher(TrackingStatus, "/runtime/tracking_status", 1)
+        self.create_subscription(BodyState, "/robot/body_state", self.on_body_state, 1)
         self.create_subscription(
             Imu,
             str(self.get_parameter("imu_topic").value),
             self.on_imu,
-            qos_profile_sensor_data,
+            sensor_qos,
         )
         self.create_subscription(
             TrajectoryTarget,
             "/runtime/trajectory_target",
             self.on_trajectory_target,
-            10,
+            1,
         )
 
         rate = float(self.get_parameter("publish_rate_hz").value)

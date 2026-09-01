@@ -13,12 +13,21 @@ command_authority:
     safety_heartbeat_timeout_s: 0.25
     # One limit for manual, PID and RL. Direct action +/-1 maps to 1250/1750 us.
     # All eight actions are multiplied by pwm_limit_us / 250, preserving their
-    # signs and relative allocation without per-channel clipping.
+    # signs and relative channel mix without per-channel clipping.
     # Commands are applied immediately (no authority-layer slew).
     pwm_limit_us: 250.0
     allow_rl_hardware: true
 pid_controller:
   ros__parameters:
+    # All effective PID settings live in this ROS parameter document. The
+    # approval flag keeps a bare node invocation fail-closed.
+    configuration_ready: true
+    # Values migrated from the deployed active profile on 2026-08-31. The old
+    # three-axis/six-axis JSON fields contained entries the controller ignored.
+    station_position_kp: [0.30, 0.50]
+    station_sway_rate_limit: 0.06
+    fast_station_level_rate_limit_rps: [0.12, 0.12]
+    derivative_cutoff_hz: 1.5
     # Dedicated actuator-domain altitude PID. Live tests show installed
     # T1-T4 +PWM moves toward -Z, hence command_sign=-1 for an FLU loop.
     # Reduce position/velocity stiffness and integral effort, shorten the
@@ -86,8 +95,8 @@ pid_controller:
     # 130 ms on pitch. Use an explicit angle-to-rate cascade: the roll outer
     # gain is softened to damp the measured 0.5-0.7 Hz forward-motion rocking,
     # while pitch is deliberately slower and its delayed rate gain is reduced.
-    # The 0.12 rad/s rate cap comes from real_pool_pid.yaml. Combined T1-T4
-    # differential stays bounded to 50 us.
+    # The 0.12 rad/s rate cap is declared above. Combined T1-T4 differential
+    # stays bounded to 50 us.
     fast_station_level_pwm_limit: 0.10
     fast_station_roll_angle_to_rate_kp: 1.30
     fast_station_pitch_angle_to_rate_kp: 0.80

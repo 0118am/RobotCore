@@ -34,10 +34,11 @@ t60_policy      -> /policy/body/action ------------/
 
 The browser does not open an Aquaboard device, construct UART frames, choose a
 physical PWM channel offset, or convert actions to microseconds. There is no
-configurable thruster span or source-specific mapping. The bridge performs the
-only conversion, `PWM_us = 1500 + 250 * action`, so `[-1, 1]` is exactly
-`[1250, 1750]` us. `BoardStatus.pwm_us` is the MCU-latched command echo at the
-timer update boundary, not ESC speed, current, or thrust feedback.
+configurable thruster span. The bridge maps PID and manual actions directly as
+`PWM_us = 1500 + 250 * action`. Only the exact RL authority source applies the
+fixed T5/T6 sign adapter before that conversion. `BoardStatus.pwm_us` is the
+MCU-latched command echo at the timer update boundary, not ESC speed, current,
+or thrust feedback.
 
 ## Aquaboard UART8 inertial telemetry
 

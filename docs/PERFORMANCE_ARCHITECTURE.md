@@ -69,19 +69,12 @@ Python ZED 子进程启动器。连同只验证旧实现的测试，共减少约
 包安装空间或显式核对 `ros2 pkg executables robotcore_runtime`，不能继续使用仓库根目录下
 第二套陈旧 `build/install/log`。
 
-### 推进器分配
+### PID 直接执行器混控
 
-正常未饱和路径预计算阻尼伪逆，每周期只做矩阵乘法；触碰物理推力边界时才调用 SciPy
-`lsq_linear(method="bvls")`，获得全局有界最小二乘解，替代只会单向夹紧的自写循环。
-
-本机 5,000 个随机输入微基准：
-
-| 工况 | 修改前 p50 | 修改后 p50 | 说明 |
-|---|---:|---:|---|
-| 正常范围 | 559 us | 463 us | 约快 17%，这是调参后应长期处于的路径 |
-| 大范围、约 95% 饱和 | 855 us | 1086 us | BVLS 较慢，但残差全局最优且不会被错误夹紧状态困住 |
-
-60 Hz 正常控制只占约 28 ms CPU/s。该量级不支持现在把 PID 整体重写为 C++。
+生产 PID 直接在 8 路执行器域完成定高、平移、调平和偏航混控，从未调用通用推进器
+分配器。未接入生产图、仅由自身测试覆盖的伪逆/BVLS allocator 已删除，控制包因此也不再
+依赖 SciPy。当前热路径只使用 NumPy 和项目专用的定长混控函数；是否迁移到 C++ 仍应以
+真实 callback p99 和端到端命令延迟为依据。
 
 ### 空闲自动控制图
 
@@ -138,12 +131,12 @@ journal 有 117 条 degraded/noisy-keyframe 警告、3 条 duplicate-frame 和 6
 | 节点 | 结论 | 触发重写的证据 |
 |---|---|---|
 | `command_authority` | 已迁移到 `robotcore_control_cpp` | C++ 节点以 100 Hz 评估安全状态、50 Hz 发布推进器心跳、10 Hz 发布状态；旧 Python 实现已删除 |
-| `pid_controller` | 保留 Python+NumPy/SciPy | 60 Hz callback p99 超过 4 ms，或状态到 PID 命令 p95 超预算 |
+| `pid_controller` | 保留 Python+NumPy | 60 Hz callback p99 超过 4 ms，或状态到 PID 命令 p95 超预算 |
 | trajectory/tracking/safety | 保留 Python编排 | 明确的 CPU 热点或调度丢期，而不是仅凭语言判断 |
 | `run_logger` | 保留独立低优先级 Python 进程 | 缓冲、限频、best-effort 后仍影响控制 trace |
 | ONNX policy | 模型大时使用 ONNX Runtime CUDA/TensorRT | 先完成 provider 安装并记录推理 p50/p95/p99；当前生产 launch 未启用 policy |
 
-如果必须继续迁移，优先把 PID 和分配器改为 C++ 组件，再与仲裁节点合成一个
+如果必须继续迁移，优先把 PID 及其直接执行器混控改为 C++ 组件，再与仲裁节点合成一个
 `rclcpp_components` 容器，并保持 PID 专用输入
 `/control/pid/thruster_cmd`、中央仲裁和唯一最终输出 `/control/thruster_cmd` 的边界；不要重写
 日志、任务管理或 launch Python。

@@ -5,7 +5,6 @@ packages.
 
 Current contents:
 
-- `policies/dummy_body_policy`: deterministic 8-thruster dummy policy.
-
-Real ONNX, PTH, or MMN files should be added only after Phase 0 validates the
-target runtime path and records the required versions.
+- `policies/dummy_body_policy`: deterministic integration-test policy.
+- `policies/t60_precision_v17_model_400`: deployed TensorRT policy manifest and
+  ONNX artifact for the physical T1-T8 vehicle contract.

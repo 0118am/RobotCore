@@ -2,7 +2,7 @@
 <package format="3">
   <name>robotcore_hardware</name>
   <version>0.1.0</version>
-  <description>Edge hardware bridge skeleton for ros2_control, serial, CAN, and Aboard packets.</description>
+  <description>Production Aboard protocol-v2 UART and IMU bridge.</description>
   <maintainer email="maintainer@example.com">RobotCore Team</maintainer>
   <license>MIT</license>
 

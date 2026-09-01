@@ -1,10 +1,5 @@
-# Name of an allow-listed trajectory scenario from the runtime YAML file.
-string scenario
-# Expected active authority source. Initially only "pid" is permitted.
-string controller
-# Execution profile selected independently from the task's target trajectory.
-string control_mode
-float64 duration_s
+# Opaque ID of one validated preset from tracking_tasks.yaml.
+string task_id
 ---
 bool success
 string run_dir

@@ -97,8 +97,10 @@ Core topics:
 
 Browser-facing camera endpoints:
 
-- `/api/camera/front.jpg`: latest front-camera snapshot.
 - `/stream/camera/front.mjpg`: multipart MJPEG stream used by the operator UI.
+
+Live browser state is delivered only on `/ws/operator`; there is no duplicate
+HTTP state or still-image endpoint.
 
 Core services:
 
@@ -107,16 +109,18 @@ Core services:
 
 Core action:
 
-- `/runtime/run_task`: long-running task execution entry point.
+- `/runtime/run_tracking_experiment`: managed tracking experiment execution.
 
 ## 5. Hardware Boundary
 
 - Jetson runs ROS 2, policy inference, planning, vision, sensor bridge, and
   logging.
-- The Jetson bridge converts each direct action once with
-  `PWM_us = 1500 + 250 * action`. Aboard validates the resulting signed PWM
-  offsets, handles heartbeat/failsafe state, returns board status, and forwards the
-  IMU connected to its UART8 as telemetry on the shared UART6 transport.
+- The Jetson bridge converts PID and manual actions with
+  `PWM_us = 1500 + 250 * action`. For `command_authority:rl` only, it applies
+  the deployed policy adapter `[1,1,1,1,-1,-1,1,1]` before conversion. Aboard
+  validates the resulting signed PWM offsets, handles heartbeat/failsafe state,
+  returns board status, and forwards the IMU connected to its UART8 as telemetry
+  on the shared UART6 transport.
 - Aquaboard accepts only the CRC/session/sequence UART v2 command path and maps its
   eight logical channels to physical PWM indexes 8 through 15.
 - The browser publishes manual input only to `/control/manual/thruster_cmd`. It has no serial
@@ -140,8 +144,7 @@ Supported runner interfaces:
 | Format | Runner |
 | --- | --- |
 | ONNX | `onnx_runner.py` |
-| PTH | `torch_runner.py` |
-| MMN | `mmn_runner.py` placeholder until the real format is confirmed |
+| TensorRT | `tensorrt_runner.py` |
 | Dummy | deterministic mock runner for integration tests |
 
 `PolicyStatus.missing_inputs` must report readiness gaps instead of failing

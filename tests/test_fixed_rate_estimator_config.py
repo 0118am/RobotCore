@@ -64,7 +64,7 @@ def test_vio_tag_fusion_is_one_native_cpp_ekf():
     assert "symmetrized_covariance<6>(raw_state_pose_covariance)" in source
     assert "symmetrized_covariance<6>(raw_alignment_contribution)" in source
     assert "invalid localization covariance; resetting estimator" in source
-    assert "SensorDataQoS().keep_last(8)" in source
+    assert "SensorDataQoS().keep_last(1)" in source
     assert "enforce_covariance_floors" not in source
     assert "use_vio_velocity_covariance_fallback" not in source
     assert "vio_velocity_fallback_stddev_mps" not in source
@@ -102,7 +102,7 @@ def test_aboard_bridge_publishes_the_single_factory_calibrated_base_imu():
     ).read_text(encoding="utf-8")
     cmake = (SENSORS / "CMakeLists.txt").read_text(encoding="utf-8")
 
-    assert '"/sensors/external_imu", rclcpp::SensorDataQoS().keep_last(8)' in bridge
+    assert '"/sensors/external_imu", rclcpp::SensorDataQoS().keep_last(1)' in bridge
     assert 'message.header.frame_id = "base_link"' in bridge
     assert "sample.gyro_rad_s" in bridge
     assert "sample.accel_m_s2" in bridge
@@ -120,6 +120,7 @@ def test_edge_launch_wires_one_canonical_fixed_rate_output():
     launch = (
         ROOT / "ros_ws/src/robotcore_bringup/launch/robotcore_edge_system.launch.py"
     ).read_text(encoding="utf-8")
+    fusion_config = load_yaml("config/localization.yaml")["/ekf"]["ros__parameters"]
 
     assert "ImuConditionerComponent" not in launch
     assert "imu_raw_topic" not in launch
@@ -129,17 +130,18 @@ def test_edge_launch_wires_one_canonical_fixed_rate_output():
     assert 'name="vio_tag_fusion"' not in launch
     assert "ZedOdometryAdapterComponent" not in launch
     assert "FixedLagEskfComponent" not in launch
-    assert '"vio_topic": "/zedx/zed_node/odom"' in launch
+    assert 'LaunchConfiguration("localization_config")' in launch
+    assert fusion_config["vio_topic"] == "/zedx/zed_node/odom"
     assert "/localization/zed_odom" not in launch
     assert "sensor_msgs::msg::Imu" not in (
         SENSORS / "src/vio_tag_fusion_component.cpp"
     ).read_text(encoding="utf-8")
     assert '"use_vio"' not in launch
-    assert '"vio_arrival_timeout_s": 0.80' in launch
-    assert '"vio_prediction_horizon_s": 0.80' in launch
-    assert '"vio_linear_velocity_stddev_floor_mps": 0.10' in launch
-    assert '"vio_linear_velocity_correction_limit_mps": 0.04' in launch
-    assert '"vio_linear_velocity_innovation_limit_mps": 0.25' in launch
+    assert fusion_config["vio_arrival_timeout_s"] == 0.80
+    assert fusion_config["vio_prediction_horizon_s"] == 0.80
+    assert fusion_config["vio_linear_velocity_stddev_floor_mps"] == 0.10
+    assert fusion_config["vio_linear_velocity_correction_limit_mps"] == 0.04
+    assert fusion_config["vio_linear_velocity_innovation_limit_mps"] == 0.25
     fusion_parameters = launch[
         launch.index('plugin="robotcore_sensors::VioTagFusionComponent"'):
         launch.index('extra_arguments=[{"use_intra_process_comms": True}]',
@@ -159,12 +161,12 @@ def test_edge_launch_wires_one_canonical_fixed_rate_output():
     assert '"imu_topic": "/sensors/external_imu"' in pid_parameters
     assert "use_vio_velocity_covariance_fallback" not in fusion_parameters
     assert "base_to_aboard_imu" not in launch
-    assert '"tag_topic": "/localization/apriltag_pose"' in launch
+    assert fusion_config["tag_topic"] == "/localization/apriltag_pose"
     assert "constrain_vertical_acceleration" not in launch
-    assert '"tag_fresh_s": 0.35' in launch
+    assert fusion_config["tag_fresh_s"] == 0.35
     assert '"tag_innovation_gate_m": 0.50' not in launch
-    assert '"require_zed_tracking_ok": True' in launch
-    assert '"output_rate_hz": 60.0' in launch
+    assert fusion_config["require_zed_tracking_ok"] is True
+    assert fusion_config["output_rate_hz"] == 60.0
     assert "pressure_depth_odometry_node" not in launch
     assert "/localization/pressure_depth_odom" not in launch
     assert 'package="robot_localization"' not in launch
@@ -179,13 +181,13 @@ def test_apriltag_pose_uses_quality_ranked_one_two_or_best_three_observations():
     localizer = (SENSORS / "src/apriltag_map_localizer_component.cpp").read_text(
         encoding="utf-8"
     )
-    launch = (
-        ROOT / "ros_ws/src/robotcore_bringup/launch/robotcore_edge_system.launch.py"
-    ).read_text(encoding="utf-8")
+    tag_config = load_yaml("config/localization.yaml")["/apriltag_localization"][
+        "ros__parameters"
+    ]
 
-    assert '"minimum_pose_tag_count": 1' in launch
-    assert '"maximum_pose_tag_count": 3' in launch
-    assert '"maximum_tag_edge_ratio": 2.5' in launch
+    assert tag_config["minimum_pose_tag_count"] == 1
+    assert tag_config["maximum_pose_tag_count"] == 3
+    assert tag_config["maximum_tag_edge_ratio"] == 2.5
     assert "assess_tag_image_quality(" in localizer
     assert "left.quality.score > right.quality.score" in localizer
     assert "candidates.resize" in localizer
@@ -195,17 +197,33 @@ def test_apriltag_pose_uses_quality_ranked_one_two_or_best_three_observations():
     assert "single_tag_position_stddev_m" in localizer
 
 
+def test_relocalization_uses_a_bounded_mutually_consistent_candidate_window():
+    fusion = (SENSORS / "src/vio_tag_fusion_component.cpp").read_text(
+        encoding="utf-8"
+    )
+    parameters = load_yaml("config/localization.yaml")["/ekf"]["ros__parameters"]
+
+    assert parameters["alignment_candidate_count"] == 4
+    assert parameters["alignment_candidate_window_s"] == 8.0
+    assert parameters["alignment_translation_tolerance_m"] == 0.20
+    assert parameters["alignment_rotation_tolerance_deg"] == 12.0
+    assert "tightest_consistent_pose_cluster(" in fusion
+    assert "alignment_candidate_cluster_size" in fusion
+    assert "AprilTag map alignment established" in fusion
+    assert "stamp - alignment_candidates_.back().stamp_ns > 500000000LL" not in fusion
+
+
 def test_estimator_rate_probe_drives_current_cpp_inputs():
     probe = (ROOT / "scripts/robotcore_estimator_rate_check.py").read_text(
         encoding="utf-8"
     )
 
-    assert 'Odometry, "/zedx/zed_node/odom", 10' in probe
+    assert 'Odometry, "/zedx/zed_node/odom", 1' in probe
     assert 'Imu, "/sensors/external_imu", 50' not in probe
-    assert 'PosTrackStatus, "/zedx/zed_node/pose/status", 10' in probe
+    assert 'PosTrackStatus, "/zedx/zed_node/pose/status", 1' in probe
     assert "publish_imu" not in probe
     assert "self.create_timer(1.0 / 30.0, self.publish_vio)" in probe
-    assert 'AprilTagPoseEstimate, "/localization/apriltag_pose", 10' in probe
+    assert 'AprilTagPoseEstimate, "/localization/apriltag_pose", 1' in probe
     assert "message.map_generation = 1" in probe
     assert "message.pose_valid = True" in probe
     assert "self.create_timer(1.0 / 30.0, self.publish_tag_anchor)" in probe

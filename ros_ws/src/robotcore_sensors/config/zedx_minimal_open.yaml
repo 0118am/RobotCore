@@ -1,6 +1,6 @@
 # Stable ZED X Mini profile for GEN_3 VIO plus AprilTag global localisation.
-# Camera acquisition remains at 30 Hz for exposure timing, while SDK compute
-# and ROS publication are capped at the sustainable 15 Hz processing rate.
+# Camera acquisition runs at 60 Hz for low sensor latency; SDK VIO and ROS
+# image publication run at the sustainable 30 Hz processing rate.
 ---
 /**:
   ros__parameters:
@@ -10,14 +10,19 @@
       serial_number: 0
       camera_id: 1
       grab_resolution: SVGA
-      # Keep physical acquisition at 30 Hz for short exposure intervals.
-      grab_frame_rate: 30
+      # Keep the physical stereo capture rate aligned with the required VIO
+      # rate.  Running the sensor at 120 Hz exhausted the Argus in-flight
+      # capture pool on this platform and stopped CaptureScheduler.
+      grab_frame_rate: 60
       # Publish the native 960x600 frame without an unnecessary resize path.
       pub_resolution: NATIVE
-      # Process and publish at a rate that fits the measured platform budget.
-      # The capture sensor continues running at 30 Hz independently.
-      grab_compute_capping_fps: 15.0
-      pub_frame_rate: 15.0
+      # Keep the low-level GMSL2 capture at 60 Hz for short exposure and low
+      # sensor latency, while limiting SDK computation to its sustainable
+      # 30 Hz rate. The SDK defines this as an upper bound, not a capture-buffer
+      # recovery mechanism; the wrapper's independent latest-only image worker
+      # is what prevents publication work from blocking grab().
+      grab_compute_capping_fps: 30.0
+      pub_frame_rate: 30.0
       # Keep the SDK's camera clock immune to NTP/system-clock steps.  The
       # wrapper converts this monotonic timestamp back into the ROS epoch at
       # camera open, so delayed AprilTag measurements remain replayable by the
@@ -35,9 +40,20 @@
 
     video:
       publish_rgb: true
-      # Retrieve LEFT_BGR directly into GPU memory. Isaac ROS cuAprilTags
-      # accepts BGR8, so the NITROS stream needs neither an alpha-channel
-      # removal nor an RGB channel swap.
+      # Keep exposure below half of a 60 Hz frame to preserve motion quality
+      # and the latency budget established for visual odometry.
+      auto_exposure_time_range_max: 8000
+      # Perception consumes only the newest camera frame. Keep one DDS sample;
+      # RELIABLE is required because the installed Isaac ROS NITROS graph uses
+      # reliable image/CameraInfo subscriptions. Stale-frame elimination is
+      # provided by the wrapper's generation-based latest-only worker.
+      qos_history: 1
+      qos_depth: 1
+      qos_reliability: 1
+      qos_durability: 2
+      # Retrieve LEFT_BGR directly into GPU memory. The colocated Isaac ROS
+      # converter performs the required BGR8->RGB8 channel swap on the GPU;
+      # no alpha removal or CPU image conversion is needed.
       enable_24bit_output: true
       publish_left_right: false
       publish_raw: false
@@ -113,9 +129,17 @@
     stream_server:
       stream_enabled: false
 
+    advanced:
+      # Do not raise SDK client threads above the Argus capture provider. A
+      # FIFO grab thread can starve CaptureScheduler on the same CPU, exhaust
+      # its capture pool and produce CORRUPTED_FRAME. Control remains realtime;
+      # the camera/Argus pipeline runs at normal priority with CPU affinity.
+      change_thread_priority: false
+      thread_sched_policy: SCHED_OTHER
+
     debug:
-      # AprilTag consumes the GPU-backed BGR8 NITROS image directly. The ZED
-      # wrapper retains only an on-demand JPEG transport for the operator switch.
+      # AprilTag consumes the converted GPU-backed NITROS image. The ZED wrapper
+      # retains only an on-demand JPEG transport for the operator switch.
       disable_nitros: false
       # Preserve the SDK camera timestamp; replacing it with ROS now() would
       # turn processing and DDS queueing delay into a measurement-time error.

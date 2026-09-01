@@ -4,12 +4,17 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <utility>
+
+#include <pthread.h>
+#include <sched.h>
 
 #include "rclcpp/rclcpp.hpp"
 #include "robotcore_interfaces/msg/body_state.hpp"
@@ -28,6 +33,22 @@ constexpr double kActionPwmSpanUs = 250.0;
 constexpr double kMaximumPwmLimitUs = 250.0;
 constexpr double kMaximumAction = 1.0;
 
+void configure_fifo_thread(
+  const rclcpp::Logger & logger, const char * thread_name, int priority)
+{
+  if (priority <= 0) {return;}
+  sched_param parameters{};
+  parameters.sched_priority = priority;
+  const int error = pthread_setschedparam(pthread_self(), SCHED_FIFO, &parameters);
+  if (error != 0) {
+    RCLCPP_ERROR(
+      logger, "Failed to set %s to SCHED_FIFO/%d: %s",
+      thread_name, priority, std::strerror(error));
+    return;
+  }
+  RCLCPP_INFO(logger, "%s uses SCHED_FIFO/%d", thread_name, priority);
+}
+
 class CommandAuthorityNode final : public rclcpp::Node
 {
   using ThrusterCommand = robotcore_interfaces::msg::ThrusterCommand;
@@ -42,6 +63,12 @@ public:
   CommandAuthorityNode()
   : Node("command_authority")
   {
+    const auto realtime_priority = declare_parameter<std::int64_t>(
+      "executor_realtime_priority", 0);
+    if (realtime_priority < 0 || realtime_priority > 99) {
+      throw std::invalid_argument("executor_realtime_priority must be in [0, 99]");
+    }
+    executor_realtime_priority_ = static_cast<int>(realtime_priority);
     evaluation_rate_hz_ = std::max(1.0, declare_parameter("evaluation_rate_hz", 100.0));
     publish_rate_hz_ = std::max(1.0, declare_parameter("publish_rate_hz", 50.0));
     status_rate_hz_ = std::max(0.1, declare_parameter("status_publish_rate_hz", 10.0));
@@ -63,7 +90,7 @@ public:
     pid_command_sub_ = create_source_subscription(
       "/control/pid/thruster_cmd", "pid", "pid_controller");
     rl_action_sub_ = create_subscription<std_msgs::msg::Float32MultiArray>(
-      "/policy/body/action", rclcpp::QoS(rclcpp::KeepLast(1)).reliable(),
+      "/policy/body/action", rclcpp::QoS(rclcpp::KeepLast(1)).best_effort(),
       [this](const std_msgs::msg::Float32MultiArray::SharedPtr message) {
         on_rl_action(*message);
       });
@@ -100,6 +127,12 @@ public:
     RCLCPP_INFO(
       get_logger(), "C++ command authority started (evaluation %.1f Hz, command %.1f Hz)",
       evaluation_rate_hz_, publish_rate_hz_);
+  }
+
+  void configure_executor_thread() const
+  {
+    configure_fifo_thread(
+      get_logger(), "command-authority executor", executor_realtime_priority_);
   }
 
 private:
@@ -141,6 +174,7 @@ private:
         }
         source_commands_[source] =
           TimedSourceCommand{std::move(message), SteadyClock::now()};
+        publish_fresh_source_command(source);
       });
   }
 
@@ -153,6 +187,7 @@ private:
         }))
     {
       source_commands_.erase("rl");
+      publish_fresh_source_command("rl");
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 2000,
         "ignored RL action: expected eight finite values in [-1, 1]");
@@ -168,6 +203,7 @@ private:
     command->enable = true;
     command->source = "t60_policy";
     source_commands_["rl"] = TimedSourceCommand{std::move(command), SteadyClock::now()};
+    publish_fresh_source_command("rl");
   }
 
   std::string source_command_integrity_failure(
@@ -402,6 +438,13 @@ private:
     output_enabled_ = output_allowed && idle_reason.empty();
   }
 
+  void publish_fresh_source_command(const std::string & source)
+  {
+    if (!armed_ || (source != selected_source_ && source != "manual")) {return;}
+    evaluate();
+    publish_command(output_enabled_);
+  }
+
   ThrusterCommand make_command(bool enable)
   {
     ThrusterCommand command;
@@ -456,6 +499,7 @@ private:
   double evaluation_rate_hz_{}, publish_rate_hz_{}, status_rate_hz_{};
   double source_command_timeout_s_{}, state_timeout_s_{}, target_timeout_s_{}, safety_timeout_s_{};
   double action_limit_{};
+  int executor_realtime_priority_{};
 
   rclcpp::Publisher<ThrusterCommand>::SharedPtr command_pub_;
   rclcpp::Publisher<AuthorityStatus>::SharedPtr status_pub_;
@@ -473,7 +517,9 @@ private:
 int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
-  rclcpp::spin(std::make_shared<robotcore_control_cpp::CommandAuthorityNode>());
+  auto node = std::make_shared<robotcore_control_cpp::CommandAuthorityNode>();
+  node->configure_executor_thread();
+  rclcpp::spin(node);
   rclcpp::shutdown();
   return 0;
 }

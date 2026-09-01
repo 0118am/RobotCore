@@ -1,0 +1,183 @@
+schema_version: 1
+
+defaults:
+  duration_s: 86400.0
+  run_until_stopped: true
+
+scenarios:
+  altitude_hold:
+    trajectory_type: hold
+    attitude_mode: hold_initial
+    relative_to_initial_pose: false
+    center_z: 0.9
+    manual_vertical_speed_mps: 0.1
+    hold_before_motion_s: 0.0
+
+  station_hold:
+    trajectory_type: hold
+    attitude_mode: level_heading
+    relative_to_initial_pose: false
+    center_z: 0.9
+    hold_before_motion_s: 0.0
+    manual_vertical_speed_mps: 0.1
+    station_linear_input_gain_mps: 0.1
+    station_lateral_input_gain_mps: 0.1
+    station_yaw_input_gain_rps: 0.6
+
+  station_hold_fast:
+    trajectory_type: hold
+    attitude_mode: level_heading
+    relative_to_initial_pose: false
+    center_z: 0.9
+    hold_before_motion_s: 0.0
+    manual_vertical_speed_mps: 0.1
+    station_linear_input_gain_mps: 0.1
+    station_lateral_input_gain_mps: 0.1
+    station_yaw_input_gain_rps: 0.6
+
+  rl_pose_hold:
+    trajectory_type: hold
+    attitude_mode: level_heading
+    relative_to_initial_pose: false
+    center_z: 0.9
+    hold_before_motion_s: 0.0
+    manual_vertical_speed_mps: 0.1
+    station_linear_input_gain_mps: 0.1
+    station_lateral_input_gain_mps: 0.1
+    station_yaw_input_gain_rps: 0.6
+
+  circle:
+    trajectory_type: circle
+    attitude_mode: path_tangent
+    relative_to_initial_pose: false
+    center_x: 2.71
+    center_y: 1.865
+    center_z: 0.5
+    hold_before_motion_s: 25.0
+    move_duration_s: 15.0
+    trajectory_ramp_s: 10.0
+    trajectory_speed_mps: 0.1
+    radius_m: 1.2
+
+  racetrack:
+    trajectory_type: racetrack
+    attitude_mode: path_tangent
+    relative_to_initial_pose: false
+    center_x: 2.71
+    center_y: 1.865
+    center_z: 0.5
+    hold_before_motion_s: 25.0
+    move_duration_s: 15.0
+    trajectory_ramp_s: 10.0
+    trajectory_speed_mps: 0.1
+    amp_x: 2.0
+    amp_y: 1.0
+
+  spatial_lissajous:
+    trajectory_type: spatial_lissajous
+    attitude_mode: path_tangent
+    relative_to_initial_pose: false
+    center_x: 2.71
+    center_y: 1.865
+    center_z: 0.5
+    hold_before_motion_s: 25.0
+    move_duration_s: 15.0
+    trajectory_ramp_s: 10.0
+    trajectory_speed_mps: 0.1
+    amp_x: 1.8
+    amp_y: 0.8
+    amp_z: 0.2
+
+  straight_line:
+    trajectory_type: straight_line
+    attitude_mode: fixed_path_heading
+    relative_to_initial_pose: false
+    center_x: 2.71
+    center_y: 1.865
+    center_z: 0.5
+    hold_before_motion_s: 25.0
+    move_duration_s: 15.0
+    trajectory_ramp_s: 10.0
+    trajectory_speed_mps: 0.1
+    amp_x: 2.3
+
+tasks:
+  pose_hold:
+    label: 定高模式
+    scenario: altitude_hold
+    control_mode: altitude_hold
+
+  station_hold:
+    label: 定点模式
+    scenario: station_hold
+    control_mode: station_hold
+
+  station_hold_fast:
+    label: 快速定点模式
+    scenario: station_hold_fast
+    control_mode: station_hold_fast
+
+  rl_pose_hold:
+    label: RL Station Hold Fast
+    scenario: rl_pose_hold
+    control_mode: rl_policy
+
+  circle_station_hold:
+    label: 圆形 · 定点
+    scenario: circle
+    control_mode: station_hold
+
+  circle_station_hold_fast:
+    label: 圆形 · 快速定点
+    scenario: circle
+    control_mode: station_hold_fast
+
+  circle_rl_policy:
+    label: 圆形 · RL
+    scenario: circle
+    control_mode: rl_policy
+
+  racetrack_station_hold:
+    label: 跑道形 · 定点
+    scenario: racetrack
+    control_mode: station_hold
+
+  racetrack_station_hold_fast:
+    label: 跑道形 · 快速定点
+    scenario: racetrack
+    control_mode: station_hold_fast
+
+  racetrack_rl_policy:
+    label: 跑道形 · RL
+    scenario: racetrack
+    control_mode: rl_policy
+
+  spatial_lissajous_station_hold:
+    label: Spatial Lissajous · 定点
+    scenario: spatial_lissajous
+    control_mode: station_hold
+
+  spatial_lissajous_station_hold_fast:
+    label: Spatial Lissajous · 快速定点
+    scenario: spatial_lissajous
+    control_mode: station_hold_fast
+
+  spatial_lissajous_rl_policy:
+    label: Spatial Lissajous · RL
+    scenario: spatial_lissajous
+    control_mode: rl_policy
+
+  straight_line_station_hold:
+    label: 直线 · 定点
+    scenario: straight_line
+    control_mode: station_hold
+
+  straight_line_station_hold_fast:
+    label: 直线 · 快速定点
+    scenario: straight_line
+    control_mode: station_hold_fast
+
+  straight_line_rl_policy:
+    label: 直线 · RL
+    scenario: straight_line
+    control_mode: rl_policy

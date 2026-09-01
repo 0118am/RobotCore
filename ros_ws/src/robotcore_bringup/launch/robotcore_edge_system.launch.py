@@ -8,6 +8,7 @@ from launch.actions import (
     DeclareLaunchArgument,
     ExecuteProcess,
     SetEnvironmentVariable,
+    TimerAction,
 )
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
@@ -21,18 +22,6 @@ def generate_launch_description():
     run_root = os.environ.get(
         "ROBOTCORE_RUN_ROOT", str(Path.cwd() / "data" / "robotcore_runs")
     )
-    config_root = Path(os.environ.get("ROBOTCORE_CONFIG_ROOT", "/var/lib/robotcore/config"))
-    task_config_dir = (
-        Path(
-            os.environ.get(
-                "CONTROL_INTERFACE_WORKSPACE", "/home/nvidia/ControlInterface"
-            )
-        )
-        / "control_interface"
-        / "config"
-        / "tasks"
-    )
-
     return LaunchDescription(
         [
             # The 1a86 USB serial endpoint carries CRC protocol v2: FF FD board
@@ -51,10 +40,6 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument("front_camera_raw_topic", default_value="/zedx/zed_node/rgb/color/rect/image"),
             DeclareLaunchArgument(
-                "front_camera_compressed_topic",
-                default_value="/zedx/zed_node/rgb/color/rect/image/compressed",
-            ),
-            DeclareLaunchArgument(
                 "front_camera_info_topic", default_value="/zedx/zed_node/rgb/color/rect/camera_info"
             ),
             DeclareLaunchArgument("enable_apriltag_localization", default_value="true"),
@@ -72,7 +57,7 @@ def generate_launch_description():
                     [
                         FindPackageShare("robotcore_policy"),
                         "models",
-                        "t60_precision_v7_model_499",
+                        "t60_precision_v17_model_400",
                         "policy.onnx",
                     ]
                 ),
@@ -92,6 +77,12 @@ def generate_launch_description():
                     [FindPackageShare("robotcore_sensors"), "config", "zedx_minimal_open.yaml"]
                 ),
             ),
+            DeclareLaunchArgument(
+                "localization_config",
+                default_value=PathJoinSubstitution(
+                    [FindPackageShare("robotcore_sensors"), "config", "localization.yaml"]
+                ),
+            ),
             DeclareLaunchArgument("zed_serial_number", default_value="50649148"),
             DeclareLaunchArgument("zed_camera_id", default_value="-1"),
             DeclareLaunchArgument("apriltag_max_tags", default_value="24"),
@@ -103,13 +94,6 @@ def generate_launch_description():
                 # the same file.
                 default_value="/etc/robotcore/apriltag_map.json",
             ),
-            DeclareLaunchArgument("web_host", default_value="0.0.0.0"),
-            DeclareLaunchArgument("web_port", default_value="8080"),
-            DeclareLaunchArgument("host_manager_socket", default_value=""),
-            # Keep the historical all-in-one launch working for development.
-            # Production systemd units set this false and run control_interface as the
-            # separate, least-privileged control-interface.service.
-            DeclareLaunchArgument("enable_web_ui", default_value="true"),
             DeclareLaunchArgument("thruster_command_timeout_ms", default_value="150"),
             DeclareLaunchArgument(
                 "pool_control_config",
@@ -118,22 +102,24 @@ def generate_launch_description():
                 ),
             ),
             DeclareLaunchArgument(
-                "pid_config_path",
-                default_value=str(config_root / "pid" / "active.json"),
-            ),
-            DeclareLaunchArgument(
                 "thruster_config_path",
                 default_value=PathJoinSubstitution(
                     [FindPackageShare("robotcore_control"), "config", "real_pool_thrusters.yaml"]
                 ),
             ),
-            DeclareLaunchArgument("task_config_dir", default_value=str(task_config_dir)),
             DeclareLaunchArgument(
-                "record_topics_path",
-                default_value=str(task_config_dir / "record_topics.json"),
+                "task_catalog_path",
+                default_value=PathJoinSubstitution(
+                    [FindPackageShare("robotcore_runtime"), "config", "tracking_tasks.yaml"]
+                ),
+            ),
+            DeclareLaunchArgument(
+                "recording_config_path",
+                default_value=PathJoinSubstitution(
+                    [FindPackageShare("robotcore_runtime"), "config", "recording.yaml"]
+                ),
             ),
             SetEnvironmentVariable(name="ROBOTCORE_RUN_ROOT", value=run_root),
-            SetEnvironmentVariable(name="ROBOTCORE_CONFIG_ROOT", value=str(config_root)),
             # Static transforms use the standard C++ tf2 publisher. No Python
             # process remains in the sensor-to-BodyState data path.
             Node(
@@ -141,6 +127,7 @@ def generate_launch_description():
                 executable="static_transform_publisher",
                 name="base_to_zed_link",
                 output="screen",
+                prefix="/usr/bin/taskset --cpu-list 7 /usr/bin/nice -n 19",
                 arguments=[
                     "--x", "0.236", "--y", "0.027", "--z", "0.016",
                     "--frame-id", "base_link", "--child-frame-id", "zedx_camera_link",
@@ -148,6 +135,9 @@ def generate_launch_description():
             ),
             ExecuteProcess(
                 cmd=[
+                    "/usr/bin/taskset",
+                    "--cpu-list",
+                    "4,5",
                     "/usr/bin/bash",
                     "-c",
                     [
@@ -168,117 +158,130 @@ def generate_launch_description():
             # map contains both 0.4 m and 0.2 m Tags. RobotCore's own
             # apriltag_localization component consumes ID/corners and performs
             # one joint, per-Tag-size PnP.
-            # Negotiated subscriptions advertise transient-local capabilities,
-            # so discovery remains correct regardless of whether the ZED
-            # managed publisher or this container appears first.
-            ComposableNodeContainer(
-                package="rclcpp_components",
-                executable="component_container_mt",
-                name="apriltag_cuda_container",
-                namespace="",
-                output="screen",
-                parameters=[{"thread_num": 2}],
-                condition=IfCondition(LaunchConfiguration("enable_apriltag_localization")),
-                composable_node_descriptions=[
-                    ComposableNode(
-                        package="isaac_ros_apriltag",
-                        plugin="nvidia::isaac_ros::apriltag::AprilTagNode",
-                        name="apriltag_cuda_detector",
-                        parameters=[
-                            {
-                                "backends": "CUDA",
-                                "tag_family": "tag36h11",
-                                # Ignored by map localisation. It is needed by
-                                # Isaac's non-authoritative raw pose output.
-                                "size": 0.4,
-                                "max_tags": ParameterValue(
-                                    LaunchConfiguration("apriltag_max_tags"),
-                                    value_type=int,
+            # Let the ZED publisher finish camera initialization before the
+            # downstream GPU graph is created.  The installed AprilTag 3.2.5
+            # node accepts RGB8 while ZED supplies BGR8, so an accelerated
+            # format converter performs the channel swap without a CPU image.
+            TimerAction(
+                period=12.0,
+                actions=[
+                    ComposableNodeContainer(
+                        package="rclcpp_components",
+                        executable="component_container_mt",
+                        name="apriltag_cuda_container",
+                        namespace="",
+                        output="screen",
+                        prefix="/usr/bin/taskset --cpu-list 6,7",
+                        parameters=[{"thread_num": 2}],
+                        condition=IfCondition(
+                            LaunchConfiguration("enable_apriltag_localization")
+                        ),
+                        composable_node_descriptions=[
+                            ComposableNode(
+                                package="isaac_ros_image_proc",
+                                plugin=(
+                                    "nvidia::isaac_ros::image_proc::"
+                                    "ImageFormatConverterNode"
                                 ),
-                                "tile_size": 4,
-                            }
-                        ],
-                        remappings=[
-                            # ZED's 24-bit NITROS publisher already provides
-                            # GPU-resident BGR8, which cuAprilTags accepts
-                            # directly without an intermediate image topic.
-                            ("image", LaunchConfiguration("front_camera_raw_topic")),
-                            ("camera_info", LaunchConfiguration("front_camera_info_topic")),
-                            (
-                                "tag_detections",
-                                LaunchConfiguration("apriltag_detections_topic"),
+                                name="apriltag_rgb_converter",
+                                parameters=[
+                                    {
+                                        "encoding_desired": "rgb8",
+                                        "image_width": 960,
+                                        "image_height": 600,
+                                    }
+                                ],
+                                remappings=[
+                                    (
+                                        "image_raw",
+                                        LaunchConfiguration("front_camera_raw_topic"),
+                                    ),
+                                    (
+                                        "image",
+                                        "/localization/apriltag/rgb_image",
+                                    ),
+                                ],
                             ),
-                            # Never let the detector's one-size tag poses join
-                            # the production TF tree.
-                            ("tf", "/localization/apriltag/raw_tf"),
+                            ComposableNode(
+                                package="isaac_ros_apriltag",
+                                plugin="nvidia::isaac_ros::apriltag::AprilTagNode",
+                                name="apriltag_cuda_detector",
+                                parameters=[
+                                    {
+                                        "backends": "CUDA",
+                                        "tag_family": "tag36h11",
+                                        # Ignored by map localisation. It is needed by
+                                        # Isaac's non-authoritative raw pose output.
+                                        "size": 0.4,
+                                        "max_tags": ParameterValue(
+                                            LaunchConfiguration("apriltag_max_tags"),
+                                            value_type=int,
+                                        ),
+                                        "tile_size": 4,
+                                    }
+                                ],
+                                remappings=[
+                                    # ZED's 24-bit NITROS publisher already provides
+                                    # GPU-resident BGR8. The converter above supplies
+                                    # the RGB8 format required by AprilTag 3.2.5.
+                                    (
+                                        "image",
+                                        "/localization/apriltag/rgb_image",
+                                    ),
+                                    (
+                                        "camera_info",
+                                        LaunchConfiguration("front_camera_info_topic"),
+                                    ),
+                                    (
+                                        "tag_detections",
+                                        LaunchConfiguration("apriltag_detections_topic"),
+                                    ),
+                                    # Never let the detector's one-size tag poses join
+                                    # the production TF tree.
+                                    ("tf", "/localization/apriltag/raw_tf"),
+                                ],
+                            ),
+                            ComposableNode(
+                                package="robotcore_sensors",
+                                plugin="robotcore_sensors::AprilTagMapLocalizerComponent",
+                                name="apriltag_localization",
+                                parameters=[
+                                    LaunchConfiguration("localization_config"),
+                                    {
+                                        "camera_info_topic": LaunchConfiguration(
+                                            "front_camera_info_topic"
+                                        ),
+                                        "detections_topic": LaunchConfiguration(
+                                            "apriltag_detections_topic"
+                                        ),
+                                        "tag_map_file": LaunchConfiguration(
+                                            "apriltag_tag_map_file"
+                                        ),
+                                    },
+                                ],
+                                extra_arguments=[{"use_intra_process_comms": True}],
+                            ),
                         ],
-                    ),
-                    ComposableNode(
-                        package="robotcore_sensors",
-                        plugin="robotcore_sensors::AprilTagMapLocalizerComponent",
-                        name="apriltag_localization",
-                        parameters=[{
-                            "camera_info_topic": LaunchConfiguration("front_camera_info_topic"),
-                            "detections_topic": LaunchConfiguration("apriltag_detections_topic"),
-                            "tag_map_file": LaunchConfiguration("apriltag_tag_map_file"),
-                            "base_frame": "base_link",
-                            "map_frame": "map",
-                            "enforce_cuboid_pool_geometry": True,
-                            "pool_length_m": 5.42,
-                            "pool_width_m": 3.73,
-                            "pool_surface_tolerance_m": 0.02,
-                            "pool_orientation_tolerance_deg": 2.0,
-                            "minimum_pose_tag_count": 1,
-                            "maximum_pose_tag_count": 3,
-                            "minimum_inlier_corners_per_tag": 3,
-                            "maximum_tag_edge_ratio": 2.5,
-                            "max_reprojection_rms_px": 3.0,
-                            "single_tag_max_reprojection_rms_px": 1.5,
-                            "multi_tag_position_stddev_m": 0.05,
-                            "dual_tag_position_stddev_m": 0.075,
-                            "dual_tag_angle_stddev_deg": 3.0,
-                            "single_tag_position_stddev_m": 0.10,
-                            "single_tag_angle_stddev_deg": 4.0,
-                            "single_tag_reference_edge_px": 40.0,
-                        }],
-                        extra_arguments=[{"use_intra_process_comms": True}],
                     ),
                 ],
             ),
             ComposableNodeContainer(
                 package="rclcpp_components",
-                executable="component_container_mt",
+                executable="component_container",
                 name="localization_estimator_container",
                 namespace="",
                 output="screen",
-                parameters=[{"thread_num": 2}],
+                prefix="/usr/bin/taskset --cpu-list 3",
                 condition=IfCondition(LaunchConfiguration("enable_fixed_rate_state_estimator")),
                 composable_node_descriptions=[
                     ComposableNode(
                         package="robotcore_sensors",
                         plugin="robotcore_sensors::VioTagFusionComponent",
                         name="ekf",
-                        parameters=[{
-                            "vio_topic": "/zedx/zed_node/odom",
-                            "tag_topic": "/localization/apriltag_pose",
-                            "zed_tracking_status_topic": "/zedx/zed_node/pose/status",
-                            "output_rate_hz": 60.0,
-                            "history_duration_s": 3.0,
-                            "tag_fresh_s": 0.35,
-                            # The deployed ZED stream is bursty at about 18 Hz
-                            # and has measured inter-arrival gaps up to 0.68 s.
-                            # Predict through those bounded gaps instead of
-                            # resetting height control on every burst cycle.
-                            "vio_arrival_timeout_s": 0.80,
-                            "vio_prediction_horizon_s": 0.80,
-                            "require_zed_tracking_ok": True,
-                            # ZED pose and twist are correlated: pose corrects
-                            # position only, while twist is the sole velocity
-                            # observation with bounded single-frame influence.
-                            "vio_linear_velocity_stddev_floor_mps": 0.10,
-                            "vio_linear_velocity_correction_limit_mps": 0.04,
-                            "vio_linear_velocity_innovation_limit_mps": 0.25,
-                        }],
+                        parameters=[
+                            LaunchConfiguration("localization_config"),
+                            {"executor_realtime_priority": 55},
+                        ],
                         extra_arguments=[{"use_intra_process_comms": True}],
                     ),
                 ],
@@ -288,6 +291,7 @@ def generate_launch_description():
                 executable="trajectory_command_node",
                 name="trajectory_command",
                 output="screen",
+                prefix="/usr/bin/taskset --cpu-list 7 /usr/bin/nice -n 10",
                 condition=IfCondition(LaunchConfiguration("enable_pool_tracking")),
                 parameters=[
                     LaunchConfiguration("pool_control_config"),
@@ -299,6 +303,7 @@ def generate_launch_description():
                 executable="tracking_monitor_node",
                 name="tracking_monitor",
                 output="screen",
+                prefix="/usr/bin/taskset --cpu-list 7 /usr/bin/nice -n 19",
                 condition=IfCondition(LaunchConfiguration("enable_pool_tracking")),
                 parameters=[{"publish_rate_hz": 20.0}],
             ),
@@ -307,14 +312,15 @@ def generate_launch_description():
                 executable="pid_controller",
                 name="pid_controller",
                 output="screen",
+                # CPU 3 is owned by the SCHED_FIFO/55 state estimator.  A
+                # normal-priority PID timer on that core can miss the 100 ms
+                # command-authority freshness window while the estimator is
+                # busy.  CPU 6 only carries lower-nice perception work.
+                prefix="/usr/bin/taskset --cpu-list 6",
                 condition=IfCondition(LaunchConfiguration("enable_pool_tracking")),
                 parameters=[
                     LaunchConfiguration("pool_control_config"),
                     {
-                        "pid_config_path": LaunchConfiguration("pid_config_path"),
-                        "thruster_config_path": LaunchConfiguration(
-                            "thruster_config_path"
-                        ),
                         "control_rate_hz": 50.0,
                         "imu_topic": "/sensors/external_imu",
                     }
@@ -325,15 +331,25 @@ def generate_launch_description():
                 executable="t60_policy",
                 name="t60_policy",
                 output="screen",
+                # Keep policy inference off CPU 3, where the higher-priority
+                # VIO/Tag EKF executor can otherwise starve its 25 Hz timer.
+                prefix="/usr/bin/taskset --cpu-list 7",
                 condition=IfCondition(
                     LaunchConfiguration("enable_rl_policy_runtime")
                 ),
                 parameters=[
                     {
-                        "policy_name": "t60_precision_v7_model_499",
+                        "policy_name": "t60_precision_v17_model_400",
                         "model_path": LaunchConfiguration("rl_policy_model"),
                         "control_rate_hz": 25.0,
                         "max_input_age_s": 0.25,
+                        "executor_realtime_priority": 50,
+                        # Small, bounded physical rate feedback after the RL
+                        # actor. It adds damping without adding filter delay.
+                        "rate_damping_enabled": True,
+                        "roll_rate_damping_gain_action_per_rps": 0.10,
+                        "pitch_rate_damping_gain_action_per_rps": 0.10,
+                        "rate_damping_action_limit": 0.08,
                     }
                 ],
             ),
@@ -342,13 +358,15 @@ def generate_launch_description():
                 executable="command_authority",
                 name="command_authority",
                 output="screen",
+                prefix="/usr/bin/taskset --cpu-list 2",
                 parameters=[
                     LaunchConfiguration("pool_control_config"),
                     {
                         "allow_rl_hardware": ParameterValue(
                             LaunchConfiguration("allow_rl_hardware"),
                             value_type=bool,
-                        )
+                        ),
+                        "executor_realtime_priority": 65,
                     },
                 ],
             ),
@@ -357,11 +375,12 @@ def generate_launch_description():
                 executable="tracking_experiment_node",
                 name="tracking_experiment",
                 output="screen",
+                prefix="/usr/bin/taskset --cpu-list 7 /usr/bin/nice -n 19",
                 condition=IfCondition(LaunchConfiguration("enable_pool_tracking")),
                 parameters=[
                     {
-                        "task_config_dir": LaunchConfiguration(
-                            "task_config_dir"
+                        "task_catalog_path": LaunchConfiguration(
+                            "task_catalog_path"
                         )
                     }
                 ],
@@ -371,14 +390,16 @@ def generate_launch_description():
                 executable="run_logger",
                 name="run_logger",
                 output="screen",
+                prefix="/usr/bin/taskset --cpu-list 7 /usr/bin/nice -n 19",
                 condition=IfCondition(LaunchConfiguration("enable_pool_tracking")),
                 parameters=[
                     {
                         "run_root": run_root,
-                        "pid_config_path": LaunchConfiguration("pid_config_path"),
                         "thruster_config_path": LaunchConfiguration("thruster_config_path"),
-                        "task_config_dir": LaunchConfiguration("task_config_dir"),
-                        "record_topics_path": LaunchConfiguration("record_topics_path"),
+                        "task_catalog_path": LaunchConfiguration("task_catalog_path"),
+                        "recording_config_path": LaunchConfiguration(
+                            "recording_config_path"
+                        ),
                         "safety_config_path": LaunchConfiguration("pool_control_config"),
                     }
                 ],
@@ -388,12 +409,14 @@ def generate_launch_description():
                 executable="safety_monitor",
                 name="safety_monitor",
                 output="screen",
+                prefix="/usr/bin/taskset --cpu-list 2",
             ),
             Node(
                 package="robotcore_hardware",
                 executable="aboard_bridge_node",
                 name="aboard_bridge",
                 output="screen",
+                prefix="/usr/bin/taskset --cpu-list 2",
                 parameters=[
                     {
                         "serial_port": LaunchConfiguration("serial_port"),
@@ -405,26 +428,9 @@ def generate_launch_description():
                             LaunchConfiguration("thruster_command_timeout_ms"),
                             value_type=int,
                         ),
-                    }
-                ],
-            ),
-            Node(
-                package="control_interface",
-                executable="web_operator_server",
-                name="web_operator",
-                output="screen",
-                condition=IfCondition(LaunchConfiguration("enable_web_ui")),
-                parameters=[
-                    {
-                        "web_host": LaunchConfiguration("web_host"),
-                        "web_port": LaunchConfiguration("web_port"),
-                        "host_manager_socket": LaunchConfiguration("host_manager_socket"),
-                        "apriltag_map_file": LaunchConfiguration("apriltag_tag_map_file"),
-                        "localization_status_topic": "/localization/status",
-                        "title": "RobotCore Operator",
-                        "front_camera_compressed_topic": LaunchConfiguration("front_camera_compressed_topic"),
-                        "imu_topic": "/sensors/external_imu",
-                        "manual_thruster_command_topic": "/control/manual/thruster_cmd",
+                        "executor_realtime_priority": 65,
+                        "serial_realtime_priority": 70,
+                        "imu_realtime_priority": 60,
                     }
                 ],
             ),

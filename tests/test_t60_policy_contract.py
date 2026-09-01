@@ -1,10 +1,11 @@
-"""Exact deployment-contract tests for t60_precision_v7/model_499."""
+"""Exact deployment-contract tests for t60_precision_v17/model_400."""
 
 import hashlib
 import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 
 CORE_ROOT = Path(__file__).resolve().parents[1]
@@ -14,7 +15,7 @@ sys.path.insert(0, str(POLICY_SOURCE))
 from robotcore_policy.policy_manifest import load_policy_manifest  # noqa: E402
 from robotcore_policy.action_decoder import decode_thruster_action  # noqa: E402
 from robotcore_policy.t60_observation import (  # noqa: E402
-    HISTORY_INDICES,
+    HISTORY_SCALE,
     OBS_SCALE,
     T60ObservationState,
 )
@@ -113,9 +114,6 @@ def test_current_frame_has_exact_field_order_and_scaling():
             0.0,
             0.0,
             0.0,
-            0.0,
-            0.0,
-            -1.0,
             0.4,
             -0.8,
             0.2,
@@ -136,9 +134,11 @@ def test_current_frame_has_exact_field_order_and_scaling():
         ],
         dtype=np.float32,
     )
-    assert vector.shape == (201,)
-    assert np.allclose(vector[:33], expected_raw / OBS_SCALE, atol=1.0e-6)
-    assert np.array_equal(vector[33:], np.zeros(168, dtype=np.float32))
+    assert OBS_SCALE.shape == (30,)
+    assert HISTORY_SCALE.shape == (21,)
+    assert vector.shape == (198,)
+    assert np.allclose(vector[:30], expected_raw / OBS_SCALE, atol=1.0e-6)
+    assert np.array_equal(vector[30:], np.zeros(168, dtype=np.float32))
 
 
 def test_world_vectors_rotate_to_flu_body_and_attitude_error_is_unique():
@@ -151,10 +151,9 @@ def test_world_vectors_rotate_to_flu_body_and_attitude_error_is_unique():
         target_orientation=(-half_sqrt, 0.0, 0.0, -half_sqrt),
     )
 
-    current = state.build(sample).reshape(-1)[:33]
+    current = state.build(sample).reshape(-1)[:30]
     assert np.allclose(current[0:3], [0.0, -4.0, 0.0], atol=1.0e-6)
     assert np.allclose(current[9:13], [1.0, 0.0, 0.0, 0.0], atol=1.0e-6)
-    assert np.allclose(current[13:16], [0.0, 0.0, -1.0], atol=1.0e-6)
 
 
 def test_policy_attitude_uses_imu_tilt_and_localization_yaw():
@@ -176,16 +175,11 @@ def test_policy_attitude_uses_imu_tilt_and_localization_yaw():
             imu_orientation=imu_roll_30,
             target_orientation=target_yaw_90,
         )
-    ).reshape(-1)[:33]
+    ).reshape(-1)[:30]
 
     assert np.allclose(
         current[9:13],
         [np.cos(roll_30 / 2.0), -np.sin(roll_30 / 2.0), 0.0, 0.0],
-        atol=1.0e-6,
-    )
-    assert np.allclose(
-        current[13:16],
-        [0.0, -0.5, -np.sqrt(0.75)],
         atol=1.0e-6,
     )
 
@@ -205,7 +199,7 @@ def test_policy_attitude_and_body_rate_axes_are_robotcore_flu_identity():
                 imu_angular_velocity=(0.1, -0.2, 0.3),
                 target_orientation=target_quaternion,
             )
-        ).reshape(-1)[:33]
+        ).reshape(-1)[:30]
         expected_attitude_error = np.zeros(4, dtype=np.float32)
         expected_attitude_error[0] = half_sqrt
         expected_attitude_error[axis + 1] = half_sqrt
@@ -213,7 +207,7 @@ def test_policy_attitude_and_body_rate_axes_are_robotcore_flu_identity():
             current[9:13], expected_attitude_error, atol=1.0e-6
         )
         assert np.allclose(
-            current[16:19],
+            current[13:16],
             np.asarray([0.1, -0.2, 0.3]) / 0.8,
             atol=1.0e-6,
         )
@@ -225,28 +219,48 @@ def test_history_is_newest_first_and_committed_only_after_inference():
     first = state.build(
         observation(
             target_position=(0.25, 0.0, 0.0),
+            imu_angular_velocity=(0.2, -0.4, 0.8),
+            target_angular_velocity=(0.6, 0.4, 0.0),
             applied_thruster_command=first_action,
         )
     ).reshape(-1)
-    assert np.count_nonzero(first[33:]) == 0
+    assert np.count_nonzero(first[30:]) == 0
+    first_history = np.concatenate(
+        (
+            first[0:3],
+            first[6:13],
+            first[16:19] - first[13:16],
+            first[22:30],
+        )
+    )
 
     state.commit()
     second_action = np.asarray([-0.8, 0.7, -0.6, 0.5, -0.4, 0.3, -0.2, 0.1])
     second = state.build(
         observation(
             target_position=(0.5, 0.0, 0.0),
+            imu_angular_velocity=(-0.4, 0.2, 0.0),
+            target_angular_velocity=(0.0, 0.6, -0.8),
             applied_thruster_command=second_action,
         )
     ).reshape(-1)
 
-    assert np.allclose(second[25:33], second_action)
-    assert np.allclose(second[33:54], first[:33][HISTORY_INDICES])
-    assert np.count_nonzero(second[54:]) == 0
+    assert np.allclose(second[22:30], second_action)
+    assert np.allclose(second[30:51], first_history)
+    assert np.count_nonzero(second[51:]) == 0
+    second_history = np.concatenate(
+        (
+            second[0:3],
+            second[6:13],
+            second[16:19] - second[13:16],
+            second[22:30],
+        )
+    )
 
     state.commit()
     third = state.build(observation(target_position=(0.75, 0.0, 0.0))).reshape(-1)
-    assert np.allclose(third[33:54], second[:33][HISTORY_INDICES])
-    assert np.allclose(third[54:75], first[:33][HISTORY_INDICES])
+    assert np.allclose(third[30:51], second_history)
+    assert np.allclose(third[51:72], first_history)
 
 
 def test_reset_zeros_history_without_replacing_applied_command_input():
@@ -259,23 +273,36 @@ def test_reset_zeros_history_without_replacing_applied_command_input():
     reset_input = state.build(
         observation(applied_thruster_command=applied)
     ).reshape(-1)
-    assert np.allclose(reset_input[25:33], applied)
-    assert np.array_equal(reset_input[33:], np.zeros(168, dtype=np.float32))
+    assert np.allclose(reset_input[22:30], applied)
+    assert np.array_equal(reset_input[30:], np.zeros(168, dtype=np.float32))
 
 
 def test_deployable_manifest_resolves_colocated_model_and_exact_contract():
     manifest_path = (
-        CORE_ROOT / "models" / "policies" / "t60_precision_v7_model_499" / "policy.yaml"
+        CORE_ROOT / "models" / "policies" / "t60_precision_v17_model_400" / "policy.yaml"
     )
     manifest = load_policy_manifest(str(manifest_path), "unused", "body")
 
+    assert manifest.name == "t60_precision_v17_model_400"
     assert manifest.runner == "tensorrt"
     assert Path(manifest.model_path).is_file()
     assert manifest.isaac_contract["observation_layout"] == (
-        "t60_precision_v7_history8"
+        "t60_trajectory_obs_v11"
     )
-    assert manifest.isaac_contract["observation_dim"] == 201
+    assert manifest.isaac_contract["observation_dim"] == 198
+    assert manifest.isaac_contract["actor_observation_dim"] == 198
+    assert manifest.isaac_contract["current_observation_dim"] == 30
+    assert manifest.isaac_contract["privileged_state_dim"] == 60
+    assert manifest.isaac_contract["critic_observation_dim"] == 258
     assert manifest.isaac_contract["history_length"] == 8
+    assert manifest.isaac_contract["history_sample_dim"] == 21
+    assert manifest.isaac_contract["history_order"] == "newest_first"
+    assert manifest.isaac_contract["input_name"] == "obs"
+    assert manifest.isaac_contract["output_name"] == "actions"
+    assert manifest.isaac_contract["input_normalization"] == (
+        "fixed_physical_scale"
+    )
+    assert manifest.isaac_contract["running_normalization"] is False
     assert manifest.isaac_contract["control_rate_hz"] == 25
     assert manifest.isaac_contract["physics_steps_per_action"] == 4
     assert manifest.isaac_contract["state_delay_s"] == 0.05
@@ -305,7 +332,15 @@ def test_deployable_manifest_resolves_colocated_model_and_exact_contract():
         "T8_front_right_horizontal",
     ]
     assert manifest.output_schema["type"] == "direct_thruster_action"
-    assert manifest.output_schema["pwm_mapping"] == "PWM_us = 1500 + 250 * action"
+    assert manifest.output_schema["pwm_mapping"] == (
+        "PWM_us = 1500 + 250 * rl_polarity[T] * action"
+    )
+    assert manifest.output_schema["pwm_input_polarity"] == [
+        1, 1, 1, 1, -1, -1, 1, 1
+    ]
+    assert manifest.output_schema["pwm_input_polarity_scope"] == (
+        "command_authority:rl"
+    )
     assert manifest.deployment_validation["mode"] == "direct_thruster_action"
     assert manifest.deployment_validation["authority"] == "current_physical_vehicle"
     assert manifest.deployment_validation["actuator_alignment"] == (
@@ -313,9 +348,9 @@ def test_deployable_manifest_resolves_colocated_model_and_exact_contract():
     )
     assert manifest.deployment_validation["state_frame"] == "robotcore_FLU"
     assert manifest.deployment_validation["angular_velocity_frame"] == "body_xyz"
-    assert manifest.isaac_contract["exported_at"].isoformat() == "2026-08-29"
+    assert manifest.isaac_contract["exported_at"].isoformat() == "2026-09-01"
     assert manifest.isaac_contract["source_artifact"] == (
-        "auv_traj_policy_mlp_history_8_2026-08-29_model_499.onnx"
+        "auv_traj_policy_v17_mlp_history_8_2026-09-01_model_400.onnx"
     )
     assert manifest.isaac_contract["body_axes"] == ["forward", "left", "up"]
     assert manifest.isaac_contract["quaternion_semantics"] == "world_from_body"
@@ -325,11 +360,66 @@ def test_deployable_manifest_resolves_colocated_model_and_exact_contract():
         "pitch_rate",
         "yaw_rate",
     ]
+    assert manifest.isaac_contract["angular_velocity_error_convention"] == (
+        "target_minus_measured"
+    )
     assert manifest.isaac_contract["positive_roll"] == "left_side_up_right_side_down"
     assert manifest.isaac_contract["positive_pitch"] == "bow_down_stern_up"
     assert manifest.isaac_contract["positive_yaw"] == "bow_left_ccw_from_above"
+    current_fields = manifest.isaac_contract["current_observation_fields"]
+    assert [(field["name"], field["dim"]) for field in current_fields] == [
+        ("position_error_b", 3),
+        ("target_linear_velocity_b", 3),
+        ("linear_velocity_error_b", 3),
+        ("attitude_error_quat", 4),
+        ("angular_velocity_b", 3),
+        ("target_angular_velocity_b", 3),
+        ("target_linear_acceleration_b", 3),
+        ("previous_motor_command", 8),
+    ]
+    manifest_current_scale = np.concatenate(
+        [
+            np.full(field["dim"], field["scale"], dtype=np.float32)
+            for field in current_fields
+        ]
+    )
+    assert np.array_equal(manifest_current_scale, OBS_SCALE)
+
+    history_fields = manifest.isaac_contract["history_observation_fields"]
+    assert [(field["name"], field["dim"]) for field in history_fields] == [
+        ("position_error_b", 3),
+        ("linear_velocity_error_b", 3),
+        ("attitude_error_quat", 4),
+        ("angular_velocity_error_b", 3),
+        ("previous_motor_command", 8),
+    ]
+    manifest_history_scale = np.concatenate(
+        [
+            np.full(field["dim"], field["scale"], dtype=np.float32)
+            for field in history_fields
+        ]
+    )
+    assert np.array_equal(manifest_history_scale, HISTORY_SCALE)
     digest = hashlib.sha256(Path(manifest.model_path).read_bytes()).hexdigest()
     assert digest == manifest.isaac_contract["sha256"]
+
+
+def test_policy_manifest_rejects_deprecated_fallbacks(tmp_path):
+    with pytest.raises(ValueError, match="path is required"):
+        load_policy_manifest("", "missing", "body")
+
+    direct_model = tmp_path / "policy.onnx"
+    direct_model.write_bytes(b"not-a-model")
+    with pytest.raises(ValueError, match="policy.yaml"):
+        load_policy_manifest(str(direct_model), "direct", "body")
+
+    with pytest.raises(FileNotFoundError, match="does not exist"):
+        load_policy_manifest(str(tmp_path / "policy.yaml"), "missing", "body")
+
+    malformed_manifest = tmp_path / "malformed.yaml"
+    malformed_manifest.write_text("name: incomplete\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="missing required fields"):
+        load_policy_manifest(str(malformed_manifest), "incomplete", "body")
 
 
 def test_shadow_launch_has_no_control_topic():
@@ -342,7 +432,7 @@ def test_shadow_launch_has_no_control_topic():
     assert "/control/" not in launch_source
 
 
-def test_cpp_runtime_uses_history8_at_25_hz_and_direct_rl_actions():
+def test_cpp_runtime_uses_history8_at_25_hz_and_bounded_rate_damping():
     policy_source = (
         CORE_ROOT
         / "ros_ws"
@@ -369,10 +459,17 @@ def test_cpp_runtime_uses_history8_at_25_hz_and_direct_rl_actions():
     ).read_text(encoding="utf-8")
 
     assert "constexpr std::size_t kHistoryFrames = 8;" in policy_source
-    assert "static_assert(kObservationSize == 201);" in policy_source
+    assert "static_assert(kObservationSize == 198);" in policy_source
+    assert "projected_gravity_b" not in policy_source
+    assert "target_angular_velocity_b - measured_angular_velocity_b" in policy_source
+    assert "write_vec(frame.history, 10, angular_velocity_error_b);" in policy_source
     assert 'declare_parameter<double>("control_rate_hz", 25.0)' in policy_source
     assert "kHardwareActionScale" not in policy_source
     assert "command.action[channel];" in policy_source
+    assert "apply_vertical_rate_damping(" in policy_source
+    assert '"rate_damping_action_limit", 0.08' in policy_source
+    assert "-roll - pitch" in policy_source
+    assert "roll + pitch" in policy_source
     assert "kRlHardwareActionScale" not in authority_source
     assert "const double polarity" not in authority_source
     assert "action.data[channel]" in authority_source

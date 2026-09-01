@@ -1,5 +1,0 @@
----
-bool success
-string config_json
-string configuration_hash
-string message

@@ -2,31 +2,27 @@
 
 This control path is designed for a tethered, eight-thruster vehicle. It is
 fail-closed by default: the checked-in PID gains, thruster geometry, and pool
-bounds are deliberately marked unconfirmed, so PID cannot arm after a fresh
-checkout.
+bounds are loaded only through a reviewed launch parameter document, while a
+bare PID node keeps `configuration_ready: false` and cannot arm.
 
 ## Required measurements
 
-Edit the installed-source equivalents of:
+Review the installed-source equivalents of:
 
 - `ros_ws/src/robotcore_control/config/real_pool_thrusters.yaml`
-- `/var/lib/robotcore/config/pid/active.json`
 - `ros_ws/src/robotcore_control/config/real_pool_safety.yaml`
 
 For every thruster record the physical channel, `base_link` position, positive
 force direction, wiring/ESC sign, and a monotonic command-to-thrust curve.
 Replace all placeholder values. Set `measured: true` only after a guarded
-channel/sign test. The allocator rejects non-unit directions, duplicate/missing
-channels, non-monotonic curves, and geometry whose wrench matrix rank is not
-six.
+channel/sign test. The hardware boundary rejects missing channels and invalid
+or non-monotonic calibration curves.
 
-The browser's collapsed **PID Tuning** panel writes a named profile to
-`/var/lib/robotcore/config/pid/profiles/<profile>.json` and the same complete
-document to `pid/active.json`. Set `configured: true` only after the staged
-single-axis tuning has been reviewed. The next **Arm** reloads the entire active
-document before authority can arm; no controller process restart is needed.
-The browser then reads `/control/pid/config`, so its `LIVE` values and hash are
-the exact configuration held by the running PID process.
+All effective PID gains, limits, filters, and the explicit
+`configuration_ready` approval live under `pid_controller.ros__parameters` in
+`real_pool_safety.yaml`. There is no mutable profile file or browser gain
+editor. A parameter change requires review and a RobotCore service restart;
+`PidStatus.configuration_hash` identifies the effective startup contract.
 
 Put the planned map-frame pool envelope in the `trajectory_command` section of
 `real_pool_safety.yaml`, set the approved linear/angular speed and absolute RPY
@@ -68,17 +64,18 @@ The edge launch starts the complete path:
 cd /home/nvidia/RobotCore/ros_ws
 source /opt/ros/humble/setup.bash
 source install/setup.bash
-ros2 launch robotcore_bringup robotcore_edge_system.launch.py enable_web_ui:=false
+ros2 launch robotcore_bringup robotcore_edge_system.launch.py
 ```
 
-The browser exposes the same source selection, preflight details, Arm, Disarm,
-fault clear, and Abort actions. Manual sliders publish only
-`/control/manual/thruster_cmd`; the authority subscribes each source's dedicated
-topic and rejects a command whose producer identity does not match that topic.
+The production browser is a separate `control-interface.service`. It exposes
+manual Arm, global Disarm, authority-fault clear and one validated tracking-task
+selector. Gamepad commands publish only `/control/manual/thruster_cmd`; the
+authority subscribes each source's dedicated topic and rejects a command whose
+producer identity does not match that topic.
 
 ## 定高与定点模式
 
-1. Verify thruster channel/sign and allocation while restrained and disarmed.
+1. Verify thruster channel, sign, and direct mix while restrained and disarmed.
 2. Run `pose_hold` (shown as `定高模式`); its initial
    map-frame target height is `Z=0.9 m`.
    Right-stick up/down commands vertical speed without the
@@ -123,9 +120,9 @@ topic and rejects a command whose producer identity does not match that topic.
    direction-specific coefficients fitted to the measured forward/reverse
    thrust curves; positive heading still keeps T5/T8 positive and T6/T7
    negative, matching the field-verified counter-clockwise direction. The sway
-   loop corrects lateral drift while roll, pitch, and the full wrench allocator
-   remain outside this mode. Full forward stick requests `0.30 m/s`, bounded by
-   the station profile's `0.40 m/s` X limit; full yaw stick requests
+   loop corrects lateral drift while roll and pitch remain outside this mode.
+   Full forward stick requests `0.30 m/s`, bounded by
+   the station controller's `0.40 m/s` surge limit; full yaw stick requests
    `0.60 rad/s`.
 4. Run `station_hold_fast` (shown as `Station Hold Fast`) when the higher
    direct-PWM station controller is required. Full forward stick requests
@@ -133,8 +130,9 @@ topic and rejects a command whose producer identity does not match that topic.
    releasing it latches measured horizontal position. Right-stick up/down
    continues to command vertical velocity, and left-stick horizontal retains
    yaw control. The fast-mode sway correction is independently capped at
-   `0.30 m/s`, instead of inheriting the active PID profile's conservative
-   lateral-speed cap. Its dedicated sway velocity loop uses `Kp=1.8`, while
+   `0.20 m/s`, instead of inheriting normal station hold's conservative
+   `0.06 m/s` lateral-speed cap. Its dedicated sway velocity loop uses
+   `Kp=0.60`, while
    normal station hold retains `Kp=1.0`; both keep sway integral disabled.
    During straight lateral input, automatic yaw correction
    is capped at `0.10` to prevent the measured sway/yaw coupled oscillation;
@@ -180,44 +178,41 @@ topic and rejects a command whose producer identity does not match that topic.
    heading step at each turnaround. The packaged tasks use a 10 s smooth speed
    ramp; their periods remain task-configurable (the three newly packaged paths
    default to 100 s).
-The browser exposes independent `Mode` and `Trajectory` selectors. Both default
-to `None`, which leaves the vehicle in free manual operation. Selecting a
-trajectory never changes `Mode`, and selecting a mode never changes
-`Trajectory`. Every automatic path is startable with `Station Hold`,
-`Station Hold Fast`, or `RL Policy`; the selected mode alone determines the
-controller.
+RobotCore exposes one immutable task catalog. Each task ID binds its scenario,
+control mode and corresponding PID/RL controller; the browser cannot compose
+those fields or submit arbitrary trajectory parameters. The experiment action
+owns the complete disarm, controller selection, readiness and arm transition.
 
-Experiments never arm the vehicle. Select PID and arm it first, then request an
-allow-listed scenario:
+Request one validated task ID:
 
 ```bash
 ros2 action send_goal /runtime/run_tracking_experiment \
   robotcore_interfaces/action/RunTrackingExperiment \
-  "{scenario: pose_hold, controller: pid, control_mode: altitude_hold, duration_s: 86400.0}" \
+  "{task_id: pose_hold}" \
   --feedback
 ```
 
 The same flow is available in the browser: choose a managed task and click
-Start; the browser performs the PID Arm hand-off automatically. The action
-resets the task clock, runs the configured hold/tracking
+Start. The action resolves the task from the startup-validated catalog,
+performs the authority hand-off, resets the task clock, runs the configured hold/tracking
 phases, and always disarms when it completes, is canceled, or detects an
-authority fault. Task definitions are individual JSON files under
-`/home/nvidia/ControlInterface/control_interface/config/tasks/`; each goal
-reloads its file, so editing a task does not require restarting the action
-server.
+authority fault. Task and scenario data have one source:
+`robotcore_runtime/config/tracking_tasks.yaml`. The runtime loads and validates
+it once at startup; changing it requires rebuilding/reinstalling the package and
+restarting RobotCore.
 
 Starting an accepted experiment creates exactly one directory:
 
 ```text
 /home/nvidia/robotcore_logs/runs/run_<timestamp>_<task>/
-  configs/                 exact PID, task, thruster and safety snapshots
+  configs/                 exact task, thruster and control-parameter snapshots
   rosbag2/tracking/        full-rate rosbag2 SQLite recording
   event_log.jsonl          bounded, operator-readable summaries and markers
   rosbag2.log              recorder output
 ```
 
 The topic allow-list is
-`/home/nvidia/ControlInterface/control_interface/config/tasks/record_topics.json`.
+`robotcore_runtime/config/recording.yaml`.
 The bag is the primary evidence because it preserves source messages and ROS
 timestamps. JSONL is a convenient index and quick-analysis input, not a
 replacement for the bag.
@@ -256,10 +251,12 @@ are at least 99%, and no abort or authority fault occurred.
 
 `t60_policy` publishes its eight raw model outputs on `/policy/body/action`, and
 `command_authority` copies those values directly into canonical T1-T8 actions.
-The deployed model was trained in the physical vehicle's channel and polarity,
-so there is no RL thruster adapter, permutation, or sign map. The bridge
-performs the physical conversion `PWM_us = 1500 + 250 * action`. The shared
-authority PWM limit remains the final safety bound for RL, PID, and manual
-sources: it multiplies all eight actions by the fixed live ratio
-`pwm_limit_us / 250`, preserving allocation ratios without independently
+The bridge recognizes the exact source `command_authority:rl` and applies the
+policy-specific sign map `[1,1,1,1,-1,-1,1,1]` before PWM conversion. PID and
+manual commands retain the direct conversion `PWM_us = 1500 + 250 * action`.
+Keeping the adapter after `/control/thruster_cmd` also preserves the raw previous
+policy action expected by the RL observation. The shared authority PWM limit
+remains the final safety bound for RL, PID, and manual sources: it multiplies
+all eight actions by the fixed live ratio
+`pwm_limit_us / 250`, preserving channel-mix ratios without independently
 clipping channels.

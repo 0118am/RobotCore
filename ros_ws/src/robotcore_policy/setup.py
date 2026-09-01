@@ -9,15 +9,13 @@ setup(
     name=package_name,
     version="0.1.0",
     packages=[package_name, f"{package_name}.runners"],
-    # policy_runtime.yaml records the default manifest paths used by bringup.
     data_files=[
         ("share/ament_index/resource_index/packages", [f"resource/{package_name}"]),
         (f"share/{package_name}", ["package.xml"]),
-        (f"share/{package_name}/config", glob("config/*.yaml")),
         (f"share/{package_name}/launch", glob("launch/*.launch.py")),
         (
-            f"share/{package_name}/models/t60_precision_v7_model_499",
-            glob("../../../models/policies/t60_precision_v7_model_499/*"),
+            f"share/{package_name}/models/t60_precision_v17_model_400",
+            glob("../../../models/policies/t60_precision_v17_model_400/*"),
         ),
     ],
     install_requires=["setuptools"],

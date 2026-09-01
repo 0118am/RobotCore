@@ -36,7 +36,7 @@ ExecStartPre=/usr/bin/test -w ${ROS_LOG_DIR}
 ExecStartPre=/usr/bin/test -w ${ROBOTCORE_RUN_ROOT}
 # ROS/colcon setup scripts are not nounset-safe. Enable -u only after every
 # overlay has been sourced so the launched graph still gets strict handling.
-ExecStart=/usr/bin/bash -c 'set -eo pipefail; source /opt/ros/humble/setup.bash; source "${ROBOTCORE_WORKSPACE}/install/setup.bash"; set -u; exec ros2 launch robotcore_bringup robotcore_edge_system.launch.py enable_web_ui:=false enable_pool_tracking:=true enable_rl_policy_runtime:=true allow_rl_hardware:=true serial_port:="${ROBOTCORE_ABOARD_PORT}" apriltag_tag_map_file:="${ROBOTCORE_APRILTAG_MAP_FILE}" zed_workspace:="${ZED_WORKSPACE}"'
+ExecStart=/usr/bin/bash -c 'set -eo pipefail; source /opt/ros/humble/setup.bash; source "${ROBOTCORE_WORKSPACE}/install/setup.bash"; set -u; exec ros2 launch robotcore_bringup robotcore_edge_system.launch.py enable_pool_tracking:=true enable_rl_policy_runtime:=true allow_rl_hardware:=true serial_port:="${ROBOTCORE_ABOARD_PORT}" apriltag_tag_map_file:="${ROBOTCORE_APRILTAG_MAP_FILE}" zed_workspace:="${ZED_WORKSPACE}"'
 Restart=always
 RestartSec=1
 TimeoutStopSec=20
@@ -52,6 +52,7 @@ IOWeight=1000
 Nice=-10
 OOMScoreAdjust=-750
 LimitNICE=-10
+LimitRTPRIO=80
 LimitMEMLOCK=infinity
 LimitNOFILE=1048576
 TasksMax=infinity

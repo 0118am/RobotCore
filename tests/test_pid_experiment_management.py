@@ -1,12 +1,20 @@
-"""Contracts for managed PID profiles, task files, and experiment recording."""
+"""Contracts for ROS PID parameters, task presets, and experiment recording."""
 
-import json
+import sys
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PID_CONFIG = ROOT / "ros_ws/src/robotcore_control/config/pid/default.json"
-TASK_DIR = ROOT.parent / "ControlInterface/control_interface/config/tasks"
+RUNTIME_PACKAGE = ROOT / "ros_ws/src/robotcore_runtime"
+sys.path.insert(0, str(RUNTIME_PACKAGE))
+
+from robotcore_runtime.task_catalog import TaskCatalog, load_recording_config
+
+
+RUNTIME_CONFIG = RUNTIME_PACKAGE / "config"
+TASK_CATALOG = TaskCatalog(RUNTIME_CONFIG / "tracking_tasks.yaml")
 PID_NODE = ROOT / "ros_ws/src/robotcore_control/robotcore_control/six_dof_pid_node.py"
 TRACKING_EXPERIMENT_NODE = (
     ROOT
@@ -24,62 +32,37 @@ EDGE_LAUNCH = (
 )
 
 
-def test_default_pid_document_contains_every_reloadable_gain():
-    document = json.loads(PID_CONFIG.read_text(encoding="utf-8"))
-
-    assert document["schema_version"] == 1
-    assert len(document["outer_position_kp"]) == 3
-    assert len(document["outer_orientation_kp"]) == 3
-    assert document["outer_orientation_kp"][2] == 0.60
-    assert len(document["max_linear_velocity_mps"]) == 3
-    assert len(document["max_angular_velocity_rps"]) == 3
-    assert document["max_linear_velocity_mps"][0] == 0.40
-    for field in ("inner_kp", "inner_ki", "inner_kd", "integral_limit", "wrench_limit"):
-        assert len(document[field]) == 6
-
-
-def test_tracking_tasks_are_individual_named_controller_documents():
-    task_paths = sorted(TASK_DIR.glob("*.json"))
-    tasks = [
-        json.loads(path.read_text(encoding="utf-8"))
-        for path in task_paths
-        if path.name != "record_topics.json"
-    ]
-
-    assert {task["name"] for task in tasks} == {
-        "circle",
+def test_tracking_tasks_are_fixed_runtime_owned_yaml_presets():
+    expected_ids = {
+        "circle_rl_policy",
+        "circle_station_hold",
+        "circle_station_hold_fast",
         "pose_hold",
-        "racetrack",
+        "racetrack_rl_policy",
+        "racetrack_station_hold",
+        "racetrack_station_hold_fast",
         "rl_pose_hold",
+        "spatial_lissajous_rl_policy",
+        "spatial_lissajous_station_hold",
+        "spatial_lissajous_station_hold_fast",
         "station_hold",
         "station_hold_fast",
-        "spatial_lissajous",
-        "straight_line",
+        "straight_line_rl_policy",
+        "straight_line_station_hold",
+        "straight_line_station_hold_fast",
     }
+    assert {item["id"] for item in TASK_CATALOG.summaries()} == expected_ids
+    tasks = [TASK_CATALOG.task(task_id) for task_id in expected_ids]
     for task in tasks:
         assert task["kind"] == "tracking_task"
-        assert task["controller"] in {"pid", "rl", "selected"}
+        assert task["controller"] in {"pid", "rl"}
         assert task["duration_s"] > 0.0 or task.get("run_until_stopped") is True
-        if "mode" in task:
-            assert task["mode"] in {
-                "altitude_hold",
-                "station_hold",
-                "station_hold_fast",
-                "rl_policy",
-            }
-        else:
-            assert task["controller"] == "selected"
-            assert set(task["compatible_modes"]) == {
-                "station_hold",
-                "station_hold_fast",
-                "rl_policy",
-            }
-        if task["controller"] == "rl":
-            assert task["control_law"] == "t60_precision_v7_model_499"
-        elif task["controller"] == "selected":
-            assert task["control_law"] == "selected"
-        elif task["name"] != "pose_hold":
-            assert task["control_law"] == "pid"
+        assert task["control_mode"] in {
+            "altitude_hold", "station_hold", "station_hold_fast", "rl_policy"
+        }
+        assert task["controller"] == (
+            "rl" if task["control_mode"] == "rl_policy" else "pid"
+        )
         assert task["trajectory_name"] in {
             "none",
             "spatial_lissajous",
@@ -88,10 +71,14 @@ def test_tracking_tasks_are_individual_named_controller_documents():
             "straight_line",
         }
         assert task["trajectory"]["trajectory_type"]
-        assert (TASK_DIR / f"{task['name']}.json").is_file()
+    assert (RUNTIME_CONFIG / "tracking_tasks.yaml").is_file()
+    assert not list(
+        (ROOT.parent / "ControlInterface/control_interface/config/tasks").glob("*.json")
+    )
+
 
 def test_pose_hold_is_manual_planar_control_with_automatic_height_hold():
-    task = json.loads((TASK_DIR / "pose_hold.json").read_text(encoding="utf-8"))
+    task = TASK_CATALOG.task("pose_hold")
     trajectory = task["trajectory"]
 
     assert task["label"] == "定高模式"
@@ -100,27 +87,24 @@ def test_pose_hold_is_manual_planar_control_with_automatic_height_hold():
     assert trajectory["attitude_mode"] == "hold_initial"
     assert trajectory["relative_to_initial_pose"] is False
     assert trajectory["center_z"] == 0.9
-    assert trajectory["manual_vertical_speed_mps"] == 0.2
+    assert trajectory["manual_vertical_speed_mps"] == 0.1
 
 
 def test_rl_policy_none_reuses_fast_station_target_from_start_height():
-    task = json.loads((TASK_DIR / "rl_pose_hold.json").read_text(encoding="utf-8"))
-    fast = json.loads(
-        (TASK_DIR / "station_hold_fast.json").read_text(encoding="utf-8")
-    )
+    task = TASK_CATALOG.task("rl_pose_hold")
+    fast = TASK_CATALOG.task("station_hold_fast")
     trajectory = task["trajectory"]
     fast_trajectory = fast["trajectory"]
 
-    assert task["mode"] == "rl_policy"
+    assert task["control_mode"] == "rl_policy"
     assert task["trajectory_name"] == "none"
     assert task["controller"] == "rl"
-    assert task["control_law"] == "t60_precision_v7_model_499"
     assert task["run_until_stopped"] is True
     assert trajectory["trajectory_type"] == "hold"
     assert trajectory["attitude_mode"] == fast_trajectory["attitude_mode"]
     assert trajectory["relative_to_initial_pose"] is False
-    assert "center_z" not in trajectory
-    assert "center_z" not in fast_trajectory
+    assert trajectory["center_z"] == 0.9
+    assert fast_trajectory["center_z"] == 0.9
     assert (
         trajectory["manual_vertical_speed_mps"]
         == fast_trajectory["manual_vertical_speed_mps"]
@@ -140,35 +124,34 @@ def test_rl_policy_none_reuses_fast_station_target_from_start_height():
 
 
 def test_station_hold_combines_direct_height_position_and_heading_pid():
-    task = json.loads((TASK_DIR / "station_hold.json").read_text(encoding="utf-8"))
+    task = TASK_CATALOG.task("station_hold")
     trajectory = task["trajectory"]
 
     assert task["label"] == "定点模式"
-    assert task["control_law"] == "pid"
+    assert task["controller"] == "pid"
     assert task["run_until_stopped"] is True
     assert trajectory["trajectory_type"] == "hold"
     assert trajectory["attitude_mode"] == "level_heading"
     assert trajectory["relative_to_initial_pose"] is False
     assert trajectory["center_z"] == 0.9
-    assert trajectory["station_linear_input_gain_mps"] == 0.3
-    assert trajectory["station_lateral_input_gain_mps"] == 0.2
+    assert trajectory["manual_vertical_speed_mps"] == 0.1
+    assert trajectory["station_linear_input_gain_mps"] == 0.1
+    assert trajectory["station_lateral_input_gain_mps"] == 0.1
     assert trajectory["station_yaw_input_gain_rps"] == 0.6
 
 
 def test_fast_station_hold_has_dedicated_high_authority_control_type():
-    standard = json.loads((TASK_DIR / "station_hold.json").read_text(encoding="utf-8"))
-    fast = json.loads(
-        (TASK_DIR / "station_hold_fast.json").read_text(encoding="utf-8")
-    )
+    standard = TASK_CATALOG.task("station_hold")
+    fast = TASK_CATALOG.task("station_hold_fast")
 
     assert fast["label"] == "快速定点模式"
-    assert fast["mode"] == "station_hold_fast"
+    assert fast["control_mode"] == "station_hold_fast"
     assert fast["trajectory_name"] == "none"
     assert fast["trajectory"]["trajectory_type"] == "hold"
-    assert "center_z" not in fast["trajectory"]
-    assert standard["trajectory"]["station_linear_input_gain_mps"] == 0.3
-    assert fast["trajectory"]["station_linear_input_gain_mps"] == 0.5
-    assert fast["trajectory"]["station_lateral_input_gain_mps"] == 0.2
+    assert fast["trajectory"]["center_z"] == 0.9
+    assert standard["trajectory"]["station_linear_input_gain_mps"] == 0.1
+    assert fast["trajectory"]["station_linear_input_gain_mps"] == 0.1
+    assert fast["trajectory"]["station_lateral_input_gain_mps"] == 0.1
     assert fast["trajectory"]["station_yaw_input_gain_rps"] == standard["trajectory"][
         "station_yaw_input_gain_rps"
     ]
@@ -178,23 +161,16 @@ def test_fast_station_hold_has_dedicated_high_authority_control_type():
 
 
 def test_spatial_lissajous_task_uses_one_name_everywhere():
-    task = json.loads(
-        (TASK_DIR / "spatial_lissajous.json").read_text(encoding="utf-8")
-    )
+    task = TASK_CATALOG.task("spatial_lissajous_station_hold")
     trajectory = task["trajectory"]
 
-    assert task["label"] == "Spatial Lissajous"
-    assert task["compatible_modes"] == [
-        "station_hold",
-        "station_hold_fast",
-        "rl_policy",
-    ]
-    assert task["controller"] == "selected"
-    assert task["control_law"] == "selected"
-    assert task["name"] == "spatial_lissajous"
+    assert task["label"] == "Spatial Lissajous · 定点"
+    assert task["control_mode"] == "station_hold"
+    assert task["controller"] == "pid"
+    assert task["name"] == "spatial_lissajous_station_hold"
     assert task["trajectory_name"] == "spatial_lissajous"
     assert trajectory["trajectory_type"] == "spatial_lissajous"
-    assert trajectory["trajectory_speed_mps"] == 0.25
+    assert trajectory["trajectory_speed_mps"] == 0.1
     assert "period_s" not in trajectory
     assert [trajectory["center_x"], trajectory["center_y"], trajectory["center_z"]] == [
         2.71,
@@ -202,9 +178,9 @@ def test_spatial_lissajous_task_uses_one_name_everywhere():
         0.5,
     ]
     assert [trajectory["amp_x"], trajectory["amp_y"], trajectory["amp_z"]] == [
-        2.0,
-        1.0,
-        0.3,
+        1.8,
+        0.8,
+        0.2,
     ]
 
 
@@ -217,7 +193,7 @@ def test_rl_policy_runtime_and_hardware_authority_are_enabled():
     assert 'DeclareLaunchArgument("allow_rl_hardware", default_value="true")' in launch
     assert 'package="robotcore_policy_cpp"' in launch
     assert 'executable="t60_policy"' in launch
-    assert '"policy_name": "t60_precision_v7_model_499"' in launch
+    assert '"policy_name": "t60_precision_v17_model_400"' in launch
     assert '"policy_layout_hash"' not in launch
     assert 'allow_rl_hardware: true' in safety
     assert 'declare_parameter("allow_rl_hardware", true)' in authority
@@ -229,8 +205,7 @@ def test_tracking_experiment_waits_for_fresh_rl_policy_inference():
 
     assert 'PolicyStatus,' in source
     assert '"/policy/body/status"' in source
-    assert 'controller not in {' in source
-    assert '"rl",' in source
+    assert 'if controller == "pid":' in source
     assert "self.policy_status_sequence > controller_sequence_at_target" in source
     assert "and policy.loaded" in source
     assert "and policy.input_ready" in source
@@ -245,17 +220,11 @@ def test_planar_automatic_tasks_share_fixed_height_and_start_prelude():
     }
 
     for task_name, attitude_mode in expected.items():
-        task = json.loads(
-            (TASK_DIR / f"{task_name}.json").read_text(encoding="utf-8")
-        )
+        task = TASK_CATALOG.task(f"{task_name}_station_hold")
         trajectory = task["trajectory"]
 
-        assert task["compatible_modes"] == [
-            "station_hold",
-            "station_hold_fast",
-            "rl_policy",
-        ]
-        assert task["controller"] == "selected"
+        assert task["control_mode"] == "station_hold"
+        assert task["controller"] == "pid"
         assert task["trajectory_name"] == task_name
         assert trajectory["trajectory_type"] == task_name
         assert trajectory["attitude_mode"] == attitude_mode
@@ -263,12 +232,15 @@ def test_planar_automatic_tasks_share_fixed_height_and_start_prelude():
         assert trajectory["hold_before_motion_s"] == 25.0
         assert trajectory["move_duration_s"] == 15.0
         assert trajectory["trajectory_ramp_s"] == 10.0
+        assert trajectory["trajectory_speed_mps"] == 0.1
+        assert "period_s" not in trajectory
 
 
-def test_managed_task_defaults_keep_initial_altitude_at_point_nine_metres():
+def test_managed_task_altitude_is_data_not_python_default():
     source = TRACKING_EXPERIMENT_NODE.read_text(encoding="utf-8")
 
-    assert '"center_z": 0.9' in source
+    assert "SCENARIO_PARAMETER_DEFAULTS" not in source
+    assert TASK_CATALOG.task("station_hold_fast")["trajectory"]["center_z"] == 0.9
 
 
 def test_tracking_experiment_does_not_abort_an_already_canceled_goal():
@@ -325,6 +297,11 @@ def test_trajectory_envelope_contains_pose_hold_and_condition_limits():
     assert trajectory["max_angular_speed_rps"] == 0.60
     assert trajectory["attitude_min_rpy_deg"] == [-15.0, -15.0, -30.0]
     assert trajectory["attitude_max_rpy_deg"] == [15.0, 15.0, 30.0]
+    assert pid["configuration_ready"] is True
+    assert pid["station_position_kp"] == [0.30, 0.50]
+    assert pid["station_sway_rate_limit"] == 0.06
+    assert pid["fast_station_level_rate_limit_rps"] == [0.12, 0.12]
+    assert pid["derivative_cutoff_hz"] == 1.5
     assert pid["altitude_pwm_kp"] == 1.4
     assert pid["altitude_pwm_ki"] == 0.45
     assert pid["altitude_pwm_kd"] == 0.22
@@ -371,7 +348,7 @@ def test_trajectory_envelope_contains_pose_hold_and_condition_limits():
     assert pid["imu_orientation_filter_time_constant_s"] == 0.03
     assert '"control_rate_hz": 50.0' in EDGE_LAUNCH.read_text(encoding="utf-8")
 
-    task = json.loads((TASK_DIR / "pose_hold.json").read_text(encoding="utf-8"))
+    task = TASK_CATALOG.task("pose_hold")
     assert task["trajectory"]["manual_vertical_speed_mps"] <= trajectory[
         "max_linear_speed_mps"
     ]
@@ -401,15 +378,15 @@ def test_command_sources_are_isolated_and_authority_owns_final_output():
 
 
 def test_rosbag_topic_list_captures_target_state_pid_output_and_safety():
-    topics = set(
-        json.loads((TASK_DIR / "record_topics.json").read_text(encoding="utf-8"))["topics"]
+    topics_list, rates_hz, flush_interval_s, digest = load_recording_config(
+        RUNTIME_CONFIG / "recording.yaml"
     )
+    topics = set(topics_list)
 
     assert {
         "/robot/body_state",
         "/runtime/trajectory_target",
         "/runtime/tracking_status",
-        "/control/pid/wrench",
         "/control/manual/thruster_cmd",
         "/control/pid/thruster_cmd",
         "/policy/body/action",
@@ -419,17 +396,60 @@ def test_rosbag_topic_list_captures_target_state_pid_output_and_safety():
         "/safety/events",
         "/zedx/zed_node/odom",
     } <= topics
+    assert "/control/pid/wrench" not in topics
+    assert rates_hz == {
+        "thruster_cmd": 20.0,
+        "trajectory_target": 20.0,
+        "tracking_status": 20.0,
+        "control_authority_status": 10.0,
+        "pid_status": 10.0,
+    }
+    assert flush_interval_s == 0.25
+    assert len(digest) == 64
 
 
-def test_pid_node_exposes_station_live_document_and_direct_control():
+def test_recording_yaml_rejects_duplicate_missing_unknown_and_nonfinite_values(
+    tmp_path,
+):
+    valid = (RUNTIME_CONFIG / "recording.yaml").read_text(encoding="utf-8")
+    invalid_documents = (
+        (
+            valid.replace("schema_version: 1", "schema_version: 1\nschema_version: 1"),
+            "duplicate YAML key",
+        ),
+        (valid.replace("    pid_status: 10.0\n", ""), "is missing: pid_status"),
+        (
+            valid.replace(
+                "    pid_status: 10.0",
+                "    pid_status: 10.0\n    retired_stream: 1.0",
+            ),
+            "contains unknown keys: retired_stream",
+        ),
+        (
+            valid.replace("flush_interval_s: 0.25", "flush_interval_s: .nan"),
+            "must be finite",
+        ),
+    )
+    for index, (document, message) in enumerate(invalid_documents):
+        path = tmp_path / f"invalid_recording_{index}.yaml"
+        path.write_text(document, encoding="utf-8")
+        with pytest.raises(ValueError, match=message):
+            load_recording_config(path)
+
+
+def test_pid_node_uses_reviewed_ros_parameters_and_direct_control():
     source = PID_NODE.read_text(encoding="utf-8")
 
-    assert 'self.create_subscription(BodyState, "/robot/body_state"' in source
+    assert 'BodyState, "/robot/body_state", self.on_body, 1' in source
     assert 'self.declare_parameter("control_rate_hz", 50.0)' in source
-    assert 'self.create_service(GetPidConfig, "/control/pid/config", self.on_get_config)' in source
-    assert "response.config_json = json.dumps(" in source
-    assert "response.configuration_hash = self.configuration_hash" in source
-    assert 'ThrusterCommand, "/control/pid/thruster_cmd", 10' in source
+    assert 'self.declare_parameter("configuration_ready", False)' in source
+    assert 'self.declare_parameter("station_position_kp", [0.0, 0.0])' in source
+    assert 'self.declare_parameter("station_sway_rate_limit", 0.0)' in source
+    assert 'self.declare_parameter("derivative_cutoff_hz", 1.5)' in source
+    assert '"/control/pid/config"' not in source
+    assert '"/control/pid/reload"' not in source
+    assert '"/control/pid/wrench"' not in source
+    assert 'ThrusterCommand, "/control/pid/thruster_cmd", 1' in source
     assert source.count("self.create_subscription(") == 4
     assert 'ThrusterCommand, "/control/manual/thruster_cmd"' not in source
     assert '"/control/authority/status"' in source
@@ -447,7 +467,8 @@ def test_pid_node_exposes_station_live_document_and_direct_control():
     assert 'self.declare_parameter("imu_rate_history_samples", 5)' in source
     assert 'self.declare_parameter("imu_rate_filter_time_constant_s", 0.01)' in source
     assert 'self.declare_parameter("imu_orientation_filter_time_constant_s", 0.03)' in source
-    assert "qos_profile_sensor_data" in source
+    assert "QoSProfile(" in source
+    assert "ReliabilityPolicy.BEST_EFFORT" in source
     assert 'missing.append("/sensors/external_imu")' in source
     assert "external_imu_not_base_link" not in source
     assert "external_imu_angular_velocity_invalid" not in source
@@ -468,11 +489,8 @@ def test_pid_node_exposes_station_live_document_and_direct_control():
     assert "position_error_body = quaternion_apply(\n            map_to_body" in source
     assert "actual_linear_world = quaternion_apply(\n                localization_q, actual_linear_body" in source
     assert "direct_altitude_mode = altitude_mode or station_mode" in source
-    assert "wrench_for_commands(reference_commands)" not in source
-    assert "ThrusterAllocator" not in source
     assert "SixAxisPid" not in source
     assert '"thruster_config_path"' not in source
-    assert ".allocate(" not in source
 
     tracking_monitor = TRACKING_MONITOR_NODE.read_text(encoding="utf-8")
     assert "map_yaw = self.quaternion_to_rpy(localization_quat_w)[2]" in tracking_monitor
@@ -541,7 +559,7 @@ def test_pid_node_exposes_station_live_document_and_direct_control():
     assert "yaw_feedforward" in source
     assert "straight_lateral_maneuver" in source
     assert "sway_rate_limit" in source
-    assert "self.outer_position_kp[:2]" in source
+    assert "self.station_position_kp" in source
     assert 'trajectory_phase == "start_approach"' in source
     assert "target.trajectory_phase" in source
     assert 'getattr(target, "trajectory_phase"' not in source
@@ -579,10 +597,11 @@ def test_tracking_action_waits_with_ros_future_instead_of_asyncio_event_loop():
     assert "from rclpy.task import Future" in source
     assert "await self.wait_for_next_feedback(0.1)" in source
     assert "callback_group=self.wait_callback_group" in source
-    assert 'get_package_share_directory("robotcore_runtime")' not in source
-    assert "task = self.load_task(task_name)" in source
-    assert 'task.get("kind") != "tracking_task"' in source
-    assert 'str(task.get("name", "")) != task_name' in source
+    assert 'get_package_share_directory("robotcore_runtime")' in source
+    assert "self.task_catalog = TaskCatalog(" in source
+    assert "task_name = str(request.task_id)" in source
+    assert "task = self.task_catalog.task(task_name)" in source
+    assert "load_task" not in source
     assert "if task_name not in {" not in source
     assert '"tracking strategy is not approved"' not in source
 

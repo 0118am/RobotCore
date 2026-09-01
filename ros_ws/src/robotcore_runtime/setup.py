@@ -26,7 +26,6 @@ setup(
         "console_scripts": [
             "run_logger = robotcore_runtime.run_logger:main",
             "safety_monitor = robotcore_runtime.safety_monitor:main",
-            "task_manager = robotcore_runtime.task_manager:main",
             "trajectory_command_node = robotcore_runtime.trajectory_command_node:main",
             "tracking_monitor_node = robotcore_runtime.tracking_monitor_node:main",
             "tracking_experiment_node = robotcore_runtime.tracking_experiment_node:main",

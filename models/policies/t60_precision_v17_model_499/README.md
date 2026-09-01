@@ -1,15 +1,27 @@
-# t60_precision_v7 model_499
+# t60_precision_v17 model_499
 
 This package contains
-`auv_traj_policy_mlp_history_8_2026-08-29_model_499.onnx`, deployed verbatim as
-`policy.onnx`. Its SHA-256 is
-`181122f0463510c6a4a518e60d04a3451bbf058550e98fb349651725fda03be9`.
+`auv_traj_policy_v17_mlp_history_8_2026-08-31_model_499.onnx`, deployed
+verbatim as `policy.onnx`. Its SHA-256 is
+`b2150b223da1f92bde506d35d23d6a73551a4a1c0fd2976185d7393d4208e2a1`.
 The deployable contract is recorded in `policy.yaml` and implemented by
 `T60ObservationState`.
 
-The model consumes one 33-value current observation followed by 8 newest-first
-21-value history samples: 201 actor inputs spanning 320 ms of past state. It
-runs at 25 Hz and emits direct tanh-bounded T1..T8 actions in `[-1, 1]`.
+The model uses observation contract `t60_trajectory_obs_v11`: one 30-value
+current observation followed by 8 newest-first 21-value history samples, for
+198 actor inputs spanning 320 ms of past state. The current frame contains
+position error, target linear velocity, linear-velocity error, attitude error,
+measured and target angular velocity, target linear acceleration, and the
+previous motor command. Each history frame contains position error,
+linear-velocity error, attitude error, angular-velocity error defined as
+`measured - target`, and the previous motor command. Inputs are divided by the
+fixed physical scales recorded in the manifest; they are not raw SI values and
+do not use running normalization.
+
+The ONNX tensors are `obs[1,198]` and `actions[1,8]`. The model runs at 25 Hz
+and emits direct tanh-bounded T1..T8 actions in `[-1, 1]`.
+The training critic consumes the same 198 values plus 60 privileged values
+(258 total); the deployable ONNX contains only the actor.
 
 Use `t60_policy_shadow.launch.py` for inference-only validation. That launch
 publishes only `/policy/body/action`; it does not request command authority,

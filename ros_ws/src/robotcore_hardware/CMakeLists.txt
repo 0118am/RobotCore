@@ -38,7 +38,6 @@ ament_target_dependencies(aboard_bridge_node diagnostic_msgs diagnostic_updater 
 install(TARGETS aboard_protocol aboard_bridge_node
   ARCHIVE DESTINATION lib LIBRARY DESTINATION lib RUNTIME DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
-install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)

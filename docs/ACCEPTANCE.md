@@ -81,11 +81,13 @@ This file defines the first-stage system-chain acceptance target.
 
 ## UI
 
-- [ ] The independent UI displays body, policy, safety, and logging status.
+- [ ] The independent UI displays AprilTag editing/relocalisation, external-IMU
+      calibration, Jetson fan/temperature, trajectory/HUD, PWM limit and
+      MCU-applied PWM, plus the safety state needed to interpret them.
 - [ ] The UI front-camera panel uses `/stream/camera/front.mjpg` and receives a
       multipart image frame with JPEG or PNG payload bytes.
 - [ ] The `Angular xyz` readout is sourced from `/sensors/external_imu`.
-- [ ] The UI can trigger `/safety/abort`.
+- [ ] The UI has no robot-lifecycle, policy-editing, arbitrary-task, or abort API.
 
 ## Logging and Replay
 

@@ -10,12 +10,14 @@ services, and actions.
 
 | Area | Owner | Entry point |
 | --- | --- | --- |
-| Camera, telemetry, policy status, task controls, emergency abort | `control_interface` | browser -> HTTP/SSE -> ROS 2 |
+| Required operator visuals, manual input and validated task controls | `control_interface` | browser -> WebSocket/REST -> ROS 2 or local map socket |
 | Thruster command safety, Aquaboard protocol, failsafe | ROS runtime/hardware | ROS 2 -> Aquaboard |
-| Start/stop the ROS graph and web service | host manager | `robotcore-hostctl` Unix socket; ControlInterface exposes only RobotCore Start/Stop |
+| Start/stop the ROS graph and web service | host manager | `robotcore-hostctl` Unix socket; no browser lifecycle API |
 | Device identity and Linux permissions | host manager | udev + systemd |
 | Host configuration, journald logs, run storage and rosbag freshness | host manager | read-only status / allowlisted lifecycle calls |
-| AprilTag map, PID profiles, and tracking task files | host manager | local socket, atomic JSON writes |
+| AprilTag map | host manager | local socket, atomic JSON writes |
+| PID parameters | RobotCore | reviewed ROS parameter YAML |
+| Tracking task catalog | RobotCore runtime | startup-validated `tracking_tasks.yaml` |
 | Software upgrade and target flashing | maintenance workflow | local, audited, physical-maintenance only |
 
 The host manager deliberately has **no HTTP endpoint**, does not accept shell
@@ -51,11 +53,10 @@ sudo robotcore-hostctl restart --service robot
 ```
 
 The daemon only permits `status`, `devices`, `rosbag-status`, `logs`, `start`,
-`stop`, `restart`, `maintenance-status`, AprilTag map operations, `pid-config`,
-and `pid-save`. It cannot execute an upgrade or flash. PID documents are stored
-below the root-owned `/var/lib/robotcore/config` tree configured by
-`control_config`. Task documents belong to ControlInterface and are not managed
-by this daemon. AprilTag updates and deletion are disabled
+`stop`, `restart`, `maintenance-status`, and AprilTag map operations. It cannot
+execute an upgrade or flash. PID parameters belong to RobotCore's reviewed ROS
+parameter YAML and are not editable through this daemon. The RobotCore task
+catalog is not managed by this daemon. AprilTag updates and deletion are disabled
 until `apriltag_map.web_edit_enabled` is explicitly enabled in root-owned
 configuration.
 

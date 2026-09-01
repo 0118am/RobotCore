@@ -38,14 +38,14 @@ def test_automatic_targets_accept_either_selected_station_controller():
     assert compatible("station_hold", "station_hold") is False
 
 
-def test_automatic_target_controller_is_selected_only_from_mode():
-    task = {"controller": "selected"}
+def test_automatic_target_is_selected_only_by_validated_task_id():
+    source = inspect.getsource(TrackingExperimentNode.execute)
 
-    assert TrackingExperimentNode.resolve_controller(task, "station_hold") == "pid"
-    assert (
-        TrackingExperimentNode.resolve_controller(task, "station_hold_fast") == "pid"
-    )
-    assert TrackingExperimentNode.resolve_controller(task, "rl_policy") == "rl"
+    assert "request.task_id" in source
+    assert "self.task_catalog.task(task_name)" in source
+    assert 'controller = str(task["controller"])' in source
+    assert "str(request.controller)" not in source
+    assert "resolve_controller" not in source
 
 
 def test_trajectory_uses_ekf_position_and_heading_with_imu_tilt_and_rates():
@@ -54,7 +54,8 @@ def test_trajectory_uses_ekf_position_and_heading_with_imu_tilt_and_rates():
     imu_callback = inspect.getsource(TrajectoryCommandNode.on_imu)
 
     assert 'self.declare_parameter("imu_topic", "/sensors/external_imu")' in source
-    assert "qos_profile_sensor_data" in source
+    assert "QoSProfile(" in source
+    assert "ReliabilityPolicy.BEST_EFFORT" in source
     assert "msg.pose.orientation" in body_callback
     assert "self.latest_position = position" in body_callback
     assert "self.latest_map_yaw" in body_callback
@@ -454,15 +455,32 @@ def test_circle_racetrack_and_straight_line_are_periodic_planar_paths():
         "radius_m": 1.2,
         "amp_x": 2.3,
         "amp_y": 1.2,
-        "period_s": 100.0,
+        "trajectory_speed_mps": 0.1,
         "trajectory_ramp_s": 10.0,
     }
     trajectory.get_parameter = lambda name: SimpleNamespace(value=parameters[name])
 
+    periods = {
+        "circle": 2.0 * np.pi * parameters["radius_m"] / 0.1,
+        "racetrack": (
+            4.0 * (parameters["amp_x"] - parameters["amp_y"])
+            + 2.0 * np.pi * parameters["amp_y"]
+        )
+        / 0.1,
+        "straight_line": 2.0 * np.pi * parameters["amp_x"] / 0.1,
+    }
     for trajectory_type in ("circle", "racetrack", "straight_line"):
         start = trajectory.trajectory_kinematics(trajectory_type, 0.0)
         ramped = trajectory.trajectory_kinematics(trajectory_type, 10.0)
-        repeated = trajectory.trajectory_kinematics(trajectory_type, 110.0)
+        repeated = trajectory.trajectory_kinematics(
+            trajectory_type, 10.0 + periods[trajectory_type]
+        )
+        speeds = [
+            np.linalg.norm(
+                trajectory.trajectory_kinematics(trajectory_type, float(time_s))[1]
+            )
+            for time_s in np.linspace(10.0, 10.0 + periods[trajectory_type], 1001)
+        ]
 
         assert start[0][2] == 0.0
         assert np.allclose(start[1], np.zeros(3))
@@ -470,6 +488,8 @@ def test_circle_racetrack_and_straight_line_are_periodic_planar_paths():
         assert ramped[1][2] == 0.0
         assert np.allclose(ramped[0], repeated[0])
         assert np.allclose(ramped[1], repeated[1])
+        assert max(speeds) <= 0.1 + 1.0e-12
+        assert np.isclose(max(speeds), 0.1, atol=1.0e-6)
 
     circle_start = trajectory.circle_kinematics(0.0)
     racetrack_start = trajectory.racetrack_kinematics(0.0)
@@ -495,7 +515,7 @@ def test_each_automatic_path_approaches_its_own_deterministic_start_at_half_metr
         "radius_m": 1.2,
         "amp_x": 2.3,
         "amp_y": 1.2,
-        "period_s": 100.0,
+        "trajectory_speed_mps": 0.1,
         "trajectory_ramp_s": 10.0,
         "move_duration_s": 15.0,
         "trajectory_type": "circle",
@@ -543,7 +563,6 @@ def test_spatial_lissajous_envelope_fits_pool_and_rl_speed_limits():
         "amp_y": 0.75,
         "amp_z": 0.25,
         "trajectory_speed_mps": 0.1,
-        "period_s": 16.0,
         "trajectory_ramp_s": 10.0,
         "move_duration_s": 15.0,
         "hold_before_motion_s": 25.0,
@@ -619,7 +638,7 @@ def test_new_planar_trajectory_envelopes_fit_the_pool_at_half_metre():
         "radius_m": 1.2,
         "amp_x": 2.3,
         "amp_y": 1.2,
-        "period_s": 100.0,
+        "trajectory_speed_mps": 0.1,
         "trajectory_ramp_s": 10.0,
         "move_duration_s": 15.0,
         "hold_before_motion_s": 25.0,

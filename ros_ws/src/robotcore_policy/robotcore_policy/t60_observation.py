@@ -1,4 +1,4 @@
-"""Observation state machine for the t60_precision_v7 trajectory policy.
+"""Observation state machine for the t60_precision_v17 trajectory policy.
 
 Pose and linear velocity come from RobotCore BodyState, angular velocity comes
 from the base_link external IMU, and previous action comes from the canonical
@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 
 
-OBSERVATION_LAYOUT = "t60_precision_v7_history8"
+OBSERVATION_LAYOUT = "t60_trajectory_obs_v11"
 
 OBS_SCALE = np.asarray(
     [
@@ -24,9 +24,6 @@ OBS_SCALE = np.asarray(
         0.20,
         0.20,
         0.20,
-        1.00,
-        1.00,
-        1.00,
         1.00,
         1.00,
         1.00,
@@ -52,37 +49,62 @@ OBS_SCALE = np.asarray(
     dtype=np.float32,
 )
 
-HISTORY_INDICES = np.r_[0:3, 6:13, 16:19, 25:33]
+HISTORY_SCALE = np.asarray(
+    [
+        0.25,
+        0.25,
+        0.25,
+        0.20,
+        0.20,
+        0.20,
+        1.00,
+        1.00,
+        1.00,
+        1.00,
+        0.80,
+        0.80,
+        0.80,
+        1.00,
+        1.00,
+        1.00,
+        1.00,
+        1.00,
+        1.00,
+        1.00,
+        1.00,
+    ],
+    dtype=np.float32,
+)
 
 
 class T60ObservationState:
-    """Build the exact 33 + 8*21 observation expected by model_499.
+    """Build the exact 30 + 8*21 observation expected by v17/history-8.
 
     History is committed only after a successful inference. The command in each
     frame is the canonical post-authority command accepted by the vehicle.
     """
 
-    current_dim = 33
+    current_dim = 30
     history_length = 8
     history_sample_dim = 21
-    observation_dim = 201
+    observation_dim = 198
     action_dim = 8
 
     def __init__(self):
         self.history = np.zeros(
             (self.history_length, self.history_sample_dim), dtype=np.float32
         )
-        self._pending_obs33 = None
+        self._pending_history_frame = None
 
     def reset(self):
         self.history.fill(0.0)
-        self._pending_obs33 = None
+        self._pending_history_frame = None
 
     def build(self, observation):
-        """Return a contiguous float32 array with shape ``(1, 201)``."""
+        """Return a contiguous float32 array with shape ``(1, 198)``."""
 
-        obs33 = self.build_current_frame(observation)
-        policy_input = np.concatenate((obs33, self.history.reshape(-1))).astype(
+        obs30, history_frame = self._build_frames(observation)
+        policy_input = np.concatenate((obs30, self.history.reshape(-1))).astype(
             np.float32, copy=False
         )
         if policy_input.shape != (self.observation_dim,):
@@ -92,19 +114,19 @@ class T60ObservationState:
             )
         if not np.all(np.isfinite(policy_input)):
             raise RuntimeError("t60 observation contains a non-finite value")
-        self._pending_obs33 = obs33.copy()
+        self._pending_history_frame = history_frame.copy()
         return np.ascontiguousarray(policy_input.reshape(1, -1))
 
     def commit(self):
         """Commit the just-inferred observation frame to newest-first history."""
 
-        if self._pending_obs33 is None:
+        if self._pending_history_frame is None:
             raise RuntimeError("cannot commit t60 history before building an observation")
         self.history[1:] = self.history[:-1].copy()
-        self.history[0] = self._pending_obs33[HISTORY_INDICES]
-        self._pending_obs33 = None
+        self.history[0] = self._pending_history_frame
+        self._pending_history_frame = None
 
-    def build_current_frame(self, observation):
+    def _build_frames(self, observation):
         body = observation.get("/robot/body_state", {})
         external_imu = observation.get("/sensors/external_imu", {})
         thruster_command = observation.get("/control/thruster_cmd", {})
@@ -174,35 +196,48 @@ class T60ObservationState:
         attitude_error_quat = self._quat_unique(
             self._quat_multiply(q_bw, target_quaternion_w)
         )
-        projected_gravity_b = self._quat_apply(
-            q_bw, np.asarray([0.0, 0.0, -1.0], dtype=np.float32)
-        )
         target_angular_velocity_b = self._quat_apply(
             q_bw, target_angular_velocity_w
+        )
+        angular_velocity_error_b = (
+            target_angular_velocity_b - measured_angular_velocity_b
         )
         target_linear_acceleration_b = self._quat_apply(
             q_bw, target_linear_acceleration_w
         )
 
-        raw_obs33 = np.concatenate(
+        raw_obs30 = np.concatenate(
             (
                 position_error_b,
                 target_linear_velocity_b,
                 linear_velocity_error_b,
                 attitude_error_quat,
-                projected_gravity_b,
                 measured_angular_velocity_b,
                 target_angular_velocity_b,
                 target_linear_acceleration_b,
                 previous_command,
             )
         ).astype(np.float32, copy=False)
-        if raw_obs33.shape != (self.current_dim,):
+        if raw_obs30.shape != (self.current_dim,):
             raise RuntimeError(
-                f"t60 current observation has shape {raw_obs33.shape}, expected "
+                f"t60 current observation has shape {raw_obs30.shape}, expected "
                 f"({self.current_dim},)"
             )
-        return raw_obs33 / OBS_SCALE
+        raw_history_frame = np.concatenate(
+            (
+                position_error_b,
+                linear_velocity_error_b,
+                attitude_error_quat,
+                angular_velocity_error_b,
+                previous_command,
+            )
+        ).astype(np.float32, copy=False)
+        if raw_history_frame.shape != (self.history_sample_dim,):
+            raise RuntimeError(
+                f"t60 history frame has shape {raw_history_frame.shape}, expected "
+                f"({self.history_sample_dim},)"
+            )
+        return raw_obs30 / OBS_SCALE, raw_history_frame / HISTORY_SCALE
 
     @staticmethod
     def _vec3(values, label):

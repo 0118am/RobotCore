@@ -14,7 +14,7 @@ import numpy as np
 import rclpy
 from geometry_msgs.msg import TwistStamped
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Imu
 from std_srvs.srv import Trigger
 
@@ -45,6 +45,9 @@ class TrajectoryCommandNode(Node):
 
     def __init__(self):
         super().__init__("trajectory_command_node")
+        sensor_qos = QoSProfile(
+            depth=1, reliability=ReliabilityPolicy.BEST_EFFORT
+        )
         self.declare_parameter("trajectory_type", "hold")
         self.declare_parameter("control_mode", "idle")
         self.declare_parameter("publish_rate_hz", 10.0)
@@ -101,25 +104,25 @@ class TrajectoryCommandNode(Node):
         self.envelope_checked = False
         self.envelope_valid = False
         self.envelope_rejection_reason = ""
-        self.pub = self.create_publisher(TrajectoryTarget, "/runtime/trajectory_target", 10)
-        self.create_subscription(BodyState, "/robot/body_state", self.on_body_state, 10)
+        self.pub = self.create_publisher(TrajectoryTarget, "/runtime/trajectory_target", 1)
+        self.create_subscription(BodyState, "/robot/body_state", self.on_body_state, 1)
         self.create_subscription(
             Imu,
             str(self.get_parameter("imu_topic").value),
             self.on_imu,
-            qos_profile_sensor_data,
+            sensor_qos,
         )
         self.create_subscription(
             TwistStamped,
             "/runtime/operator_target_input",
             self.on_operator_target_input,
-            20,
+            1,
         )
         self.create_subscription(
             ThrusterCommand,
             "/control/manual/thruster_cmd",
             self.on_manual_command,
-            20,
+            1,
         )
         self.create_service(
             Trigger, "/runtime/trajectory/reset", self.on_reset_scenario
@@ -742,16 +745,19 @@ class TrajectoryCommandNode(Node):
         )
         return TrajectorySample(position=position, velocity=velocity, acceleration=acceleration)
 
-    def phase_kinematics(self, time_s: float):
-        """Return ramped periodic phase and its first two time derivatives."""
+    def phase_kinematics(self, time_s: float, distance_per_phase: float):
+        """Return a ramped phase capped by the configured linear path speed."""
 
-        period = max(0.1, float(self.get_parameter("period_s").value))
-        phase_time, phase_rate, phase_acceleration = self.ramped_time_kinematics(
+        path_speed = abs(float(self.get_parameter("trajectory_speed_mps").value))
+        distance_per_phase = abs(float(distance_per_phase))
+        if path_speed <= 0.0 or distance_per_phase <= 1.0e-9:
+            return 0.0, 0.0, 0.0
+        phase_time, time_rate, time_acceleration = self.ramped_time_kinematics(
             time_s
         )
-        phase = 2.0 * math.pi * phase_time / period
-        phase_dot = 2.0 * math.pi * phase_rate / period
-        phase_ddot = 2.0 * math.pi * phase_acceleration / period
+        phase = path_speed * phase_time / distance_per_phase
+        phase_dot = path_speed * time_rate / distance_per_phase
+        phase_ddot = path_speed * time_acceleration / distance_per_phase
         return phase, phase_dot, phase_ddot
 
     def ramped_time_kinematics(self, time_s: float):
@@ -897,7 +903,7 @@ class TrajectoryCommandNode(Node):
         """Return a counter-clockwise circle starting with map-forward tangent."""
 
         radius = abs(float(self.get_parameter("radius_m").value))
-        phase, phase_dot, phase_ddot = self.phase_kinematics(time_s)
+        phase, phase_dot, phase_ddot = self.phase_kinematics(time_s, radius)
         return self.compose_kinematics(
             (radius * math.sin(phase), -radius * math.cos(phase), 0.0),
             (radius * math.cos(phase), radius * math.sin(phase), 0.0),
@@ -915,7 +921,10 @@ class TrajectoryCommandNode(Node):
         )
         straight_half_length = outer_half_length - radius
         lap_length = 4.0 * straight_half_length + 2.0 * math.pi * radius
-        phase, phase_dot, phase_ddot = self.phase_kinematics(time_s)
+        distance_per_phase = lap_length / (2.0 * math.pi)
+        phase, phase_dot, phase_ddot = self.phase_kinematics(
+            time_s, distance_per_phase
+        )
         distance = (phase % (2.0 * math.pi)) * lap_length / (2.0 * math.pi)
 
         straight_length = 2.0 * straight_half_length
@@ -961,7 +970,9 @@ class TrajectoryCommandNode(Node):
         """Return a smooth out-and-back line while keeping map-forward heading."""
 
         half_length = abs(float(self.get_parameter("amp_x").value))
-        phase, phase_dot, phase_ddot = self.phase_kinematics(time_s)
+        # A sinusoidal reversal avoids a discontinuous velocity command.  Scaling
+        # phase by half_length makes trajectory_speed_mps the peak linear speed.
+        phase, phase_dot, phase_ddot = self.phase_kinematics(time_s, half_length)
         offset = (-half_length * math.cos(phase), 0.0, 0.0)
         first = (half_length * math.sin(phase), 0.0, 0.0)
         second = (half_length * math.cos(phase), 0.0, 0.0)
@@ -1301,19 +1312,42 @@ class TrajectoryCommandNode(Node):
                         "automatic trajectory start approach exceeds configured limits"
                     )
                     return False
+        path_speed = max(
+            1.0e-9,
+            abs(float(self.get_parameter("trajectory_speed_mps").value)),
+        )
         if trajectory_type == "spatial_lissajous":
             _phases, cumulative_length = self.lissajous_arc_table(
                 abs(float(self.get_parameter("amp_x").value)),
                 abs(float(self.get_parameter("amp_y").value)),
                 abs(float(self.get_parameter("amp_z").value)),
             )
-            path_speed = max(
-                1.0e-9,
-                abs(float(self.get_parameter("trajectory_speed_mps").value)),
-            )
             path_duration = float(cumulative_length[-1]) / path_speed
+        elif trajectory_type == "circle":
+            path_duration = (
+                2.0
+                * math.pi
+                * abs(float(self.get_parameter("radius_m").value))
+                / path_speed
+            )
+        elif trajectory_type == "racetrack":
+            radius = max(
+                1.0e-6, abs(float(self.get_parameter("amp_y").value))
+            )
+            outer_half_length = max(
+                radius, abs(float(self.get_parameter("amp_x").value))
+            )
+            lap_length = (
+                4.0 * (outer_half_length - radius) + 2.0 * math.pi * radius
+            )
+            path_duration = lap_length / path_speed
         else:
-            path_duration = float(self.get_parameter("period_s").value)
+            path_duration = (
+                2.0
+                * math.pi
+                * abs(float(self.get_parameter("amp_x").value))
+                / path_speed
+            )
         duration = max(
             path_duration
             + max(0.0, float(self.get_parameter("trajectory_ramp_s").value)),

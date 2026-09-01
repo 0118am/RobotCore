@@ -1,6 +1,0 @@
-body_policy:
-  default_policy: dummy_body_policy
-  default_manifest: models/policies/dummy_body_policy/policy.yaml
-  required_inputs:
-    - /robot/body_state
-  output_topic: /policy/body/action

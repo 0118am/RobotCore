@@ -53,15 +53,15 @@ def test_apriltag_map_has_one_json_authority():
 def test_apriltag_localizer_publishes_one_quality_gated_absolute_measurement():
     localization = (CORE_ROOT / "ros_ws/src/robotcore_sensors/src/apriltag_map_localizer_component.cpp").read_text()
     fusion = (CORE_ROOT / "ros_ws/src/robotcore_sensors/src/vio_tag_fusion_component.cpp").read_text()
-    edge_launch = (
-        CORE_ROOT / "ros_ws/src/robotcore_bringup/launch/robotcore_edge_system.launch.py"
+    localization_config = (
+        CORE_ROOT / "ros_ws/src/robotcore_sensors/config/localization.yaml"
     ).read_text(encoding="utf-8")
 
     assert '"minimum_pose_tag_count", 1' in localization
     assert '"minimum_inlier_corners_per_tag", 3' in localization
-    assert '"minimum_pose_tag_count": 1' in edge_launch
+    assert "minimum_pose_tag_count: 1" in localization_config
     assert '"single_tag_max_reprojection_rms_px", 1.5' in localization
-    assert '"single_tag_max_reprojection_rms_px": 1.5' in edge_launch
+    assert "single_tag_max_reprojection_rms_px: 1.5" in localization_config
     assert "inliers = (cv::Mat_<int>(4, 1) << 0, 1, 2, 3)" in localization
     assert "independently_supported_tag_indices(" in localization
     assert "estimate.inlier_tag_count < min_tags_" in localization
@@ -84,20 +84,24 @@ def test_apriltag_reprojection_and_alignment_innovation_gates_are_explicit_in_cp
     edge_launch = (
         CORE_ROOT / "ros_ws/src/robotcore_bringup/launch/robotcore_edge_system.launch.py"
     ).read_text(encoding="utf-8")
+    localization_config = (
+        CORE_ROOT / "ros_ws/src/robotcore_sensors/config/localization.yaml"
+    ).read_text(encoding="utf-8")
 
     assert '"max_reprojection_rms_px", 3.0' in localization
-    assert '"max_reprojection_rms_px": 3.0' in edge_launch
+    assert "max_reprojection_rms_px: 3.0" in localization_config
     assert "solvePnPRansac" in localization
     assert '"multi_tag_position_stddev_m", 0.05' in localization
-    assert '"multi_tag_position_stddev_m": 0.05' in edge_launch
+    assert "multi_tag_position_stddev_m: 0.05" in localization_config
     assert "max_translation_jump_m" not in localization
     assert "max_translation_jump_m" not in edge_launch
     assert '"tag_pose_gate_chi2", 16.266' in fusion
     assert "tag_gate_chi2_" in fusion
     assert "++tag_gate_rejections_" in fusion
     assert '"use_vio"' not in edge_launch
-    assert '"vio_arrival_timeout_s": 0.80' in edge_launch
-    assert '"vio_prediction_horizon_s": 0.80' in edge_launch
+    assert "vio_arrival_timeout_s: 0.80" in localization_config
+    assert "vio_prediction_horizon_s: 0.80" in localization_config
+    assert 'LaunchConfiguration("localization_config")' in edge_launch
     assert 'plugin="robotcore_sensors::VioTagFusionComponent"' in edge_launch
     assert "continuous_rejection_reanchor_required(" not in fusion
     assert "MeasurementResult replay(" in fusion
@@ -164,11 +168,10 @@ def test_apriltag_image_path_is_bounded_and_localizer_consumes_only_detections()
     assert "publish_imu: false" in camera_config
     assert "enable_24bit_output: true" in camera_config
     assert 'default_value="/zedx/zed_node/rgb/color/rect/image"' in edge_launch
-    assert 'default_value="/zedx/zed_node/rgb/color/rect/image/compressed"' in edge_launch
     assert '("image", LaunchConfiguration("front_camera_raw_topic"))' in edge_launch
     assert "apriltag_cuda_input_topic" not in edge_launch
     assert "ImageFormatConverterNode" not in edge_launch
-    assert '"front_camera_compressed_topic": LaunchConfiguration(' in edge_launch
+    assert "front_camera_compressed_topic" not in edge_launch
     assert '".zed_node":' in camera_config
     assert "jpeg_quality: 80" in camera_config
 
@@ -208,6 +211,7 @@ def test_web_bridge_consumes_robot_core_contract_without_owning_devices_or_maps(
     assert "dialout" not in web_unit
     assert "exec ros2 launch zed_wrapper zed_camera.launch.py" in edge_launch
     assert 'LaunchConfiguration("zed_serial_number")' in edge_launch
+    assert 'package="control_interface"' not in edge_launch
     for forbidden in (
         "manual_thruster_serial",
         "manual_thruster_span_us",
@@ -217,11 +221,7 @@ def test_web_bridge_consumes_robot_core_contract_without_owning_devices_or_maps(
     ):
         assert forbidden not in bridge
 
-    hardware_node_start = edge_launch.index('package="robotcore_hardware"')
-    web_node_start = edge_launch.index('package="control_interface"')
-    hardware_node = edge_launch[hardware_node_start:web_node_start]
-    web_node = edge_launch[web_node_start:]
-    assert '"span_us": ParameterValue(' not in hardware_node
+    assert '"span_us": ParameterValue(' not in edge_launch
     assert "manual_thruster_span_us" not in edge_launch
 
 
@@ -299,6 +299,9 @@ def test_operator_telemetry_uses_canonical_body_and_imu_topics():
     web = (
         WEB_ROOT / "control_interface/control_interface/web_operator_node.py"
     ).read_text(encoding="utf-8")
+    web_config = (
+        WEB_ROOT / "control_interface/config/web_operator.yaml"
+    ).read_text(encoding="utf-8")
 
     assert '"/sensors/external_imu"' in bridge
     assert 'message.header.frame_id = "base_link"' in bridge
@@ -307,13 +310,11 @@ def test_operator_telemetry_uses_canonical_body_and_imu_topics():
     assert '"/ui/body_state"' not in fusion
     assert '"/ui/thruster_cmd"' not in authority
     assert "ui_command_pub_" not in authority
-    assert 'self.declare_parameter("body_topic", "/robot/body_state")' in web
-    assert 'self.declare_parameter("imu_topic", "/sensors/external_imu")' in web
-    assert 'self.declare_parameter("thruster_command_topic", "/control/thruster_cmd")' in web
-    assert (
-        '"manual_thruster_command_topic", "/control/manual/thruster_cmd"'
-        in web
-    )
+    assert "body_topic: /robot/body_state" in web_config
+    assert "imu_topic: /sensors/external_imu" in web_config
+    assert "thruster_command_topic: /control/thruster_cmd" in web_config
+    assert "manual_thruster_command_topic: /control/manual/thruster_cmd" in web_config
+    assert 'declare_parameter("body_topic"' not in web
     assert '"/control/pwm_limit_us"' not in authority
     assert '"/control/pwm_limit_us"' not in web
 
@@ -324,3 +325,32 @@ def test_cpp_localization_has_no_uninstalled_python_shadow_implementation():
 
     assert not any(legacy_package.glob("*.py"))
     assert not legacy_config.exists()
+
+
+def test_retired_runtime_logic_and_configs_do_not_return():
+    retired_paths = [
+        "ros_ws/src/robotcore_bringup/config/system.yaml",
+        "ros_ws/src/robotcore_control/config/conditions.yaml",
+        "ros_ws/src/robotcore_control/config/control.yaml",
+        "ros_ws/src/robotcore_control/config/warpauv_thrusters.yaml",
+        "ros_ws/src/robotcore_hardware/config/hardware.yaml",
+        "ros_ws/src/robotcore_policy/config/policy_runtime.yaml",
+        "scripts/robotcore_create_run_dir.py",
+    ]
+    for relative in retired_paths:
+        assert not (CORE_ROOT / relative).exists(), relative
+
+    pid_node = (
+        CORE_ROOT
+        / "ros_ws/src/robotcore_control/robotcore_control/six_dof_pid_node.py"
+    ).read_text(encoding="utf-8")
+    policy_cpp = (
+        CORE_ROOT / "ros_ws/src/robotcore_policy_cpp/src/t60_policy_node.cpp"
+    ).read_text(encoding="utf-8")
+    web_operator = (
+        WEB_ROOT / "control_interface/control_interface/web_operator_node.py"
+    ).read_text(encoding="utf-8")
+
+    assert "reset_imu_conditioning" not in pid_node
+    assert "kEXPLICIT_BATCH" not in policy_cpp
+    assert "_fail_imu_calibration" not in web_operator

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Imu
 from std_msgs.msg import Float32MultiArray, String
 
@@ -25,7 +25,7 @@ from robotcore_interfaces.srv import SetPolicy
 
 from .action_decoder import decode_thruster_action
 from .observation_builder import ObservationBuilder
-from .policy_manifest import load_policy_manifest
+from .policy_manifest import PolicyManifest, load_policy_manifest
 from .runners.factory import create_runner
 
 
@@ -34,6 +34,9 @@ class BodyPolicyNode(Node):
 
     def __init__(self):
         super().__init__("body_policy_node")
+        sensor_qos = QoSProfile(
+            depth=1, reliability=ReliabilityPolicy.BEST_EFFORT
+        )
         self.declare_parameter("policy_name", "dummy_body_policy")
         self.declare_parameter("policy_path", "models/policies/dummy_body_policy/policy.yaml")
         # Zero selects the control rate declared by the policy manifest.
@@ -55,31 +58,31 @@ class BodyPolicyNode(Node):
         )
 
         self.action_pub = self.create_publisher(
-            Float32MultiArray, "/policy/body/action", 10
+            Float32MultiArray, "/policy/body/action", 1
         )
         self.status_pub = self.create_publisher(
-            PolicyStatus, "/policy/body/status", 10
+            PolicyStatus, "/policy/body/status", 1
         )
-        self.create_subscription(BodyState, "/robot/body_state", self.on_body_state, 10)
+        self.create_subscription(BodyState, "/robot/body_state", self.on_body_state, 1)
         self.create_subscription(
             Imu,
             "/sensors/external_imu",
             self.on_external_imu,
-            qos_profile_sensor_data,
+            sensor_qos,
         )
         self.create_subscription(
             TrajectoryTarget,
             "/runtime/trajectory_target",
             self.on_trajectory_target,
-            10,
+            1,
         )
         self.create_subscription(
             ThrusterCommand,
             "/control/thruster_cmd",
             self.on_thruster_command,
-            10,
+            1,
         )
-        self.create_subscription(String, "/runtime/run_dir", self.on_run_dir, 10)
+        self.create_subscription(String, "/runtime/run_dir", self.on_run_dir, 1)
         self.create_service(SetPolicy, "/policy/body/set_policy", self.on_set_policy)
 
         self.timer = self.create_timer(1.0 / self.policy_rate_hz(), self.tick)
@@ -90,33 +93,53 @@ class BodyPolicyNode(Node):
         previous_runner = getattr(self, "runner", None)
         if previous_runner is not None:
             previous_runner.close()
-        self.manifest = load_policy_manifest(path, name, self.role)
-        required_inputs = self.manifest.input_schema or ["/robot/body_state"]
-        max_input_age_s = float(
-            self.manifest.isaac_contract.get("max_input_age_s", 1.0)
-        )
-        self.builder = ObservationBuilder(
-            required_inputs,
-            max_age_ns=max(1, int(max_input_age_s * 1_000_000_000)),
-        )
-        self.body_state_history.clear()
-        self.external_imu_history.clear()
-        self.state_delay_ns = max(
-            0,
-            int(
-                float(self.manifest.isaac_contract.get("state_delay_s", 0.0))
-                * 1_000_000_000
-            ),
-        )
-        self.last_input_ready = False
-        self.last_runtime_error = ""
         self.runner = None
         self.load_error = ""
+        self.body_state_history.clear()
+        self.external_imu_history.clear()
+        self.last_input_ready = False
+        self.last_runtime_error = ""
+
         try:
-            self.runner = create_runner(self.manifest)
+            manifest = load_policy_manifest(path, name, self.role)
+            required_inputs = manifest.input_schema or ["/robot/body_state"]
+            max_input_age_s = float(
+                manifest.isaac_contract.get("max_input_age_s", 1.0)
+            )
+            builder = ObservationBuilder(
+                required_inputs,
+                max_age_ns=max(1, int(max_input_age_s * 1_000_000_000)),
+            )
+            state_delay_ns = max(
+                0,
+                int(
+                    float(manifest.isaac_contract.get("state_delay_s", 0.0))
+                    * 1_000_000_000
+                ),
+            )
         except Exception as exc:
-            self.load_error = str(exc)
+            self.manifest = PolicyManifest(
+                name=str(name).strip() or "invalid_policy",
+                role=self.role,
+                runner="invalid",
+                model_path=str(path),
+            )
+            self.builder = ObservationBuilder(
+                ["/robot/body_state"], max_age_ns=1_000_000_000
+            )
+            self.state_delay_ns = 0
+            self.load_error = f"policy manifest rejected: {exc}"
             self.get_logger().warn(self.load_error)
+        else:
+            self.manifest = manifest
+            self.builder = builder
+            self.state_delay_ns = state_delay_ns
+            try:
+                self.runner = create_runner(self.manifest)
+            except Exception as exc:
+                self.load_error = str(exc)
+                self.get_logger().warn(self.load_error)
+
         if hasattr(self, "timer"):
             self.destroy_timer(self.timer)
             self.timer = self.create_timer(1.0 / self.policy_rate_hz(), self.tick)
@@ -338,8 +361,8 @@ class BodyPolicyNode(Node):
     def write_policy_io(self, observation, action):
         if not self.io_path:
             return
-        # Log keys rather than full observation payloads for the initial
-        # skeleton; large image/depth data should live in rosbag2.
+        # Log keys rather than full observation payloads; large image/depth data
+        # should live in rosbag2.
         record = {
             "time": self.get_clock().now().nanoseconds,
             "policy": self.manifest.name,
@@ -361,6 +384,8 @@ class BodyPolicyNode(Node):
         status.missing_inputs = list(missing)
         status.inference_latency_ms = float(latency_ms)
         status.inference_count = self.inference_count
+        status.tick_interval_ms = 0.0
+        status.deadline_miss_count = 0
         self.status_pub.publish(status)
 
 

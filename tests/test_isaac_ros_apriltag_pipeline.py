@@ -184,6 +184,6 @@ def test_aboard_bridge_publishes_the_canonical_imu_with_bounded_sensor_qos():
         ROOT / "ros_ws/src/robotcore_hardware/src/aboard_bridge_node.cpp"
     ).read_text(encoding="utf-8")
 
-    assert '"/sensors/external_imu", rclcpp::SensorDataQoS().keep_last(8)' in bridge
+    assert '"/sensors/external_imu", rclcpp::SensorDataQoS().keep_last(1)' in bridge
     assert 'message.header.frame_id = "base_link"' in bridge
     assert "/hardware/aboard_imu_raw" not in bridge

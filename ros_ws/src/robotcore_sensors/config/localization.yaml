@@ -1,0 +1,83 @@
+# Production AprilTag map localisation and fixed-rate VIO fusion tuning.
+# Topic and deployment-file overrides remain launch arguments; numeric policy
+# belongs here so operators can review one typed configuration document.
+---
+/apriltag_localization:
+  ros__parameters:
+    base_frame: base_link
+    map_frame: map
+    tag_family: tag36h11
+    enforce_cuboid_pool_geometry: true
+    pool_length_m: 5.42
+    pool_width_m: 3.73
+    pool_surface_tolerance_m: 0.02
+    pool_orientation_tolerance_deg: 2.0
+    minimum_pose_tag_count: 1
+    maximum_pose_tag_count: 3
+    minimum_inlier_corners_per_tag: 3
+    min_tag_edge_px: 20.0
+    maximum_tag_edge_ratio: 2.5
+    max_reprojection_rms_px: 3.0
+    single_tag_max_reprojection_rms_px: 1.5
+    max_reprojection_error_px: 4.0
+    multi_tag_position_stddev_m: 0.05
+    multi_tag_angle_stddev_deg: 2.0
+    dual_tag_position_stddev_m: 0.075
+    dual_tag_angle_stddev_deg: 3.0
+    single_tag_position_stddev_m: 0.10
+    single_tag_angle_stddev_deg: 4.0
+    single_tag_reference_edge_px: 40.0
+
+/ekf:
+  ros__parameters:
+    vio_topic: /zedx/zed_node/odom
+    imu_topic: /sensors/external_imu
+    tag_topic: /localization/apriltag_pose
+    zed_tracking_status_topic: /zedx/zed_node/pose/status
+    map_frame: map
+    odom_frame: odom
+    base_frame: base_link
+    # Accepted VIO corrections publish immediately. This 60 Hz timer predicts
+    # between corrections and remains the output heartbeat when VIO pauses.
+    output_rate_hz: 60.0
+    history_duration_s: 3.0
+    tag_fresh_s: 0.35
+    # Do not extend control-valid prediction beyond the measured safe bound.
+    # Relocalization handles longer camera gaps independently below.
+    vio_arrival_timeout_s: 0.40
+    vio_prediction_horizon_s: 0.40
+    zed_status_timeout_s: 0.20
+    require_zed_tracking_ok: true
+    vio_pose_gate_chi2: 16.266
+    vio_twist_gate_chi2: 16.266
+    # Replay the 100 Hz base_link gyro through delayed VIO corrections. Linear
+    # acceleration fusion remains available for later A/B tests but is disabled
+    # in production; position/velocity use the VIO-corrected constant-velocity
+    # model between measurements.
+    imu_angular_velocity_gate_chi2: 16.266
+    use_imu_linear_acceleration: false
+    gravity_mps2: 9.80665
+    maximum_imu_linear_acceleration_mps2: 6.0
+    imu_linear_acceleration_stddev_floor_mps2: 0.15
+    tag_pose_gate_chi2: 16.266
+    vio_linear_velocity_stddev_floor_mps: 0.10
+    vio_linear_velocity_correction_limit_mps: 0.04
+    vio_linear_velocity_innovation_limit_mps: 0.25
+    initial_velocity_stddev_mps: 0.25
+    initial_angular_velocity_stddev_rps: 0.25
+    linear_acceleration_noise_mps2_sqrt_hz: 0.30
+    angular_acceleration_noise_rps2_sqrt_hz: 0.20
+    # Four mutually consistent transforms are still required. The bounded
+    # window tolerates the deployed ZED's sparse/bursty valid Tag frames;
+    # isolated PnP outliers cannot clear or join the consistent cluster.
+    alignment_candidate_count: 4
+    alignment_candidate_window_s: 8.0
+    alignment_translation_tolerance_m: 0.20
+    alignment_rotation_tolerance_deg: 12.0
+    # Initialize and correct the global alignment only from multi-Tag poses.
+    # Afterwards, apply only a small bounded correction per accepted Tag frame;
+    # 60 Hz motion and velocity continue to come from ZED VIO.
+    minimum_alignment_tag_count: 2
+    alignment_update_gain: 0.02
+    alignment_max_translation_step_m: 0.002
+    alignment_max_rotation_step_deg: 0.1

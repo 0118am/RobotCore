@@ -6,16 +6,12 @@ from collections import deque
 import hashlib
 import json
 import math
-from pathlib import Path
 
 import numpy as np
 import rclpy
-from geometry_msgs.msg import WrenchStamped
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Imu
-from std_srvs.srv import Trigger
-import yaml
 
 from robotcore_interfaces.msg import (
     BodyState,
@@ -24,8 +20,6 @@ from robotcore_interfaces.msg import (
     ThrusterCommand,
     TrajectoryTarget,
 )
-from robotcore_interfaces.srv import GetPidConfig
-
 from .control_math import (
     ConditionalPid,
     PidGains,
@@ -74,6 +68,9 @@ class SixDofPidNode(Node):
 
     def __init__(self):
         super().__init__("six_dof_pid_controller")
+        self.sensor_qos = QoSProfile(
+            depth=1, reliability=ReliabilityPolicy.BEST_EFFORT
+        )
         self.declare_parameter("control_rate_hz", 50.0)
         self.declare_parameter("max_input_age_s", 0.15)
         self.declare_parameter("pwm_limit_us", MAXIMUM_PWM_LIMIT_US)
@@ -138,9 +135,13 @@ class SixDofPidNode(Node):
         self.declare_parameter("imu_rate_prediction_delta_limit_rps", 0.12)
         self.declare_parameter("imu_rate_filter_time_constant_s", 0.01)
         self.declare_parameter("imu_orientation_filter_time_constant_s", 0.03)
-        self.declare_parameter(
-            "pid_config_path", "src/robotcore_control/config/real_pool_pid.yaml"
-        )
+        # The controller is fail-closed unless the deployment YAML explicitly
+        # approves the complete ROS-parameter set below.
+        self.declare_parameter("configuration_ready", False)
+        self.declare_parameter("station_position_kp", [0.0, 0.0])
+        self.declare_parameter("station_sway_rate_limit", 0.0)
+        self.declare_parameter("fast_station_level_rate_limit_rps", [0.0, 0.0])
+        self.declare_parameter("derivative_cutoff_hz", 1.5)
         self.body = None
         self.body_ns = None
         self.imu_angular_velocity = None
@@ -156,6 +157,7 @@ class SixDofPidNode(Node):
         self.target = None
         self.target_ns = None
         self.last_tick_ns = None
+        self.pid_selected = False
         self.altitude_hold_active = False
         self.station_hold_active = False
         self.fast_station_hold_active = False
@@ -178,46 +180,57 @@ class SixDofPidNode(Node):
         )
         self.load_configuration()
 
-        self.wrench_pub = self.create_publisher(WrenchStamped, "/control/pid/wrench", 10)
         self.command_pub = self.create_publisher(
-            ThrusterCommand, "/control/pid/thruster_cmd", 10
+            ThrusterCommand, "/control/pid/thruster_cmd", 1
         )
-        self.status_pub = self.create_publisher(PidStatus, "/control/pid/status", 10)
-        self.create_service(Trigger, "/control/pid/reload", self.on_reload)
-        self.create_service(GetPidConfig, "/control/pid/config", self.on_get_config)
-        self.create_subscription(BodyState, "/robot/body_state", self.on_body, 20)
-        self.create_subscription(
-            Imu,
-            str(self.get_parameter("imu_topic").value),
-            self.on_imu,
-            qos_profile_sensor_data,
-        )
-        self.create_subscription(
-            TrajectoryTarget, "/runtime/trajectory_target", self.on_target, 20
-        )
+        self.status_pub = self.create_publisher(PidStatus, "/control/pid/status", 1)
+        # The PID controller is mutually exclusive with RL/manual authority.
+        # High-rate inputs are connected only while PID is selected so an idle
+        # controller does not deserialize and filter every IMU/BodyState sample.
+        self.body_sub = None
+        self.imu_sub = None
+        self.target_sub = None
         self.create_subscription(
             ControlAuthorityStatus,
             "/control/authority/status",
             self.on_authority_status,
-            20,
+            1,
         )
         rate = max(1.0, float(self.get_parameter("control_rate_hz").value))
         self.timer = self.create_timer(1.0 / rate, self.tick)
+        self.timer.cancel()
 
     def load_configuration(self):
+        """Validate and materialize the startup ROS parameter contract."""
+
         self.load_error = ""
         try:
-            pid_path = Path(str(self.get_parameter("pid_config_path").value))
-            pid_data = yaml.safe_load(pid_path.read_text(encoding="utf-8")) or {}
-            self.pid_document = pid_data
-            self.pid_configured = bool(pid_data.get("configured", False))
-            self.profile_name = str(pid_data.get("profile_name", pid_path.stem))
-            self.outer_position_kp = vec(pid_data["outer_position_kp"], 3)
-            self.outer_orientation_kp = vec(pid_data["outer_orientation_kp"], 3)
-            self.max_linear_velocity = vec(pid_data["max_linear_velocity_mps"], 3)
-            self.max_angular_velocity = vec(pid_data["max_angular_velocity_rps"], 3)
-            self.inner_kp = vec(pid_data["inner_kp"], 6)
-            cutoff = float(pid_data.get("derivative_cutoff_hz", 5.0))
+            self.pid_configured = bool(
+                self.get_parameter("configuration_ready").value
+            )
+            self.station_position_kp = vec(
+                self.get_parameter("station_position_kp").value, 2
+            )
+            self.station_sway_rate_limit = float(
+                self.get_parameter("station_sway_rate_limit").value
+            )
+            self.fast_station_level_rate_limit_rps = vec(
+                self.get_parameter("fast_station_level_rate_limit_rps").value,
+                2,
+            )
+            cutoff = float(self.get_parameter("derivative_cutoff_hz").value)
+            if (
+                np.any(self.station_position_kp < 0.0)
+                or not math.isfinite(self.station_sway_rate_limit)
+                or self.station_sway_rate_limit < 0.0
+                or np.any(self.fast_station_level_rate_limit_rps < 0.0)
+                or not math.isfinite(cutoff)
+                or cutoff < 0.0
+            ):
+                raise ValueError(
+                    "station gains, rate limits, and derivative cutoff must be "
+                    "finite and non-negative"
+                )
             altitude_values = [
                 float(self.get_parameter("altitude_pwm_kp").value),
                 float(self.get_parameter("altitude_pwm_ki").value),
@@ -486,8 +499,10 @@ class SixDofPidNode(Node):
                 )
             canonical = json.dumps(
                 {
-                    "pid": pid_data,
+                    "configuration_ready": self.pid_configured,
+                    "derivative_cutoff_hz": cutoff,
                     "altitude_pwm": {
+                        "position_kp": self.altitude_position_kp,
                         "kp": altitude_values[0],
                         "ki": altitude_values[1],
                         "kd": altitude_values[2],
@@ -496,6 +511,11 @@ class SixDofPidNode(Node):
                         "command_sign": self.altitude_pwm_command_sign,
                     },
                     "direct_station": {
+                        "position_kp": self.station_position_kp.tolist(),
+                        "sway_rate_limit": self.station_sway_rate_limit,
+                        "fast_level_rate_limit_rps": (
+                            self.fast_station_level_rate_limit_rps.tolist()
+                        ),
                         "surge_velocity_pid": {
                             "kp": self.station_surge_pwm_kp,
                             "ki": self.station_surge_pwm_ki,
@@ -603,14 +623,11 @@ class SixDofPidNode(Node):
             pid_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
             self.configuration_hash = pid_hash
         except Exception as exc:
-            self.pid_document = {}
             self.load_error = str(exc)
             self.pid_configured = False
-            self.outer_position_kp = np.zeros(3)
-            self.outer_orientation_kp = np.zeros(3)
-            self.max_linear_velocity = np.zeros(3)
-            self.max_angular_velocity = np.zeros(3)
-            self.inner_kp = np.zeros(6)
+            self.station_position_kp = np.zeros(2)
+            self.station_sway_rate_limit = 0.0
+            self.fast_station_level_rate_limit_rps = np.zeros(2)
             self.altitude_pid = ConditionalPid(PidGains(0, 0, 0, 0, 0))
             self.altitude_velocity_filter_time_constant_s = 0.20
             self.altitude_pwm_command_sign = -1.0
@@ -664,37 +681,6 @@ class SixDofPidNode(Node):
             self.configuration_hash = ""
             self.get_logger().error(f"PID configuration rejected: {exc}")
 
-    def on_reload(self, _request, response):
-        """Reload the complete active PID document before a new arm cycle."""
-
-        self.load_configuration()
-        self.reset_controllers()
-        self.reset_imu_conditioning()
-        self.last_tick_ns = None
-        self.tick()
-        response.success = not self.load_error
-        response.message = (
-            f"loaded PID profile {self.profile_name} ({self.configuration_hash})"
-            if response.success
-            else self.load_error
-        )
-        return response
-
-    def on_get_config(self, _request, response):
-        """Return the exact complete PID document currently used by this process."""
-
-        response.success = not self.load_error
-        response.config_json = json.dumps(
-            self.pid_document, sort_keys=True, separators=(",", ":")
-        )
-        response.configuration_hash = self.configuration_hash
-        response.message = (
-            f"live PID profile {self.profile_name}"
-            if response.success
-            else self.load_error
-        )
-        return response
-
     def on_body(self, message):
         self.body = message
         self.body_ns = self.get_clock().now().nanoseconds
@@ -702,6 +688,8 @@ class SixDofPidNode(Node):
             self.absolute_localization_seen = True
 
     def on_imu(self, message):
+        if not self.pid_selected:
+            return
         orientation = np.asarray(
             [
                 message.orientation.w,
@@ -790,7 +778,19 @@ class SixDofPidNode(Node):
         self.imu_filter_ns = sample_ns
 
     def on_authority_status(self, message):
-        """Follow the canonical PWM limit updated by the operator webpage."""
+        """Run PID inputs/timer only while canonical authority selects PID."""
+
+        selected = str(message.selected_source).strip().lower() == "pid"
+        if selected != self.pid_selected:
+            self.pid_selected = selected
+            self.reset_controllers()
+            self.last_tick_ns = None
+            if selected:
+                self._connect_pid_inputs()
+                self.timer.reset()
+            else:
+                self.timer.cancel()
+                self._disconnect_pid_inputs()
 
         action_limit = float(message.action_limit)
         if not math.isfinite(action_limit) or not 0.0 <= action_limit <= 1.0:
@@ -802,6 +802,41 @@ class SixDofPidNode(Node):
         if not math.isclose(pwm_limit_us, self.pwm_limit_us, abs_tol=1e-9):
             self.pwm_limit_us = pwm_limit_us
             self.reset_controllers()
+
+    def _connect_pid_inputs(self):
+        if self.body_sub is None:
+            self.body_sub = self.create_subscription(
+                BodyState, "/robot/body_state", self.on_body, 1
+            )
+        if self.imu_sub is None:
+            self.imu_sub = self.create_subscription(
+                Imu,
+                str(self.get_parameter("imu_topic").value),
+                self.on_imu,
+                self.sensor_qos,
+            )
+        if self.target_sub is None:
+            self.target_sub = self.create_subscription(
+                TrajectoryTarget, "/runtime/trajectory_target", self.on_target, 1
+            )
+
+    def _disconnect_pid_inputs(self):
+        for attribute in ("body_sub", "imu_sub", "target_sub"):
+            subscription = getattr(self, attribute)
+            if subscription is not None:
+                self.destroy_subscription(subscription)
+                setattr(self, attribute, None)
+        self.body = None
+        self.body_ns = None
+        self.imu_angular_velocity = None
+        self.imu_orientation = None
+        self.imu_ns = None
+        self.imu_angular_velocity_filtered = None
+        self.imu_orientation_filtered = None
+        self.imu_filter_ns = None
+        self.imu_rate_samples.clear()
+        self.target = None
+        self.target_ns = None
 
     def on_target(self, message):
         self.target = message
@@ -820,12 +855,6 @@ class SixDofPidNode(Node):
         self.fast_station_pitch_rate_integral_effort = 0.0
         self.fast_station_surge_direction = 0
         self.altitude_vertical_velocity_filtered = None
-
-    def reset_imu_conditioning(self):
-        self.imu_angular_velocity_filtered = None
-        self.imu_orientation_filtered = None
-        self.imu_filter_ns = None
-        self.imu_rate_samples.clear()
 
     @property
     def command_limit(self):
@@ -848,7 +877,7 @@ class SixDofPidNode(Node):
             else ""
         )
         if not self.pid_configured:
-            missing.append("pid_config_not_confirmed")
+            missing.append("pid_parameters_not_approved")
         if target_trajectory_type not in {
             "idle",
             "hold",
@@ -906,6 +935,8 @@ class SixDofPidNode(Node):
         return not missing, missing, body_age, imu_age, target_age
 
     def tick(self):
+        if not self.pid_selected:
+            return
         now = self.get_clock().now()
         now_ns = now.nanoseconds
         ready, missing, body_age, imu_age, target_age = self.input_status(now_ns)
@@ -1008,7 +1039,6 @@ class SixDofPidNode(Node):
             # hold controller or move a thruster during that hand-off window.
             self.reset_controllers()
             commands = np.zeros(8, dtype=np.float64)
-            wrench = np.zeros(6, dtype=np.float64)
             allocation_residual = 0.0
             allocation_saturation = 0.0
             status_message = "ready; neutral until Start"
@@ -1051,7 +1081,7 @@ class SixDofPidNode(Node):
                 sway_rate_limit = (
                     self.fast_station_sway_rate_limit
                     if fast_station_mode
-                    else self.max_linear_velocity[1]
+                    else self.station_sway_rate_limit
                 )
                 sway_pid = (
                     self.fast_station_sway_pid
@@ -1077,7 +1107,7 @@ class SixDofPidNode(Node):
                 desired_planar_velocity = station_velocity_setpoints(
                     target_linear_body[:2],
                     position_error_body[:2],
-                    self.outer_position_kp[:2],
+                    self.station_position_kp,
                     surge_rate_limit,
                     sway_rate_limit,
                     center_approach=trajectory_start_approach,
@@ -1266,7 +1296,7 @@ class SixDofPidNode(Node):
                         self.imu_angular_velocity_filtered[:2],
                         self.fast_station_level_angle_to_rate_kp,
                         self.fast_station_level_rate_kp,
-                        self.max_angular_velocity[:2],
+                        self.fast_station_level_rate_limit_rps,
                         level_limit,
                         effort_feedforward=[0.0, pitch_decoupling_effort],
                     )
@@ -1293,7 +1323,7 @@ class SixDofPidNode(Node):
                         self.imu_angular_velocity_filtered[:2],
                         self.fast_station_level_angle_to_rate_kp,
                         self.fast_station_level_rate_kp,
-                        self.max_angular_velocity[:2],
+                        self.fast_station_level_rate_limit_rps,
                         level_limit,
                         effort_feedforward=[0.0, pitch_decoupling_effort],
                         effort_integral=[
@@ -1338,11 +1368,6 @@ class SixDofPidNode(Node):
                     self.command_limit,
                     self.altitude_pwm_command_sign,
                 )
-            # Preserve the existing diagnostic topic while making its height
-            # component explicitly the direct PID effort rather
-            # than a claimed force in newtons.
-            wrench = np.zeros(6, dtype=np.float64)
-            wrench[2] = controller_effort
             allocation_residual = 0.0
             allocation_saturation = float(self.altitude_pid.saturated)
             if station_mode:
@@ -1359,11 +1384,6 @@ class SixDofPidNode(Node):
                         )
                     )
                 )
-                wrench[0] = applied_surge_effort
-                wrench[1] = applied_sway_effort
-                wrench[3] = float(level_efforts[0])
-                wrench[4] = float(level_efforts[1])
-                wrench[5] = applied_yaw_effort
                 allocation_saturation = float(
                     self.altitude_pid.saturated
                     or horizontal_saturated
@@ -1419,21 +1439,9 @@ class SixDofPidNode(Node):
             )
             return
 
-        wrench_message = WrenchStamped()
-        wrench_message.header.stamp = now.to_msg()
-        wrench_message.header.frame_id = "base_link"
-        wrench_message.wrench.force.x, wrench_message.wrench.force.y, wrench_message.wrench.force.z = [
-            float(value) for value in wrench[:3]
-        ]
-        (
-            wrench_message.wrench.torque.x,
-            wrench_message.wrench.torque.y,
-            wrench_message.wrench.torque.z,
-        ) = [float(value) for value in wrench[3:]]
-        self.wrench_pub.publish(wrench_message)
-
         command = ThrusterCommand()
-        command.header = wrench_message.header
+        command.header.stamp = now.to_msg()
+        command.header.frame_id = "base_link"
         command.action = [
             float(
                 np.clip(

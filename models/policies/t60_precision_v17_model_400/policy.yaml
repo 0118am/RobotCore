@@ -1,4 +1,4 @@
-name: t60_precision_v7_model_499
+name: t60_precision_v17_model_400
 role: body
 runner: tensorrt
 model_path: policy.onnx
@@ -15,7 +15,9 @@ output_schema:
   range: [-1.0, 1.0]
   output_layer: tanh
   direct_hardware_command: true
-  pwm_mapping: "PWM_us = 1500 + 250 * action"
+  pwm_mapping: "PWM_us = 1500 + 250 * rl_polarity[T] * action"
+  pwm_input_polarity: [1, 1, 1, 1, -1, -1, 1, 1]
+  pwm_input_polarity_scope: command_authority:rl
   channel_order:
     - T1_front_right_vertical
     - T2_rear_right_vertical
@@ -34,14 +36,19 @@ deployment_validation:
   angular_velocity_frame: body_xyz
 
 isaac_contract:
-  recipe: t60_precision_v7
-  checkpoint: model_499
-  exported_at: 2026-08-29
-  source_artifact: auv_traj_policy_mlp_history_8_2026-08-29_model_499.onnx
-  sha256: 181122f0463510c6a4a518e60d04a3451bbf058550e98fb349651725fda03be9
-  observation_layout: t60_precision_v7_history8
-  observation_dim: 201
-  current_observation_dim: 33
+  policy_version: v17
+  recipe: t60_precision_v17
+  architecture: mlp_history_8
+  checkpoint: model_400
+  exported_at: 2026-09-01
+  source_artifact: auv_traj_policy_v17_mlp_history_8_2026-09-01_model_400.onnx
+  sha256: 1a5d16cd0410ada99f693194b3b6d4637419d5bd9d2fbe068831cbf86b8f9b25
+  observation_layout: t60_trajectory_obs_v11
+  observation_dim: 198
+  actor_observation_dim: 198
+  privileged_state_dim: 60
+  critic_observation_dim: 258
+  current_observation_dim: 30
   history_length: 8
   history_sample_dim: 21
   action_dim: 8
@@ -57,7 +64,23 @@ isaac_contract:
   history_order: newest_first
   history_reset: zeros
   history_commit: after_inference
+  input_normalization: fixed_physical_scale
   running_normalization: false
+  current_observation_fields:
+    - {name: position_error_b, dim: 3, scale: 0.25}
+    - {name: target_linear_velocity_b, dim: 3, scale: 0.40}
+    - {name: linear_velocity_error_b, dim: 3, scale: 0.20}
+    - {name: attitude_error_quat, dim: 4, scale: 1.00}
+    - {name: angular_velocity_b, dim: 3, scale: 0.80}
+    - {name: target_angular_velocity_b, dim: 3, scale: 0.80}
+    - {name: target_linear_acceleration_b, dim: 3, scale: 0.45}
+    - {name: previous_motor_command, dim: 8, scale: 1.00}
+  history_observation_fields:
+    - {name: position_error_b, dim: 3, scale: 0.25}
+    - {name: linear_velocity_error_b, dim: 3, scale: 0.20}
+    - {name: attitude_error_quat, dim: 4, scale: 1.00}
+    - {name: angular_velocity_error_b, dim: 3, scale: 0.80}
+    - {name: previous_motor_command, dim: 8, scale: 1.00}
   output_valid_range: [-1.0, 1.0]
   body_frame: FLU
   body_axes: [forward, left, up]
@@ -65,6 +88,7 @@ isaac_contract:
   quaternion_semantics: world_from_body
   angular_velocity_frame: body
   angular_velocity_order: [roll_rate, pitch_rate, yaw_rate]
+  angular_velocity_error_convention: target_minus_measured
   positive_roll: left_side_up_right_side_down
   positive_pitch: bow_down_stern_up
   positive_yaw: bow_left_ccw_from_above

@@ -17,6 +17,9 @@
 #include <termios.h>
 #include <unistd.h>
 
+#include <pthread.h>
+#include <sched.h>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -65,6 +68,22 @@ constexpr char kAuthoritySourcePrefix[] = "command_authority:";
 constexpr double kDegreesToRadians = 0.017453292519943295769;
 constexpr double kTwoPi = 6.283185307179586476925;
 constexpr std::int64_t kHeadingAlignmentMaximumSkewNs = 100000000LL;
+
+void configure_fifo_thread(
+  const rclcpp::Logger & logger, const char * thread_name, int priority)
+{
+  if (priority <= 0) {return;}
+  sched_param parameters{};
+  parameters.sched_priority = priority;
+  const int error = pthread_setschedparam(pthread_self(), SCHED_FIFO, &parameters);
+  if (error != 0) {
+    RCLCPP_ERROR(
+      logger, "Failed to set %s to SCHED_FIFO/%d: %s",
+      thread_name, priority, std::strerror(error));
+    return;
+  }
+  RCLCPP_INFO(logger, "%s uses SCHED_FIFO/%d", thread_name, priority);
+}
 
 struct RawHeadingSample
 {
@@ -158,6 +177,16 @@ public:
     work_(boost::asio::make_work_guard(io_)),
     updater_(this)
   {
+    const auto realtime_priority = [this](const char * name, std::int64_t default_value) {
+        const auto value = declare_parameter<std::int64_t>(name, default_value);
+        if (value < 0 || value > 99) {
+          throw std::invalid_argument(std::string(name) + " must be in [0, 99]");
+        }
+        return static_cast<int>(value);
+      };
+    executor_realtime_priority_ = realtime_priority("executor_realtime_priority", 0);
+    serial_realtime_priority_ = realtime_priority("serial_realtime_priority", 0);
+    imu_realtime_priority_ = realtime_priority("imu_realtime_priority", 0);
     port_ = declare_parameter<std::string>(
       "serial_port", "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B7A033320-if00");
     const auto requested_baud = declare_parameter<std::int64_t>("baud", 115200);
@@ -181,10 +210,10 @@ public:
     accel_stddev_ = declare_parameter<double>("imu_linear_acceleration_stddev_mps2", 0.5);
 
     imu_pub_ = create_publisher<sensor_msgs::msg::Imu>(
-      "/sensors/external_imu", rclcpp::SensorDataQoS().keep_last(8));
-    status_pub_ = create_publisher<robotcore_interfaces::msg::BoardStatus>("/hardware/board_status", 10);
+      "/sensors/external_imu", rclcpp::SensorDataQoS().keep_last(1));
+    status_pub_ = create_publisher<robotcore_interfaces::msg::BoardStatus>("/hardware/board_status", 1);
     runtime_pub_ = create_publisher<robotcore_interfaces::msg::BoardRuntime>(
-      "/hardware/board_runtime", 10);
+      "/hardware/board_runtime", 1);
     command_sub_ = create_subscription<robotcore_interfaces::msg::ThrusterCommand>(
       "/control/thruster_cmd", rclcpp::QoS(rclcpp::KeepLast(1)).reliable(),
       [this](const robotcore_interfaces::msg::ThrusterCommand::SharedPtr message)
@@ -195,7 +224,7 @@ public:
       "/localization/apriltag_pose", rclcpp::QoS(rclcpp::KeepLast(1)).reliable(),
       std::bind(&AboardBridgeNode::on_tag_pose, this, std::placeholders::_1));
     body_state_sub_ = create_subscription<robotcore_interfaces::msg::BodyState>(
-      "/robot/body_state", rclcpp::QoS(10),
+      "/robot/body_state", rclcpp::QoS(1),
       std::bind(&AboardBridgeNode::on_body_state, this, std::placeholders::_1));
     imu_calibration_service_ = create_service<std_srvs::srv::Trigger>(
       "/hardware/aboard/calibrate_gyro",
@@ -213,12 +242,25 @@ public:
       session_id_ = make_session_id();
       transition_reason_ = "process start";
     }
-    imu_publish_thread_ = std::thread([this]() {imu_publish_loop();});
-    io_thread_ = std::thread([this]() {io_.run();});
+    imu_publish_thread_ = std::thread([this]() {
+        configure_fifo_thread(
+          get_logger(), "external-IMU publisher", imu_realtime_priority_);
+        imu_publish_loop();
+      });
+    io_thread_ = std::thread([this]() {
+        configure_fifo_thread(get_logger(), "Aquaboard serial I/O", serial_realtime_priority_);
+        io_.run();
+      });
     boost::asio::post(io_, [this]() {open_serial_io();});
     RCLCPP_INFO(
       get_logger(),
       "Aquaboard protocol v2 bridge started; PWM channels 8-15 are command echoes, not motor feedback");
+  }
+
+  void configure_executor_thread() const
+  {
+    configure_fifo_thread(
+      get_logger(), "Aquaboard ROS executor", executor_realtime_priority_);
   }
 
   ~AboardBridgeNode() override
@@ -1771,6 +1813,7 @@ private:
 
   std::string port_, authority_node_name_, authority_node_namespace_;
   int baud_{}, command_timeout_ms_{}, heartbeat_timeout_ms_{};
+  int executor_realtime_priority_{}, serial_realtime_priority_{}, imu_realtime_priority_{};
   double gyro_stddev_{}, accel_stddev_{};
   std::atomic<double> imu_yaw_offset_rad_{0.0};
   std::atomic<bool> imu_attitude_valid_{false};
@@ -1903,7 +1946,9 @@ private:
 int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
-  rclcpp::spin(std::make_shared<robotcore_hardware::AboardBridgeNode>());
+  auto node = std::make_shared<robotcore_hardware::AboardBridgeNode>();
+  node->configure_executor_thread();
+  rclcpp::spin(node);
   rclcpp::shutdown();
   return 0;
 }

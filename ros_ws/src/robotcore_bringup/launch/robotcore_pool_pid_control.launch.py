@@ -1,8 +1,5 @@
 """Launch the fail-closed pool PID control graph without sensors or hardware."""
 
-import os
-from pathlib import Path
-
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
@@ -11,16 +8,6 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
-    task_config_dir = (
-        Path(
-            os.environ.get(
-                "CONTROL_INTERFACE_WORKSPACE", "/home/nvidia/ControlInterface"
-            )
-        )
-        / "control_interface"
-        / "config"
-        / "tasks"
-    )
     return LaunchDescription(
         [
             DeclareLaunchArgument(
@@ -30,24 +17,22 @@ def generate_launch_description():
                 ),
             ),
             DeclareLaunchArgument(
-                "pid_config_path",
-                default_value=PathJoinSubstitution(
-                    [FindPackageShare("robotcore_control"), "config", "pid", "default.json"]
-                ),
-            ),
-            DeclareLaunchArgument(
                 "thruster_config_path",
                 default_value=PathJoinSubstitution(
                     [FindPackageShare("robotcore_control"), "config", "real_pool_thrusters.yaml"]
                 ),
             ),
             DeclareLaunchArgument(
-                "task_config_dir",
-                default_value=str(task_config_dir),
+                "task_catalog_path",
+                default_value=PathJoinSubstitution(
+                    [FindPackageShare("robotcore_runtime"), "config", "tracking_tasks.yaml"]
+                ),
             ),
             DeclareLaunchArgument(
-                "record_topics_path",
-                default_value=str(task_config_dir / "record_topics.json"),
+                "recording_config_path",
+                default_value=PathJoinSubstitution(
+                    [FindPackageShare("robotcore_runtime"), "config", "recording.yaml"]
+                ),
             ),
             Node(
                 package="robotcore_runtime",
@@ -69,12 +54,6 @@ def generate_launch_description():
                 output="screen",
                 parameters=[
                     LaunchConfiguration("pool_control_config"),
-                    {
-                        "pid_config_path": LaunchConfiguration("pid_config_path"),
-                        "thruster_config_path": LaunchConfiguration(
-                            "thruster_config_path"
-                        ),
-                    }
                 ],
             ),
             Node(
@@ -97,8 +76,8 @@ def generate_launch_description():
                 output="screen",
                 parameters=[
                     {
-                        "task_config_dir": LaunchConfiguration(
-                            "task_config_dir"
+                        "task_catalog_path": LaunchConfiguration(
+                            "task_catalog_path"
                         )
                     }
                 ],
@@ -110,12 +89,13 @@ def generate_launch_description():
                 output="screen",
                 parameters=[
                     {
-                        "pid_config_path": LaunchConfiguration("pid_config_path"),
                         "thruster_config_path": LaunchConfiguration(
                             "thruster_config_path"
                         ),
-                        "task_config_dir": LaunchConfiguration("task_config_dir"),
-                        "record_topics_path": LaunchConfiguration("record_topics_path"),
+                        "task_catalog_path": LaunchConfiguration("task_catalog_path"),
+                        "recording_config_path": LaunchConfiguration(
+                            "recording_config_path"
+                        ),
                         "safety_config_path": LaunchConfiguration(
                             "pool_control_config"
                         ),

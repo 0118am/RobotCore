@@ -25,7 +25,7 @@ def test_robot_service_owns_latency_cores_and_maximum_jetson_profile():
     assert "Nice=-10" in robot
     assert "LimitMEMLOCK=infinity" in robot
     assert "TimerSlackNSec=1us" in robot
-    assert "enable_web_ui:=false" in robot
+    assert "enable_web_ui" not in robot
     assert "enable_pool_tracking:=true" in robot
     assert "enable_rl_policy_runtime:=true" in robot
     assert "allow_rl_hardware:=true" in robot

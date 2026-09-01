@@ -25,10 +25,6 @@
     "path": "/etc/robotcore/apriltag_map.json",
     "web_edit_enabled": true
   },
-  "control_config": {
-    "pid_active_path": "/var/lib/robotcore/config/pid/active.json",
-    "pid_profiles_dir": "/var/lib/robotcore/config/pid/profiles"
-  },
   "maintenance": {
     "upgrade_enabled": false,
     "flash_enabled": false,

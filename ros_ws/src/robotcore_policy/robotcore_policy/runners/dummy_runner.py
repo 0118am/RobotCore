@@ -1,4 +1,4 @@
-"""Deterministic policy runner used before real model artifacts exist."""
+"""Deterministic policy runner for integration tests."""
 
 from .base import PolicyRunner
 

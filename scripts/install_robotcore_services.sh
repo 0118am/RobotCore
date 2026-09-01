@@ -189,7 +189,6 @@ set_env_value RMW_IMPLEMENTATION rmw_cyclonedds_cpp
 set_env_value CYCLONEDDS_URI file:///etc/robotcore/cyclonedds.xml
 set_env_value ROS_LOG_DIR "${ros_log_dir}"
 set_env_value ROBOTCORE_RUN_ROOT "${run_root}"
-set_env_value ROBOTCORE_CONFIG_ROOT /var/lib/robotcore/config
 
 # Keep the root-owned host-manager health probe on the same run tree.  The
 # schema contains exactly one rosbag.run_root key; fail closed if it is absent.
@@ -207,19 +206,6 @@ chmod 0640 "${edge_env}" "${config_root}/cyclonedds.xml"
 chown root:root "${host_manager_config}"
 chmod 0640 "${host_manager_config}"
 install -d -o robotcore -g robotcore -m 0750 /var/lib/robotcore
-install -d -o root -g robotops -m 0750 /var/lib/robotcore/config
-install -d -o root -g robotops -m 0750 /var/lib/robotcore/config/pid
-install -d -o root -g robotops -m 0750 /var/lib/robotcore/config/pid/profiles
-if [[ ! -e /var/lib/robotcore/config/pid/active.json ]]; then
-  install -o root -g robotops -m 0640 \
-    "${repo_root}/ros_ws/src/robotcore_control/config/pid/default.json" \
-    /var/lib/robotcore/config/pid/active.json
-fi
-if [[ ! -e /var/lib/robotcore/config/pid/profiles/default.json ]]; then
-  install -o root -g robotops -m 0640 \
-    "${repo_root}/ros_ws/src/robotcore_control/config/pid/default.json" \
-    /var/lib/robotcore/config/pid/profiles/default.json
-fi
 # Apply only RobotCore's queue tuning. Loading every host sysctl fragment here
 # produces unrelated Jetson/container warnings and can obscure a real failure.
 sysctl -p /etc/sysctl.d/99-robotcore-dds.conf

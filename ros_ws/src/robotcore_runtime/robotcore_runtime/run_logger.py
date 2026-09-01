@@ -8,7 +8,6 @@ import json
 import hashlib
 import math
 import os
-import re
 import shutil
 import signal
 import subprocess
@@ -17,6 +16,8 @@ from datetime import datetime
 from pathlib import Path
 
 import rclpy
+import yaml
+from ament_index_python.packages import get_package_share_directory
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
@@ -33,6 +34,8 @@ from robotcore_interfaces.msg import (
 )
 from robotcore_interfaces.srv import StartRun, StopRun
 
+from .task_catalog import TaskCatalog, load_recording_config
+
 
 def finite_or_none(value):
     value = float(value)
@@ -44,20 +47,12 @@ class RunLogger(Node):
 
     def __init__(self):
         super().__init__("run_logger")
-        task_config_dir = (
-            Path(
-                os.environ.get(
-                    "CONTROL_INTERFACE_WORKSPACE", "/home/nvidia/ControlInterface"
-                )
-            )
-            / "control_interface"
-            / "config"
-            / "tasks"
+        runtime_config = (
+            Path(get_package_share_directory("robotcore_runtime")) / "config"
         )
         # ROBOTCORE_RUN_ROOT lets launch files keep log output in the workspace while
         # still allowing deployment scripts to redirect logs to mounted storage.
         self.declare_parameter("run_root", os.environ.get("ROBOTCORE_RUN_ROOT", "data/robotcore_runs"))
-        self.declare_parameter("pid_config_path", "src/robotcore_control/config/real_pool_pid.yaml")
         self.declare_parameter(
             "thruster_config_path", "src/robotcore_control/config/real_pool_thrusters.yaml"
         )
@@ -65,38 +60,30 @@ class RunLogger(Node):
             "safety_config_path", "src/robotcore_control/config/real_pool_safety.yaml"
         )
         self.declare_parameter(
-            "task_config_dir", str(task_config_dir)
+            "task_catalog_path", str(runtime_config / "tracking_tasks.yaml")
         )
         self.declare_parameter(
-            "record_topics_path", str(task_config_dir / "record_topics.json")
+            "recording_config_path", str(runtime_config / "recording.yaml")
         )
         self.declare_parameter("rosbag_executable", "/opt/ros/humble/bin/ros2")
-        # JSONL is an operator-readable summary, not the full-rate transport
-        # recording.  Bound repeated status streams here and leave lossless
-        # capture to rosbag2 so logging cannot compete with control callbacks.
-        self.declare_parameter("thruster_log_rate_hz", 20.0)
-        self.declare_parameter("trajectory_log_rate_hz", 20.0)
-        self.declare_parameter("tracking_log_rate_hz", 20.0)
-        self.declare_parameter("authority_log_rate_hz", 10.0)
-        self.declare_parameter("pid_log_rate_hz", 10.0)
-        self.declare_parameter("flush_interval_s", 0.25)
         self.run_root = Path(self.get_parameter("run_root").value)
+        self.task_catalog = TaskCatalog(
+            str(self.get_parameter("task_catalog_path").value)
+        )
+        self.recording_config_path = Path(
+            str(self.get_parameter("recording_config_path").value)
+        )
+        (
+            self.record_topics,
+            self.stream_log_rates,
+            self.flush_interval_s,
+            self.recording_config_sha256,
+        ) = load_recording_config(self.recording_config_path)
         self.run_dir: Path | None = None
         self.event_log_handle = None
         self.rosbag_process = None
         self.rosbag_output_handle = None
         self.last_stream_log_ns = {}
-        self.stream_log_rates = {
-            "thruster_cmd": float(self.get_parameter("thruster_log_rate_hz").value),
-            "trajectory_target": float(
-                self.get_parameter("trajectory_log_rate_hz").value
-            ),
-            "tracking_status": float(self.get_parameter("tracking_log_rate_hz").value),
-            "control_authority_status": float(
-                self.get_parameter("authority_log_rate_hz").value
-            ),
-            "pid_status": float(self.get_parameter("pid_log_rate_hz").value),
-        }
         self.last_safety_signature = None
         self.last_safety_log_ns = 0
         self.last_localization_log_ns = 0
@@ -115,9 +102,9 @@ class RunLogger(Node):
             reliability=ReliabilityPolicy.BEST_EFFORT,
         )
 
-        self.create_subscription(SafetyEvent, "/safety/events", self.on_safety_event, 20)
+        self.create_subscription(SafetyEvent, "/safety/events", self.on_safety_event, 1)
         self.create_subscription(
-            PolicyStatus, "/policy/body/status", self.on_policy_status, 20
+            PolicyStatus, "/policy/body/status", self.on_policy_status, 1
         )
         self.create_subscription(
             ThrusterCommand, "/control/thruster_cmd", self.on_thruster_cmd, summary_qos
@@ -144,10 +131,9 @@ class RunLogger(Node):
         self.create_service(StartRun, "/runtime/run/start", self.on_start_run)
         self.create_service(StopRun, "/runtime/run/stop", self.on_stop_run)
         self.timer = self.create_timer(1.0, self.publish_run_dir)
-        flush_interval = max(
-            0.05, float(self.get_parameter("flush_interval_s").value)
+        self.flush_timer = self.create_timer(
+            self.flush_interval_s, self.flush_event_log
         )
-        self.flush_timer = self.create_timer(flush_interval, self.flush_event_log)
 
     def create_run_dir(self, root, task_name):
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -229,12 +215,18 @@ class RunLogger(Node):
         return response
 
     def start_rosbag(self):
-        topic_document = json.loads(
-            Path(str(self.get_parameter("record_topics_path").value)).read_text(
-                encoding="utf-8"
-            )
-        )
         output = self.run_dir / "rosbag2" / "tracking"
+        qos_overrides_path = self.run_dir / "configs" / "rosbag_qos_overrides.yaml"
+        qos_overrides_path.write_text(
+            yaml.safe_dump(
+                {
+                    topic: {"history": "keep_last", "depth": 1}
+                    for topic in self.record_topics
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
         command = [
             str(self.get_parameter("rosbag_executable").value),
             "bag",
@@ -243,7 +235,9 @@ class RunLogger(Node):
             "sqlite3",
             "--output",
             str(output),
-            *[str(topic) for topic in topic_document["topics"]],
+            "--qos-profile-overrides-path",
+            str(qos_overrides_path),
+            *self.record_topics,
         ]
         self.rosbag_output_handle = (self.run_dir / "rosbag2.log").open(
             "w", encoding="utf-8"
@@ -305,7 +299,6 @@ class RunLogger(Node):
         destination = self.run_dir / "configs"
         hashes = {}
         for parameter in (
-            "pid_config_path",
             "thruster_config_path",
             "safety_config_path",
         ):
@@ -313,21 +306,25 @@ class RunLogger(Node):
             if source.is_file():
                 shutil.copy2(source, destination / source.name)
                 hashes[source.name] = hashlib.sha256(source.read_bytes()).hexdigest()
-        task_path = self.task_path(task_name)
-        shutil.copy2(task_path, destination / task_path.name)
-        hashes[task_path.name] = hashlib.sha256(task_path.read_bytes()).hexdigest()
+        shutil.copy2(self.task_catalog.path, destination / "tracking_tasks.yaml")
+        hashes["tracking_tasks.yaml"] = self.task_catalog.sha256
+        shutil.copy2(self.recording_config_path, destination / "recording.yaml")
+        hashes["recording.yaml"] = self.recording_config_sha256
+        resolved_task = self.task_catalog.task(task_name)
+        resolved_payload = yaml.safe_dump(
+            resolved_task,
+            allow_unicode=True,
+            sort_keys=True,
+        )
+        resolved_path = destination / "resolved_tracking_task.yaml"
+        resolved_path.write_text(resolved_payload, encoding="utf-8")
+        hashes[resolved_path.name] = hashlib.sha256(
+            resolved_payload.encode("utf-8")
+        ).hexdigest()
         (destination / "control_config_hashes.json").write_text(
             json.dumps(hashes, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
-
-    def task_path(self, task_name):
-        """Resolve the managed task document used to execute the run."""
-
-        if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", str(task_name)) is None:
-            raise ValueError("invalid managed task name")
-        filename = f"{task_name}.json"
-        return Path(str(self.get_parameter("task_config_dir").value)) / filename
 
     def publish_run_dir(self):
         if self.run_dir is None:
@@ -368,6 +365,8 @@ class RunLogger(Node):
                 "input_ready": bool(msg.input_ready),
                 "missing_inputs": list(msg.missing_inputs),
                 "latency_ms": float(msg.inference_latency_ms),
+                "tick_interval_ms": float(msg.tick_interval_ms),
+                "deadline_miss_count": int(msg.deadline_miss_count),
             },
         )
 

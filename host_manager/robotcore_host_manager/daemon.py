@@ -9,9 +9,7 @@ from __future__ import annotations
 import argparse
 import grp
 import json
-import math
 import os
-import re
 import socketserver
 import stat
 import subprocess
@@ -34,20 +32,6 @@ ALLOWED_ACTIONS = {
     "apriltag-map",
     "apriltag-upsert",
     "apriltag-delete",
-    "pid-config",
-    "pid-save",
-}
-
-PID_VECTOR_FIELDS = {
-    "outer_position_kp": 3,
-    "outer_orientation_kp": 3,
-    "max_linear_velocity_mps": 3,
-    "max_angular_velocity_rps": 3,
-    "inner_kp": 6,
-    "inner_ki": 6,
-    "inner_kd": 6,
-    "integral_limit": 6,
-    "wrench_limit": 6,
 }
 
 
@@ -325,74 +309,6 @@ class HostManager:
             "tags": self._tag_list(document),
         }
 
-    def _control_config(self) -> dict[str, Path]:
-        config = self.config["control_config"]
-        return {
-            "pid_active": Path(config["pid_active_path"]),
-            "pid_profiles": Path(config["pid_profiles_dir"]),
-        }
-
-    @staticmethod
-    def _config_name(value: Any) -> str:
-        name = str(value)
-        if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", name) is None:
-            raise ValueError("configuration name must use lowercase letters, numbers, _ or -")
-        return name
-
-    @staticmethod
-    def _write_json(path: Path, document: dict[str, Any]) -> None:
-        path.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
-        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        with temporary.open("w", encoding="utf-8") as handle:
-            json.dump(document, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(temporary, 0o640)
-        os.replace(temporary, path)
-
-    @staticmethod
-    def _pid_document(raw: Any) -> dict[str, Any]:
-        if not isinstance(raw, dict):
-            raise ValueError("PID configuration must be an object")
-        document: dict[str, Any] = {
-            "schema_version": 1,
-            "profile_name": HostManager._config_name(raw["profile_name"]),
-            "configured": bool(raw["configured"]),
-        }
-        for field, length in PID_VECTOR_FIELDS.items():
-            values = [float(value) for value in raw[field]]
-            if len(values) != length or not all(math.isfinite(value) and value >= 0.0 for value in values):
-                raise ValueError(f"{field} must contain {length} finite non-negative numbers")
-            document[field] = values
-        cutoff = float(raw["derivative_cutoff_hz"])
-        if not math.isfinite(cutoff) or cutoff < 0.0:
-            raise ValueError("derivative_cutoff_hz must be finite and non-negative")
-        document["derivative_cutoff_hz"] = cutoff
-        return document
-
-    def pid_config(self) -> dict[str, Any]:
-        path = self._control_config()["pid_active"]
-        return {
-            "accepted": True,
-            "path": str(path),
-            "config": json.loads(path.read_text(encoding="utf-8")),
-        }
-
-    def save_pid(self, raw: Any) -> dict[str, Any]:
-        paths = self._control_config()
-        document = self._pid_document(raw)
-        profile_path = paths["pid_profiles"] / f"{document['profile_name']}.json"
-        self._write_json(profile_path, document)
-        self._write_json(paths["pid_active"], document)
-        return {
-            "accepted": True,
-            "message": f"saved PID profile {document['profile_name']}; it will load on the next PID Arm",
-            "path": str(paths["pid_active"]),
-            "profile_path": str(profile_path),
-            "config": document,
-        }
-
     def handle(self, request: dict[str, Any]) -> dict[str, Any]:
         action = str(request.get("action", ""))
         if action not in ALLOWED_ACTIONS:
@@ -411,10 +327,6 @@ class HostManager:
             return self.upsert_apriltag(request.get("tag"), request.get("replace_tag_id"))
         if action == "apriltag-delete":
             return self.delete_apriltag(request.get("tag_id"))
-        if action == "pid-config":
-            return self.pid_config()
-        if action == "pid-save":
-            return self.save_pid(request["config"])
         role = str(request.get("service", ""))
         if action == "logs":
             return self.logs(role)

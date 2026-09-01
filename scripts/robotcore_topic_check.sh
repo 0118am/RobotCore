@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Verify the minimum Phase 1/2 topic surface after a launch file is running.
+# Verify the minimum production topic surface after a launch file is running.
 set -euo pipefail
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 front_camera_topic="${ROBOTCORE_FRONT_CAMERA_TOPIC:-/zedx/zed_node/rgb/color/rect/image}"
 imu_topic="${ROBOTCORE_IMU_TOPIC:-/sensors/external_imu}"
 
@@ -64,5 +63,3 @@ if b"--frame" not in payload or b"Content-Type: image/" not in payload:
 if b"\xff\xd8" not in payload and b"\x89PNG\r\n\x1a\n" not in payload:
     raise SystemExit(f"camera stream frame did not contain JPEG or PNG bytes: {url}")
 PY
-
-python3 "${script_dir}/robotcore_ui_state_check.py" --url "${web_url}/api/state"

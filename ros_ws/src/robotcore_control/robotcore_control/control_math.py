@@ -682,18 +682,6 @@ def attitude_with_heading(
     )
 
 
-def quaternion_to_rotation_matrix(quaternion: Iterable[float]) -> np.ndarray:
-    w, x, y, z = normalize_quaternion(quaternion)
-    return np.array(
-        [
-            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
-            [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * w), 2.0 * (y * z - x * w)],
-            [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
-        ],
-        dtype=np.float64,
-    )
-
-
 @dataclass(frozen=True)
 class PidGains:
     kp: float

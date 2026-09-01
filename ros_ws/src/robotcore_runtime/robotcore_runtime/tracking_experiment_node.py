@@ -2,12 +2,8 @@
 
 from __future__ import annotations
 
-import json
-import os
-import re
-from pathlib import Path
-
 import rclpy
+from ament_index_python.packages import get_package_share_directory
 from rclpy.action import ActionServer, CancelResponse
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.node import Node
@@ -23,7 +19,14 @@ from robotcore_interfaces.msg import (
     PolicyStatus,
     TrajectoryTarget,
 )
-from robotcore_interfaces.srv import SetControlAuthority, StartRun, StopRun
+from robotcore_interfaces.srv import (
+    ListTrackingTasks,
+    SetControlAuthority,
+    StartRun,
+    StopRun,
+)
+
+from .task_catalog import TaskCatalog
 
 
 class TrackingExperimentNode(Node):
@@ -51,29 +54,18 @@ class TrackingExperimentNode(Node):
         "station_lateral_input_gain_mps": Parameter.Type.DOUBLE,
         "station_yaw_input_gain_rps": Parameter.Type.DOUBLE,
     }
-    SCENARIO_PARAMETER_DEFAULTS = {
-        # Managed motion tasks are relative unless a task explicitly selects
-        # an absolute map-frame target, as pose_hold does.
-        "relative_to_initial_pose": True,
-        # Keep altitude_hold deterministic even while an older managed task
-        # document without center_z remains installed on the edge computer.
-        "center_z": 0.9,
-    }
-
     def __init__(self):
         super().__init__("tracking_experiment")
+        default_catalog = (
+            get_package_share_directory("robotcore_runtime")
+            + "/config/tracking_tasks.yaml"
+        )
         self.declare_parameter(
-            "task_config_dir",
-            str(
-                Path(
-                    os.environ.get(
-                        "CONTROL_INTERFACE_WORKSPACE", "/home/nvidia/ControlInterface"
-                    )
-                )
-                / "control_interface"
-                / "config"
-                / "tasks"
-            ),
+            "task_catalog_path",
+            default_catalog,
+        )
+        self.task_catalog = TaskCatalog(
+            str(self.get_parameter("task_catalog_path").value)
         )
         self.declare_parameter("trajectory_node_name", "/trajectory_command")
         self.authority = None
@@ -93,27 +85,27 @@ class TrackingExperimentNode(Node):
             ControlAuthorityStatus,
             "/control/authority/status",
             self.on_authority,
-            10,
+            1,
         )
         self.create_subscription(
             TrajectoryTarget,
             "/runtime/trajectory_target",
             self.on_trajectory_target,
-            10,
+            1,
             callback_group=self.wait_callback_group,
         )
         self.create_subscription(
             PidStatus,
             "/control/pid/status",
             self.on_pid_status,
-            10,
+            1,
             callback_group=self.wait_callback_group,
         )
         self.create_subscription(
             PolicyStatus,
             "/policy/body/status",
             self.on_policy_status,
-            10,
+            1,
             callback_group=self.wait_callback_group,
         )
         self.authority_client = self.create_client(
@@ -139,60 +131,19 @@ class TrackingExperimentNode(Node):
             self.execute,
             cancel_callback=lambda _goal: CancelResponse.ACCEPT,
         )
+        self.create_service(
+            ListTrackingTasks,
+            "/runtime/tracking_tasks",
+            self.on_list_tasks,
+        )
 
-    def task_path(self, task_name):
-        if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", str(task_name)) is None:
-            raise ValueError("invalid managed task name")
-        filename = f"{task_name}.json"
-        return Path(str(self.get_parameter("task_config_dir").value)) / filename
-
-    def load_task(self, task_name):
-        task = json.loads(self.task_path(task_name).read_text(encoding="utf-8"))
-        if (
-            not isinstance(task, dict)
-            or task.get("schema_version") != 1
-            or task.get("kind") != "tracking_task"
-            or str(task.get("name", "")) != task_name
-            or not isinstance(task.get("trajectory"), dict)
-        ):
-            raise ValueError("invalid managed tracking task document")
-        return task
-
-    @staticmethod
-    def resolve_control_mode(task, requested_mode):
-        """Resolve a fixed task mode or validate an explicit compatible mode."""
-
-        requested_mode = str(requested_mode).lower()
-        fixed_mode = str(task.get("mode", "")).lower()
-        compatible_modes = {
-            str(mode).lower() for mode in task.get("compatible_modes", [])
-        }
-        if not requested_mode:
-            requested_mode = fixed_mode
-        if requested_mode not in {
-            "altitude_hold",
-            "station_hold",
-            "station_hold_fast",
-            "rl_policy",
-        }:
-            return "", "a supported control mode must be selected"
-        if fixed_mode and requested_mode != fixed_mode:
-            return "", f"task requires control mode {fixed_mode}"
-        if compatible_modes and requested_mode not in compatible_modes:
-            allowed = ", ".join(sorted(compatible_modes))
-            return "", f"task control mode must be one of: {allowed}"
-        if not fixed_mode and not compatible_modes:
-            return "", "task does not declare a compatible control mode"
-        return requested_mode, ""
-
-    @staticmethod
-    def resolve_controller(task, control_mode):
-        """Resolve the actuator controller from one explicit task declaration."""
-
-        configured = str(task.get("controller", "")).lower()
-        if configured == "selected":
-            return "rl" if str(control_mode).lower() == "rl_policy" else "pid"
-        return configured if configured in {"pid", "rl"} else ""
+    def on_list_tasks(self, _request, response):
+        summaries = self.task_catalog.summaries()
+        response.success = True
+        response.task_ids = [item["id"] for item in summaries]
+        response.labels = [item["label"] for item in summaries]
+        response.message = f"{len(summaries)} validated tracking tasks"
+        return response
 
     def on_authority(self, message):
         self.authority = message
@@ -211,10 +162,10 @@ class TrackingExperimentNode(Node):
 
     async def execute(self, goal_handle):
         request = goal_handle.request
-        task_name = str(request.scenario)
+        task_name = str(request.task_id)
         try:
-            task = self.load_task(task_name)
-        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            task = self.task_catalog.task(task_name)
+        except (KeyError, TypeError, ValueError) as exc:
             return self.finish(
                 goal_handle,
                 False,
@@ -222,17 +173,8 @@ class TrackingExperimentNode(Node):
             )
         scenario = dict(task["trajectory"])
         run_until_stopped = bool(task.get("run_until_stopped", False))
-        control_mode, control_mode_error = self.resolve_control_mode(
-            task, request.control_mode
-        )
-        if control_mode_error:
-            return self.finish(goal_handle, False, control_mode_error)
-        controller = self.resolve_controller(task, control_mode)
-        if str(request.controller).lower() != controller or controller not in {
-            "pid",
-            "rl",
-        }:
-            return self.finish(goal_handle, False, "task controller is not approved")
+        control_mode = str(task["control_mode"])
+        controller = str(task["controller"])
         if self.authority is None or self.authority.fault_latched:
             return self.finish(
                 goal_handle,
@@ -266,9 +208,7 @@ class TrackingExperimentNode(Node):
                 f"{controller.upper()} disarmed selection was not confirmed",
             )
 
-        duration = float(request.duration_s)
-        if duration <= 0.0:
-            duration = float(task["duration_s"])
+        duration = float(task["duration_s"])
         if not self.run_start_client.wait_for_service(timeout_sec=2.0):
             await self.disarm(controller)
             return self.finish(goal_handle, False, "run recorder service unavailable")
@@ -294,8 +234,7 @@ class TrackingExperimentNode(Node):
                 controller,
             )
 
-        scenario_parameters = dict(self.SCENARIO_PARAMETER_DEFAULTS)
-        scenario_parameters.update(scenario)
+        scenario_parameters = dict(scenario)
         scenario_parameters["control_mode"] = control_mode
         parameters = []
         for name, parameter_type in self.ALLOWED_PARAMETER_TYPES.items():

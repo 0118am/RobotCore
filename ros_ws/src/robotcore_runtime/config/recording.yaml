@@ -1,0 +1,30 @@
+schema_version: 1
+event_log:
+  flush_interval_s: 0.25
+  stream_rates_hz:
+    thruster_cmd: 20.0
+    trajectory_target: 20.0
+    tracking_status: 20.0
+    control_authority_status: 10.0
+    pid_status: 10.0
+topics:
+  - /robot/body_state
+  - /runtime/trajectory_target
+  - /runtime/operator_target_input
+  - /runtime/tracking_status
+  - /control/manual/thruster_cmd
+  - /control/pid/thruster_cmd
+  - /policy/body/action
+  - /policy/body/status
+  - /control/pid/status
+  - /control/authority/status
+  - /control/thruster_cmd
+  - /hardware/board_status
+  - /hardware/board_runtime
+  - /zedx/zed_node/odom
+  - /localization/apriltag_pose
+  - /localization/status
+  - /safety/events
+  - /sensors/external_imu
+  - /tf
+  - /tf_static

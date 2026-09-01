@@ -69,7 +69,6 @@ source /opt/ros/humble/setup.bash
 source /home/nvidia/ros2_ws/install/setup.bash
 source install/setup.bash
 ros2 launch robotcore_bringup robotcore_edge_system.launch.py \
-  enable_web_ui:=false \
   serial_port:=/dev/robotcore/aboard \
   apriltag_tag_map_file:=/etc/robotcore/apriltag_map.json
 ```
